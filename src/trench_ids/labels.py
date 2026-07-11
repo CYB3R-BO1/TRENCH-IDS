@@ -9,19 +9,29 @@ Task assignment is **similarity-driven**, not attack-family-driven (superseding
 the original Plan v3 family grouping, e.g. DoS+DDoS in one task). Rationale: if
 two similar attacks are trained jointly in the same task, the model learns both
 directly from labels and there is nothing left to test transferability on — the
-professor's objection to the original design. Per the professor's spec: (1)
-sample ~5,000 rows per attack class (14-class candidate pool, every canonical
-class with >=10,000 combined samples across the four datasets — see
+professor's objection to the original design.
+
+Method (``trench_ids.similarity`` / ``trench_ids.task_design``): (1) sample
+~5,000 rows per attack class (10-class candidate pool, every canonical class
+with >=100,000 combined samples across the four datasets — see
 ``docs/attack-class-counts.md``), (2) compute each class's mean feature vector
 over the 37 flow-statistic features, then standardize those per-class means
-(z-score across the 14 class means, not the underlying samples), (3) cosine
-similarity between the standardized means (``trench_ids.similarity``). Task
-pairing (``trench_ids.task_design``) then pairs the two classes that are *most
-dissimilar*, subject to never co-locating any pair above a similarity
-threshold. The resulting pairing was verified stable across thresholds 0.3-0.7.
+(z-score across the 10 class means, not the underlying samples), (3) cosine
+similarity between the standardized means.
 
-If the candidate pool or pairing changes, change it here too — nothing else
-should hardcode label strings or task numbers.
+Task assignment is **isolate-and-bundle**, not minimum-total-similarity
+pairing: classes that are all pairwise above a similarity threshold (a
+"conflict clique") cannot avoid a conflicting co-location no matter how
+they're split, so every member of the largest such clique gets its own
+singleton task; the remaining classes (each with at least one compatible
+partner) are paired off via minimum-weight matching, still respecting the
+threshold. For this 10-class pool the clique is {DDoS, Reconnaissance} (plus
+overlapping near-clique members at nearby thresholds), yielding **6 tasks**,
+not 7 — verified stable across similarity thresholds 0.50-0.52; forcing a 7th
+task would mean inventing a split with no similarity basis.
+
+If the candidate pool or task assignment changes, change it here too —
+nothing else should hardcode label strings or task numbers.
 """
 
 from __future__ import annotations
@@ -78,26 +88,40 @@ RAW_TO_CANONICAL: dict[str, str] = {
 # filtered out during preprocessing and the class is assigned to no task.
 #   Worms: only 164 samples total (NB15 only) — too few for a reliable held-out
 #   test split.
-#   MITM, Ransomware, Web Attacks, Theft, Analysis, Shellcode: below the
-#   10,000-combined-sample threshold used to build the similarity-analysis
-#   candidate pool (docs/attack-class-counts.md, "Selected candidate pool: 14
-#   classes at a 10K-sample threshold") — not enough signal to trust a
-#   500-sample centroid, so excluded from task assignment rather than forced in.
+#   MITM, Ransomware, Web Attacks, Theft, Analysis, Shellcode, Exploits,
+#   Fuzzers, Backdoor, Generic: below the 100,000-combined-sample threshold
+#   used to build the similarity-analysis candidate pool
+#   (docs/attack-class-counts.md, "Selected candidate pool: 10 classes at a
+#   100K-sample threshold") — chosen over the looser 14-class/10K pool for
+#   simpler task construction, per professor's guidance.
 EXCLUDED_CLASSES: frozenset[str] = frozenset(
-    {"Worms", "MITM", "Ransomware", "Web Attacks", "Theft", "Analysis", "Shellcode"}
+    {
+        "Worms",
+        "MITM",
+        "Ransomware",
+        "Web Attacks",
+        "Theft",
+        "Analysis",
+        "Shellcode",
+        "Exploits",
+        "Fuzzers",
+        "Backdoor",
+        "Generic",
+    }
 )
 
-# Canonical ATTACK class -> continual-learning task id (T1..T7). Similarity-
-# driven pairing (docs/attack-class-counts.md, trench_ids.task_design): each
-# task pairs the two classes that are most dissimilar by cosine similarity of
-# their per-class mean feature vectors (standardized across the 14-class
-# means, over the 37 flow-statistic features -- see trench_ids.similarity).
-# This is the global minimum-total-similarity perfect pairing and was verified
-# stable across similarity thresholds 0.3-0.7 — no pair here exceeds -0.0
-# similarity, let alone the professor's "too similar" concern that motivated
-# this redesign (the original Plan v3 grouped DoS+DDoS, Reconnaissance+
-# Scanning, and BruteForce+Injection together, all of which scored well above
-# 0 similarity and are deliberately split apart below).
+# Canonical ATTACK class -> continual-learning task id (T1..T6). Isolate-and-
+# bundle task assignment (docs/attack-class-counts.md, trench_ids.task_design):
+# classes forming a mutual "conflict clique" (every pair above the similarity
+# threshold) cannot avoid a conflict no matter how they're split, so each gets
+# its own singleton task (DDoS, Reconnaissance); the remaining classes are
+# paired via minimum-weight matching, still respecting the threshold. Verified
+# stable across similarity thresholds 0.50-0.52 — this yields 6 tasks, not 7;
+# the 10-class pool's clique structure doesn't support a 7th task without
+# inventing a split with no similarity basis. This deliberately splits apart
+# the pairs the professor flagged as too similar under the original family
+# grouping (DoS/DDoS, Reconnaissance/Scanning, BruteForce/Injection all scored
+# well above 0 similarity and never co-occur in a task here).
 # Benign is deliberately NOT assigned a task: it is the shared negative/background
 # class injected fresh into EVERY task, not a task of its own. A benign-only task
 # is degenerate for a classifier (single class = no decision boundary, nothing to
@@ -105,31 +129,26 @@ EXCLUDED_CLASSES: frozenset[str] = frozenset(
 # classes (see EXCLUDED_CLASSES) also have no task.
 CANONICAL_TO_TASK: dict[str, int] = {
     "DDoS": 1,
-    "XSS": 1,
-    "DoS": 2,
-    "Bot": 2,
-    "Scanning": 3,
-    "BruteForce": 3,
-    "Reconnaissance": 4,
-    "Exploits": 4,
-    "Password": 5,
-    "Generic": 5,
-    "Injection": 6,
-    "Backdoor": 6,
-    "Infiltration": 7,
-    "Fuzzers": 7,
+    "Reconnaissance": 2,
+    "DoS": 3,
+    "Injection": 3,
+    "Scanning": 4,
+    "BruteForce": 4,
+    "XSS": 5,
+    "Bot": 5,
+    "Password": 6,
+    "Infiltration": 6,
 }
 
-# Human-readable task descriptions — the class pair itself, since these tasks
-# are similarity-driven pairings rather than attack-family themes.
+# Human-readable task descriptions — the class(es) itself, since these tasks
+# are similarity-driven groupings rather than attack-family themes.
 TASK_THEMES: dict[int, str] = {
-    1: "DDoS + XSS",
-    2: "DoS + Bot",
-    3: "Scanning + BruteForce",
-    4: "Reconnaissance + Exploits",
-    5: "Password + Generic",
-    6: "Injection + Backdoor",
-    7: "Infiltration + Fuzzers",
+    1: "DDoS",
+    2: "Reconnaissance",
+    3: "DoS + Injection",
+    4: "Scanning + BruteForce",
+    5: "XSS + Bot",
+    6: "Password + Infiltration",
 }
 
 # Datasets that contribute each task's *attack* classes, and therefore the
@@ -137,12 +156,11 @@ TASK_THEMES: dict[int, str] = {
 # per-class dataset provenance in docs/datasets.md §4.
 TASK_DATASETS: dict[int, tuple[str, ...]] = {
     1: ("ToN", "BoT", "CSE"),
-    2: ("UNSW", "ToN", "BoT", "CSE"),
-    3: ("ToN", "CSE"),
-    4: ("UNSW", "BoT"),
-    5: ("ToN", "UNSW"),
-    6: ("ToN", "CSE", "UNSW"),
-    7: ("CSE", "UNSW"),
+    2: ("UNSW", "BoT"),
+    3: ("UNSW", "ToN", "BoT", "CSE"),
+    4: ("ToN", "CSE"),
+    5: ("ToN", "CSE"),
+    6: ("ToN", "CSE"),
 }
 
 NUM_TASKS = len(TASK_THEMES)

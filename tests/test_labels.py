@@ -76,11 +76,23 @@ def test_every_attack_class_has_a_task() -> None:
 
 
 def test_excluded_classes_have_no_task() -> None:
-    # Below the 10K-sample candidate-pool threshold (docs/attack-class-counts.md)
+    # Below the 100K-sample candidate-pool threshold (docs/attack-class-counts.md)
     # or (Worms) too few samples for a held-out split — still map canonically
     # (RAW_TO_CANONICAL never fails) but are assigned no task.
     assert EXCLUDED_CLASSES == frozenset(
-        {"Worms", "MITM", "Ransomware", "Web Attacks", "Theft", "Analysis", "Shellcode"}
+        {
+            "Worms",
+            "MITM",
+            "Ransomware",
+            "Web Attacks",
+            "Theft",
+            "Analysis",
+            "Shellcode",
+            "Exploits",
+            "Fuzzers",
+            "Backdoor",
+            "Generic",
+        }
     )
     assert canonical_label("Worms") == "Worms"
     for c in EXCLUDED_CLASSES:
@@ -95,10 +107,10 @@ def test_benign_has_no_task() -> None:
         task_of(BENIGN)
 
 
-def test_tasks_are_1_indexed_1_to_7() -> None:
-    assert set(CANONICAL_TO_TASK.values()) == set(range(1, 8))
-    assert set(TASK_THEMES) == set(range(1, 8))
-    assert len(TASK_THEMES) == 7
+def test_tasks_are_1_indexed_1_to_6() -> None:
+    assert set(CANONICAL_TO_TASK.values()) == set(range(1, 7))
+    assert set(TASK_THEMES) == set(range(1, 7))
+    assert len(TASK_THEMES) == 6
 
 
 def test_every_task_has_theme_and_datasets() -> None:
@@ -110,18 +122,18 @@ def test_every_task_has_theme_and_datasets() -> None:
 def test_attack_classes_for_task_excludes_benign() -> None:
     for task in TASK_THEMES:
         assert BENIGN not in labels.attack_classes_for_task(task)
-    # Similarity-driven pairing (docs/attack-class-counts.md, task_design.py):
-    # each task is the two classes found most dissimilar by cosine similarity
-    # of standardized per-class mean feature vectors, which deliberately
-    # splits up the classes the professor flagged as too-similar-to-co-locate
-    # (DoS/DDoS, Reconnaissance/Scanning, BruteForce/Injection).
-    assert set(labels.attack_classes_for_task(1)) == {"DDoS", "XSS"}
-    assert set(labels.attack_classes_for_task(2)) == {"DoS", "Bot"}
-    assert set(labels.attack_classes_for_task(3)) == {"Scanning", "BruteForce"}
-    assert set(labels.attack_classes_for_task(4)) == {"Reconnaissance", "Exploits"}
-    assert set(labels.attack_classes_for_task(5)) == {"Password", "Generic"}
-    assert set(labels.attack_classes_for_task(6)) == {"Injection", "Backdoor"}
-    assert set(labels.attack_classes_for_task(7)) == {"Infiltration", "Fuzzers"}
+    # Isolate-and-bundle assignment (docs/attack-class-counts.md, task_design.py):
+    # classes forming a mutual "conflict clique" (DDoS, Reconnaissance) each get
+    # a singleton task; the rest are paired via minimum-weight matching, which
+    # deliberately splits up the classes the professor flagged as
+    # too-similar-to-co-locate (DoS/DDoS, Reconnaissance/Scanning,
+    # BruteForce/Injection).
+    assert set(labels.attack_classes_for_task(1)) == {"DDoS"}
+    assert set(labels.attack_classes_for_task(2)) == {"Reconnaissance"}
+    assert set(labels.attack_classes_for_task(3)) == {"DoS", "Injection"}
+    assert set(labels.attack_classes_for_task(4)) == {"Scanning", "BruteForce"}
+    assert set(labels.attack_classes_for_task(5)) == {"XSS", "Bot"}
+    assert set(labels.attack_classes_for_task(6)) == {"Password", "Infiltration"}
     # Excluded classes appear in no task.
     for c in EXCLUDED_CLASSES:
         assert all(c not in labels.attack_classes_for_task(t) for t in TASK_THEMES)

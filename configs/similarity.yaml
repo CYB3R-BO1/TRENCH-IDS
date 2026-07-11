@@ -15,8 +15,10 @@ datasets:
   NF-BoT-IoT-v2: BoT
   NF-CSE-CIC-IDS2018-v2: CSE
 
-# Candidate pool: the 14 classes with combined count >= 10,000 across all four
-# datasets (docs/attack-class-counts.md "Selected candidate pool" section).
+# Candidate pool: the 10 classes with combined count >= 100,000 across all four
+# datasets (docs/attack-class-counts.md "Selected candidate pool" section --
+# stricter 100K/10-class cutoff, chosen over the looser 14-class/10K pool for
+# simpler task construction; Exploits/Fuzzers/Backdoor/Generic dropped).
 classes:
   - DDoS
   - DoS
@@ -28,10 +30,6 @@ classes:
   - Bot
   - BruteForce
   - Infiltration
-  - Exploits
-  - Fuzzers
-  - Backdoor
-  - Generic
 
 # The 37 flow-statistic features (excludes the 4 identifier fields + PROTOCOL +
 # L7_PROTO, which seed graph node identity in Step 2 rather than the Flow
