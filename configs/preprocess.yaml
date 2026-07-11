@@ -1,0 +1,43 @@
+# Step 1 — Raw traffic preprocessing config.
+# See docs/datasets.md §5 for the full pipeline description.
+# All paths are relative to the repository root.
+
+seed: 42
+
+paths:
+  raw_dir: dataset            # contains NF-*-v2/data/NF-*-v2.csv
+  out_dir: data/processed     # task_{t}.parquet + manifest.json written here
+
+# Dataset directory name -> short source code stamped onto every row.
+datasets:
+  NF-UNSW-NB15-v2: UNSW
+  NF-ToN-IoT-v2: ToN
+  NF-BoT-IoT-v2: BoT
+  NF-CSE-CIC-IDS2018-v2: CSE
+
+sampling:
+  # Ceiling per canonical ATTACK class, pooled across datasets. Any class with
+  # fewer flows than this is kept in full (this is the "per-class floor" — rare
+  # classes like Worms=164 are never dropped). Lower this to shrink the graphs
+  # built in Step 2; it only trims abundant classes (DoS/DDoS/Scanning/...).
+  attack_per_class_cap: 8000
+
+  # Benign pool retained per dataset during the streaming pass. Tasks draw their
+  # benign quota from these pools (fresh per task, from the task's own datasets).
+  benign_per_dataset_cap: 60000
+
+  # Benign flows added to each task (split across that task's contributing datasets).
+  benign_per_task: 8000
+
+  # CSV read chunk size (rows). Files are up to 6 GB — never read whole.
+  chunk_size: 500000
+
+# Per-task stratified split (by canonical class). Must sum to 1.0.
+split:
+  train: 0.70
+  val: 0.15
+  test: 0.15
+
+# Drop exact-duplicate flow records (identical across all original columns).
+# Applied to the sampled per-task frame (see docs/datasets.md §5 step, §6).
+dedup: true

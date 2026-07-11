@@ -1,0 +1,44 @@
+[project]
+name = "trench-ids"
+version = "0.1.0"
+description = "Transferable Representation Learning for Continual Heterogeneous Graph-Based IDS"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+]
+
+# NOTE: PyTorch / PyTorch Geometric (Step 2+: graph construction & models) and
+# Hydra (training-time config composition) are intentionally NOT dependencies yet.
+# Step 1 (raw traffic preprocessing) only needs pandas/pyarrow. Add the GNN stack
+# when graph construction begins.
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+trench-preprocess = "trench_ids.preprocess:main"
+trench-similarity = "trench_ids.similarity:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/trench_ids"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

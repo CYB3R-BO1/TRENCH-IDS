@@ -1,3 +1,14 @@
 docs/
 CLAUDE.md
 dataset/
+
+# Generated preprocessing outputs (task_*.parquet, manifest.json)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/

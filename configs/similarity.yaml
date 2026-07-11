@@ -1,0 +1,77 @@
+# Attack-class similarity analysis config (professor-directed Step 1 redesign input).
+# See docs/attack-class-counts.md for how the 14-class pool below was selected.
+
+seed: 42
+samples_per_class: 5000
+chunk_size: 500000
+
+paths:
+  raw_dir: dataset
+  out_dir: data/similarity   # per-class CSVs + centroids.csv + similarity_matrix.csv
+
+datasets:
+  NF-UNSW-NB15-v2: UNSW
+  NF-ToN-IoT-v2: ToN
+  NF-BoT-IoT-v2: BoT
+  NF-CSE-CIC-IDS2018-v2: CSE
+
+# Candidate pool: the 14 classes with combined count >= 10,000 across all four
+# datasets (docs/attack-class-counts.md "Selected candidate pool" section).
+classes:
+  - DDoS
+  - DoS
+  - Scanning
+  - Reconnaissance
+  - XSS
+  - Password
+  - Injection
+  - Bot
+  - BruteForce
+  - Infiltration
+  - Exploits
+  - Fuzzers
+  - Backdoor
+  - Generic
+
+# The 37 flow-statistic features (excludes the 4 identifier fields + PROTOCOL +
+# L7_PROTO, which seed graph node identity in Step 2 rather than the Flow
+# feature vector -- docs/datasets.md SS2.1). Same feature set Step 2's Flow node
+# will use, so centroid similarity here reflects the signal the model will see.
+features:
+  - IN_BYTES
+  - IN_PKTS
+  - OUT_BYTES
+  - OUT_PKTS
+  - TCP_FLAGS
+  - CLIENT_TCP_FLAGS
+  - SERVER_TCP_FLAGS
+  - FLOW_DURATION_MILLISECONDS
+  - DURATION_IN
+  - DURATION_OUT
+  - MIN_TTL
+  - MAX_TTL
+  - LONGEST_FLOW_PKT
+  - SHORTEST_FLOW_PKT
+  - MIN_IP_PKT_LEN
+  - MAX_IP_PKT_LEN
+  - SRC_TO_DST_SECOND_BYTES
+  - DST_TO_SRC_SECOND_BYTES
+  - RETRANSMITTED_IN_BYTES
+  - RETRANSMITTED_IN_PKTS
+  - RETRANSMITTED_OUT_BYTES
+  - RETRANSMITTED_OUT_PKTS
+  - SRC_TO_DST_AVG_THROUGHPUT
+  - DST_TO_SRC_AVG_THROUGHPUT
+  - NUM_PKTS_UP_TO_128_BYTES
+  - NUM_PKTS_128_TO_256_BYTES
+  - NUM_PKTS_256_TO_512_BYTES
+  - NUM_PKTS_512_TO_1024_BYTES
+  - NUM_PKTS_1024_TO_1514_BYTES
+  - TCP_WIN_MAX_IN
+  - TCP_WIN_MAX_OUT
+  - ICMP_TYPE
+  - ICMP_IPV4_TYPE
+  - DNS_QUERY_ID
+  - DNS_QUERY_TYPE
+  - DNS_TTL_ANSWER
+  - FTP_COMMAND_RET_CODE
