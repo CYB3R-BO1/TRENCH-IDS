@@ -24,11 +24,11 @@ def build_vocab(
     parquet_paths: list[Path], columns: tuple[str, ...] = VOCAB_COLUMNS
 ) -> dict[str, dict[str, int]]:
     """Scan every task Parquet and assign each column's raw values a stable index."""
-    values: dict[str, set[int]] = {c: set() for c in columns}
+    values: dict[str, set] = {c: set() for c in columns}
     for path in parquet_paths:
         frame = pd.read_parquet(path, columns=list(columns))
         for c in columns:
-            values[c].update(int(v) for v in frame[c].unique())
+            values[c].update(frame[c].unique().tolist())
     return {c: {str(v): i for i, v in enumerate(sorted(vs))} for c, vs in values.items()}
 
 

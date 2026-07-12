@@ -21,6 +21,18 @@ def test_build_vocab_assigns_stable_sorted_indices(tmp_path: Path) -> None:
     assert vocab["L7_PROTO"] == {"1": 0, "2": 1, "5": 2}
 
 
+def test_build_vocab_preserves_fractional_l7_proto_values(tmp_path: Path) -> None:
+    p1 = tmp_path / "task_1.parquet"
+    pd.DataFrame({"PROTOCOL": [6, 17], "L7_PROTO": [0.0, 5.119]}).to_parquet(p1)
+
+    vocab = build_vocab([p1])
+
+    # Keys must be the str() of the *native* float value, not a truncated int —
+    # this is what graphs.py's _index_categorical + build_task_graph will look up.
+    assert vocab["L7_PROTO"] == {"0.0": 0, "5.119": 1}
+    assert vocab["PROTOCOL"] == {"6": 0, "17": 1}
+
+
 def test_save_and_load_vocab_roundtrip(tmp_path: Path) -> None:
     vocab = {"PROTOCOL": {"6": 0, "17": 1}, "L7_PROTO": {"1": 0}}
     path = tmp_path / "vocab.json"
