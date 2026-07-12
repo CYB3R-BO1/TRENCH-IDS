@@ -21,8 +21,12 @@ Run:  trench-graphs --config configs/graph.yaml
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
+import torch
+from torch_geometric.data import HeteroData
 
 
 def _index_categorical(values: pd.Series) -> tuple[np.ndarray, list]:
@@ -97,3 +101,98 @@ def _host_host_edges(
     edge_index = agg.index.to_frame(index=False)[["src", "dst"]].to_numpy(dtype=np.int64).T
     edge_attr = agg[["flow_count", "total_bytes", "mean_duration"]].to_numpy(dtype=np.float64)
     return edge_index, edge_attr
+
+
+def build_task_graph(
+    frame: pd.DataFrame, features: list[str], vocab: dict[str, dict[str, int]]
+) -> tuple[HeteroData, dict[str, Any]]:
+    """Build one task's HeteroData graph; also return a JSON-able counts report."""
+    frame = frame.reset_index(drop=True)
+    num_flow = len(frame)
+
+    src_idx, dst_idx, hosts = _host_ids(frame)
+    num_hosts = len(hosts)
+    host_x = _host_features(frame, src_idx, dst_idx, num_hosts)
+
+    protocol_idx, protocol_values = _index_categorical(frame["PROTOCOL"])
+    service_idx, service_values = _index_categorical(frame["L7_PROTO"])
+    port_idx, port_values = _index_categorical(frame["L4_DST_PORT"])
+
+    protocol_vocab_ids = [vocab["PROTOCOL"][str(v)] for v in protocol_values]
+    service_vocab_ids = [vocab["L7_PROTO"][str(v)] for v in service_values]
+
+    label_names = sorted(frame["canonical_label"].unique().tolist())
+    label_lookup = {name: i for i, name in enumerate(label_names)}
+    y = frame["canonical_label"].map(label_lookup).to_numpy(dtype=np.int64)
+
+    hh_edge_index, hh_edge_attr = _host_host_edges(frame, src_idx, dst_idx)
+
+    graph = HeteroData()
+
+    graph["flow"].x = torch.tensor(frame[features].to_numpy(dtype=np.float32))
+    graph["flow"].y = torch.tensor(y)
+    graph["flow"].label_names = label_names
+    for split in ("train", "val", "test"):
+        graph["flow"][f"{split}_mask"] = torch.tensor((frame["split"] == split).to_numpy())
+
+    graph["host"].num_nodes = num_hosts
+    graph["host"].x = torch.tensor(host_x, dtype=torch.float32)
+    graph["host"].identity = hosts
+
+    graph["protocol"].num_nodes = len(protocol_values)
+    graph["protocol"].value = torch.tensor(protocol_values, dtype=torch.int64)
+    graph["protocol"].vocab_id = torch.tensor(protocol_vocab_ids, dtype=torch.int64)
+
+    graph["service"].num_nodes = len(service_values)
+    graph["service"].value = torch.tensor(service_values, dtype=torch.int64)
+    graph["service"].vocab_id = torch.tensor(service_vocab_ids, dtype=torch.int64)
+
+    graph["port"].num_nodes = len(port_values)
+    graph["port"].port_number = torch.tensor(port_values, dtype=torch.int64)
+
+    graph["host", "sends", "flow"].edge_index = torch.tensor(
+        np.stack([src_idx, np.arange(num_flow)]), dtype=torch.int64
+    )
+    graph["flow", "received_by", "host"].edge_index = torch.tensor(
+        np.stack([np.arange(num_flow), dst_idx]), dtype=torch.int64
+    )
+    graph["flow", "uses_port", "port"].edge_index = torch.tensor(
+        np.stack([np.arange(num_flow), port_idx]), dtype=torch.int64
+    )
+    graph["flow", "uses_protocol", "protocol"].edge_index = torch.tensor(
+        np.stack([np.arange(num_flow), protocol_idx]), dtype=torch.int64
+    )
+    graph["flow", "uses_service", "service"].edge_index = torch.tensor(
+        np.stack([np.arange(num_flow), service_idx]), dtype=torch.int64
+    )
+    graph["host", "talks_to", "host"].edge_index = torch.tensor(hh_edge_index, dtype=torch.int64)
+    graph["host", "talks_to", "host"].edge_attr = torch.tensor(hh_edge_attr, dtype=torch.float32)
+
+    host_degree = host_x[:, 0]
+    counts: dict[str, Any] = {
+        "node_counts": {
+            "flow": num_flow,
+            "host": num_hosts,
+            "protocol": len(protocol_values),
+            "service": len(service_values),
+            "port": len(port_values),
+        },
+        "edge_counts": {
+            "host_sends_flow": num_flow,
+            "flow_received_by_host": num_flow,
+            "flow_uses_port": num_flow,
+            "flow_uses_protocol": num_flow,
+            "flow_uses_service": num_flow,
+            "host_talks_to_host": int(hh_edge_index.shape[1]),
+        },
+        "flow_class_counts": {
+            k: int(v) for k, v in frame["canonical_label"].value_counts().items()
+        },
+        "host_degree": {
+            "min": float(host_degree.min()) if num_hosts else 0.0,
+            "mean": float(host_degree.mean()) if num_hosts else 0.0,
+            "median": float(np.median(host_degree)) if num_hosts else 0.0,
+            "max": float(host_degree.max()) if num_hosts else 0.0,
+        },
+    }
+    return graph, counts
