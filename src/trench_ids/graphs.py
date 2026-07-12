@@ -21,12 +21,18 @@ Run:  trench-graphs --config configs/graph.yaml
 
 from __future__ import annotations
 
+import argparse
+import json
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import torch
+import yaml
 from torch_geometric.data import HeteroData
+
+from trench_ids.vocab import build_vocab, save_vocab
 
 
 def _index_categorical(values: pd.Series) -> tuple[np.ndarray, list]:
@@ -196,3 +202,50 @@ def build_task_graph(
         },
     }
     return graph, counts
+
+
+def run(config_path: str | Path) -> dict[str, Any]:
+    """Build every task's graph, save it, and write a combined counts report."""
+    cfg = yaml.safe_load(Path(config_path).read_text())
+    processed_dir = Path(cfg["paths"]["processed_dir"])
+    out_dir = Path(cfg["paths"]["out_dir"])
+    vocab_path = Path(cfg["paths"]["vocab_path"])
+    features = cfg["features"]
+
+    task_paths = sorted(processed_dir.glob("task_*.parquet"))
+    if not task_paths:
+        raise FileNotFoundError(f"No task_*.parquet files found under {processed_dir}")
+
+    vocab = build_vocab(task_paths)
+    save_vocab(vocab, vocab_path)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report: dict[str, Any] = {}
+    for path in task_paths:
+        task_id = int(path.stem.split("_")[1])
+        frame = pd.read_parquet(path)
+        graph, counts = build_task_graph(frame, features, vocab)
+        torch.save(graph, out_dir / f"task_{task_id}.pt")
+        report[str(task_id)] = counts
+        print(
+            f"[graphs] task {task_id}: nodes={counts['node_counts']} "
+            f"host_talks_to_host_edges={counts['edge_counts']['host_talks_to_host']:,} "
+            f"host_degree_max={counts['host_degree']['max']:.0f} "
+            f"classes={counts['flow_class_counts']}",
+            flush=True,
+        )
+
+    (out_dir / "graph_counts.json").write_text(json.dumps(report, indent=2))
+    print(f"[done] wrote {len(report)} graphs + graph_counts.json to {out_dir}")
+    return report
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="TRENCH-IDS Step 2 graph construction.")
+    parser.add_argument("--config", default="configs/graph.yaml")
+    args = parser.parse_args()
+    run(args.config)
+
+
+if __name__ == "__main__":
+    main()
