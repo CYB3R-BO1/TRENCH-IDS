@@ -9,12 +9,12 @@ dependencies = [
     "pyarrow>=14.0",
     "numpy>=1.24",
     "pyyaml>=6.0",
+    "torch>=2.1",
+    "torch_geometric>=2.5",
 ]
 
-# NOTE: PyTorch / PyTorch Geometric (Step 2+: graph construction & models) and
-# Hydra (training-time config composition) are intentionally NOT dependencies yet.
-# Step 1 (raw traffic preprocessing) only needs pandas/pyarrow. Add the GNN stack
-# when graph construction begins.
+# NOTE: Hydra (training-time config composition) is intentionally not a
+# dependency yet — add it when the training loop (Step 4+) begins.
 
 [project.optional-dependencies]
 dev = [
@@ -25,6 +25,7 @@ dev = [
 [project.scripts]
 trench-preprocess = "trench_ids.preprocess:main"
 trench-similarity = "trench_ids.similarity:main"
+trench-graphs = "trench_ids.graphs:main"
 
 [build-system]
 requires = ["hatchling"]
