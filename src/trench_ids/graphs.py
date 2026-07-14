@@ -6,9 +6,10 @@ per task from that task's processed Parquet
 docs/dataset-plan.md §3:
 
   Node types: Host, Flow, Protocol, Port, Service.
-  Relations : host->flow, flow->host, flow->port, flow->protocol,
-              flow->service, host->host (aggregated within the mini-graph
-              only).
+  Relations : host->flow (originates), flow->host (terminates_at),
+              flow->port (targets_port), flow->protocol (uses_protocol),
+              flow->service (uses_service), host->host (communicates_with,
+              aggregated within the mini-graph only).
 
 Each task's rows are split by train/val/test (the ``split`` column from
 Step 1), then each split's rows are shuffled (seeded by ``seed``) and
@@ -177,13 +178,13 @@ def build_task_graph(
     graph["port"].num_nodes = len(port_values)
     graph["port"].port_number = torch.tensor(port_values, dtype=torch.int64)
 
-    graph["host", "sends", "flow"].edge_index = torch.tensor(
+    graph["host", "originates", "flow"].edge_index = torch.tensor(
         np.stack([src_idx, np.arange(num_flow)]), dtype=torch.int64
     )
-    graph["flow", "received_by", "host"].edge_index = torch.tensor(
+    graph["flow", "terminates_at", "host"].edge_index = torch.tensor(
         np.stack([np.arange(num_flow), dst_idx]), dtype=torch.int64
     )
-    graph["flow", "uses_port", "port"].edge_index = torch.tensor(
+    graph["flow", "targets_port", "port"].edge_index = torch.tensor(
         np.stack([np.arange(num_flow), port_idx]), dtype=torch.int64
     )
     graph["flow", "uses_protocol", "protocol"].edge_index = torch.tensor(
@@ -192,8 +193,12 @@ def build_task_graph(
     graph["flow", "uses_service", "service"].edge_index = torch.tensor(
         np.stack([np.arange(num_flow), service_idx]), dtype=torch.int64
     )
-    graph["host", "talks_to", "host"].edge_index = torch.tensor(hh_edge_index, dtype=torch.int64)
-    graph["host", "talks_to", "host"].edge_attr = torch.tensor(hh_edge_attr, dtype=torch.float32)
+    graph["host", "communicates_with", "host"].edge_index = torch.tensor(
+        hh_edge_index, dtype=torch.int64
+    )
+    graph["host", "communicates_with", "host"].edge_attr = torch.tensor(
+        hh_edge_attr, dtype=torch.float32
+    )
 
     host_degree = host_x[:, 0]
     counts: dict[str, Any] = {
@@ -205,12 +210,12 @@ def build_task_graph(
             "port": len(port_values),
         },
         "edge_counts": {
-            "host_sends_flow": num_flow,
-            "flow_received_by_host": num_flow,
-            "flow_uses_port": num_flow,
+            "host_originates_flow": num_flow,
+            "flow_terminates_at_host": num_flow,
+            "flow_targets_port": num_flow,
             "flow_uses_protocol": num_flow,
             "flow_uses_service": num_flow,
-            "host_talks_to_host": int(hh_edge_index.shape[1]),
+            "host_communicates_with_host": int(hh_edge_index.shape[1]),
         },
         "flow_class_counts": {
             k: int(v) for k, v in frame["canonical_label"].value_counts().items()

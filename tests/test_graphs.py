@@ -127,17 +127,17 @@ def test_build_task_graph_full_structure() -> None:
     assert graph["service"].vocab_id.tolist() == [0, 1]
 
     # Edge relations: 5 relations track 1:1 with flow rows, host-host collapses.
-    assert graph["host", "sends", "flow"].edge_index.shape == (2, 4)
-    assert graph["flow", "received_by", "host"].edge_index.shape == (2, 4)
-    assert graph["flow", "uses_port", "port"].edge_index.shape == (2, 4)
+    assert graph["host", "originates", "flow"].edge_index.shape == (2, 4)
+    assert graph["flow", "terminates_at", "host"].edge_index.shape == (2, 4)
+    assert graph["flow", "targets_port", "port"].edge_index.shape == (2, 4)
     assert graph["flow", "uses_protocol", "protocol"].edge_index.shape == (2, 4)
     assert graph["flow", "uses_service", "service"].edge_index.shape == (2, 4)
-    assert graph["host", "talks_to", "host"].edge_index.shape == (2, 3)
-    assert graph["host", "talks_to", "host"].edge_attr.shape == (3, 3)
+    assert graph["host", "communicates_with", "host"].edge_index.shape == (2, 3)
+    assert graph["host", "communicates_with", "host"].edge_attr.shape == (3, 3)
 
     # Counts report mirrors the graph.
     assert counts["node_counts"] == {"flow": 4, "host": 3, "protocol": 2, "service": 2, "port": 2}
-    assert counts["edge_counts"]["host_talks_to_host"] == 3
+    assert counts["edge_counts"]["host_communicates_with_host"] == 3
     assert counts["flow_class_counts"] == {"Benign": 2, "DDoS": 2}
     assert counts["host_degree"]["max"] == pytest.approx(4.0)
     assert counts["host_degree"]["min"] == pytest.approx(1.0)
