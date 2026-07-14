@@ -34,7 +34,7 @@ import yaml
 
 from trench_ids.labels import (
     BENIGN,
-    EXCLUDED_CLASSES,
+    CLASS_DATASETS,
     RAW_TO_CANONICAL,
     TASK_DATASETS,
     TASK_THEMES,
@@ -45,7 +45,7 @@ from trench_ids.labels import (
 
 # Metadata columns this pipeline adds to every row (kept separate from the
 # original NetFlow columns so dedup can operate on the original schema only).
-META_COLS = ["source_dataset", "canonical_label", "task"]
+META_COLS = ["flow_id", "source_dataset", "canonical_label", "task"]
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -75,8 +75,20 @@ def _map_canonical(attack: pd.Series) -> pd.Series:
     return mapped
 
 
+def _class_allowed(canonical: str, code: str) -> bool:
+    """Whether a canonical class's rows may be drawn from this dataset code.
+
+    See trench_ids.labels.CLASS_DATASETS -- a class can appear as a raw
+    label in an unsanctioned dataset (e.g. BoT-IoT also has DDoS/DoS rows)
+    without being allowed to draw from it.
+    """
+    allowed = CLASS_DATASETS.get(canonical)
+    return allowed is not None and code in allowed
+
+
 def pass1_counts(cfg: dict[str, Any]) -> tuple[Counter, Counter, list[str]]:
-    """Count flows per canonical class and benign flows per dataset.
+    """Count flows per canonical class (CLASS_DATASETS-restricted) and benign
+    flows per dataset.
 
     Returns (attack_counts, benign_counts_per_dataset, original_columns).
     """
@@ -96,29 +108,32 @@ def pass1_counts(cfg: dict[str, Any]) -> tuple[Counter, Counter, list[str]]:
             vc = canon.value_counts()
             benign_counts[code] += int(vc.get(BENIGN, 0))
             for cls, n in vc.items():
-                if cls != BENIGN and cls not in EXCLUDED_CLASSES:
+                if cls != BENIGN and _class_allowed(cls, code):
                     attack_counts[cls] += int(n)
     return attack_counts, benign_counts, original_cols
 
 
 def pass2_sample(
     cfg: dict[str, Any],
-    attack_counts: Counter,
     benign_counts: Counter,
     rng: np.random.Generator,
 ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
-    """Stream full rows, Bernoulli-subsample per class / per-dataset benign.
+    """Stream full rows; keep every allowed attack row, Bernoulli-subsample benign.
+
+    An attack row is kept iff its canonical class is CLASS_DATASETS-allowed
+    for the row's source dataset (see _class_allowed) -- no cap, no
+    subsampling: every allowed attack row is kept in full. Each kept row
+    also gets a stable flow_id (f"{dataset_code}-{original_csv_row_number}",
+    0-indexed, assigned from the chunk's row position before any filtering
+    -- pandas' chunked reader index is continuous across chunks within one
+    read_csv call, so this matches the row's original line number).
 
     Returns (all_attacks_df, {dataset_code: benign_pool_df}).
     """
     raw_dir = Path(cfg["paths"]["raw_dir"])
     chunk_size = cfg["sampling"]["chunk_size"]
-    attack_cap = cfg["sampling"]["attack_per_class_cap"]
     benign_cap = cfg["sampling"]["benign_per_dataset_cap"]
 
-    # Keep-probabilities. Classes/datasets at or below the cap keep everything
-    # (prob 1.0) — this is the per-class floor that protects rare classes.
-    attack_prob = {c: min(1.0, attack_cap / n) for c, n in attack_counts.items()}
     benign_prob = {d: min(1.0, benign_cap / max(n, 1)) for d, n in benign_counts.items()}
 
     attack_parts: list[pd.DataFrame] = []
@@ -126,27 +141,22 @@ def pass2_sample(
 
     for dir_name, code in cfg["datasets"].items():
         csv = _dataset_csv(raw_dir, dir_name)
-        print(f"[pass2] sampling {code} ({dir_name}) ...", flush=True)
+        print(f"[pass2] streaming {code} ({dir_name}) ...", flush=True)
         for chunk in pd.read_csv(csv, chunksize=chunk_size):
             canon = _map_canonical(chunk["Attack"])
-            # Drop excluded classes (e.g. Worms) before sampling.
-            keep = ~canon.isin(EXCLUDED_CLASSES)
-            if not keep.all():
-                chunk = chunk.loc[keep].reset_index(drop=True)
-                canon = canon.loc[keep].reset_index(drop=True)
-            chunk = chunk.assign(source_dataset=code, canonical_label=canon.values)
+            flow_id = [f"{code}-{i}" for i in chunk.index]
+            chunk = chunk.assign(
+                flow_id=flow_id, source_dataset=code, canonical_label=canon.values
+            )
             draw = rng.random(len(chunk))
 
             is_benign = canon.values == BENIGN
-            # Attacks: per-row prob depends on class.
             atk = chunk[~is_benign]
             if len(atk):
-                p = atk["canonical_label"].map(attack_prob).to_numpy()
-                keep = draw[~is_benign] < p
-                kept = atk[keep]
+                allowed = atk["canonical_label"].map(lambda c, code=code: _class_allowed(c, code))
+                kept = atk[allowed.to_numpy()]
                 if len(kept):
                     attack_parts.append(kept)
-            # Benign: constant prob for the dataset.
             ben = chunk[is_benign]
             if len(ben):
                 keep = draw[is_benign] < benign_prob[code]
@@ -157,9 +167,8 @@ def pass2_sample(
     attacks = (
         pd.concat(attack_parts, ignore_index=True) if attack_parts else pd.DataFrame()
     )
-    attacks["task"] = attacks["canonical_label"].map(task_of).astype(int)
-    # Trim any class that overshot its cap (Bernoulli variance), deterministically.
-    attacks = _trim_per_group(attacks, "canonical_label", attack_cap, rng)
+    if not attacks.empty:
+        attacks["task"] = attacks["canonical_label"].map(task_of).astype(int)
 
     benign_pools: dict[str, pd.DataFrame] = {}
     for code, parts in benign_parts.items():
@@ -168,21 +177,6 @@ def pass2_sample(
             pool = pool.sample(n=benign_cap, random_state=_seed_from(rng))
         benign_pools[code] = pool.reset_index(drop=True)
     return attacks.reset_index(drop=True), benign_pools
-
-
-def _trim_per_group(
-    df: pd.DataFrame, by: str, cap: int, rng: np.random.Generator
-) -> pd.DataFrame:
-    """Downsample any group larger than ``cap`` to exactly ``cap`` rows."""
-    if df.empty:
-        return df
-    keep_idx: list[np.ndarray] = []
-    for _, grp in df.groupby(by, sort=False):
-        idx = grp.index.to_numpy()
-        if len(idx) > cap:
-            idx = rng.choice(idx, size=cap, replace=False)
-        keep_idx.append(idx)
-    return df.loc[np.concatenate(keep_idx)]
 
 
 def _seed_from(rng: np.random.Generator) -> int:
@@ -311,7 +305,7 @@ def run(config_path: str | Path) -> dict[str, Any]:
     if missing:
         print(f"[pass1] WARNING: expected classes absent from data: {sorted(missing)}")
 
-    attacks, benign_pools = pass2_sample(cfg, attack_counts, benign_counts, rng)
+    attacks, benign_pools = pass2_sample(cfg, benign_counts, rng)
     print(
         f"[pass2] done. sampled attack flows: {len(attacks):,}; "
         f"benign pools: {{ {', '.join(f'{k}:{len(v):,}' for k, v in benign_pools.items())} }}",
