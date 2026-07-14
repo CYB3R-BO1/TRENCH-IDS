@@ -30,6 +30,7 @@ def _sample_frame() -> pd.DataFrame:
             "FLOW_DURATION_MILLISECONDS": [10, 20, 5, 15],
             "canonical_label": ["Benign", "DDoS", "Benign", "DDoS"],
             "split": ["train", "train", "val", "test"],
+            "flow_id": ["ToN-0", "ToN-1", "ToN-2", "ToN-3"],
         }
     )
 
@@ -108,6 +109,7 @@ def test_build_task_graph_full_structure() -> None:
     assert graph["flow"].x.shape == (4, 3)
     assert torch.equal(graph["flow"].x[0], torch.tensor([100.0, 50.0, 10.0]))
     assert graph["flow"].label_names == ["Benign", "DDoS"]
+    assert graph["flow"].flow_id == ["ToN-0", "ToN-1", "ToN-2", "ToN-3"]
     assert graph["flow"].y.tolist() == [0, 1, 0, 1]
     assert graph["flow"].train_mask.tolist() == [True, True, False, False]
     assert graph["flow"].val_mask.tolist() == [False, False, True, False]
@@ -206,6 +208,7 @@ def _class_ordered_frame(n_per_class: int = 20) -> pd.DataFrame:
             "FLOW_DURATION_MILLISECONDS": [10] * n,
             "canonical_label": labels,
             "split": ["train"] * n,
+            "flow_id": [f"ToN-{i}" for i in range(n)],
         }
     )
 
@@ -241,6 +244,7 @@ def _mixed_frame(n_attack: int, n_benign: int) -> pd.DataFrame:
             "FLOW_DURATION_MILLISECONDS": [10] * n,
             "canonical_label": labels_,
             "split": ["train"] * n,
+            "flow_id": [f"ToN-{i}" for i in range(n)],
         }
     )
 

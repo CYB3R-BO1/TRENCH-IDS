@@ -1,19 +1,38 @@
 """Step 1 — Raw traffic preprocessing.
 
-Turns the four raw NetFlow v2 CSVs into task-partitioned, sampled, split Parquet
-tables ready for graph construction (Step 2). Implements the pipeline described
-in ``docs/datasets.md`` §5.
+Turns the three raw NetFlow v2 CSVs (NF-ToN-IoT-v2, NF-CSE-CIC-IDS2018-v2,
+NF-BoT-IoT-v2 -- NF-UNSW-NB15-v2 stays excluded, see CLAUDE.md) into
+task-partitioned, split Parquet tables ready for graph construction (Step 2).
+Implements the pipeline described in ``docs/datasets.md`` §5 and
+``docs/superpowers/specs/2026-07-13-dataset-task-respec-design.md`` §3.
 
-Strategy (two streaming passes; files are up to 6 GB and never read whole):
-  Pass 1  — read only the ``Attack`` column, count flows per canonical class and
-            benign flows per dataset.
-  Pass 2  — read full chunks; keep each attack row with probability
-            min(1, cap / class_total) and each benign row with
-            min(1, cap / dataset_benign_total). This yields ~uniform subsamples
-            of ~cap per class while keeping every rare class in full.
-Then per task: draw a fresh benign subset from the task's datasets, drop exact
-duplicates, stratified train/val/test split, write ``task_{t}.parquet`` plus a
-``manifest.json``.
+Pipeline: load -> assign flow_id -> merge -> clean -> split -> persist.
+
+  Load     — stream each dataset's CSV in chunks (files are up to 6 GB and
+             never read whole).
+  Pass 1 (pass1_counts) counts flows per canonical class -- restricted to
+             each class's sanctioned dataset(s) via ``CLASS_DATASETS`` (e.g.
+             BoT-IoT rows labeled DDoS/DoS are not counted, since only
+             Reconnaissance is sanctioned for BoT-IoT) -- and counts benign
+             flows per dataset (unrestricted).
+  Assign flow_id / Merge (pass2_sample) streams full rows a second time.
+             Every ``CLASS_DATASETS``-allowed attack row is kept in full --
+             no cap, no subsampling. Benign rows are Bernoulli-subsampled per
+             dataset with probability ``min(1, benign_per_dataset_cap /
+             dataset_benign_total)``, then capped again by exact sampling if
+             the draw still overshoots the cap. Every kept row (attack or
+             benign) is stamped with a stable ``flow_id``
+             (f"{dataset_code}-{original_csv_row_number}", 0-indexed) here,
+             during the streaming read, so identity survives through to the
+             Step 2 Flow graph node. Attack rows across all three datasets
+             are then concatenated (merged) into one frame and each row's
+             task is assigned from its canonical class.
+  Clean / Split (assemble_tasks) — per task: draw a fresh benign subset from
+             the task's contributing dataset(s) (``TASK_DATASETS``), concat
+             with that task's attack rows, drop exact duplicates on the
+             original NetFlow schema (clean), stratified train/val/test
+             split by canonical class, then persist as ``task_{t}.parquet``
+             plus a combined ``manifest.json``.
 
 Run:  trench-preprocess --config configs/preprocess.yaml
   or: python -m trench_ids.preprocess --config configs/preprocess.yaml

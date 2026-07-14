@@ -161,6 +161,7 @@ def build_task_graph(
     graph["flow"].x = torch.tensor(frame[features].to_numpy(dtype=np.float32))
     graph["flow"].y = torch.tensor(y)
     graph["flow"].label_names = label_names
+    graph["flow"].flow_id = frame["flow_id"].tolist()
     for split in ("train", "val", "test"):
         graph["flow"][f"{split}_mask"] = torch.tensor((frame["split"] == split).to_numpy())
 
