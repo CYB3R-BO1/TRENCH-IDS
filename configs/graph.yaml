@@ -23,6 +23,18 @@ sampling:
   # rows are reused (sampled with replacement) rather than capped.
   benign_ratio: 3.0
 
+  # Safety cap on task-size imbalance: any task whose total graph count
+  # (train+val+test) exceeds max_task_ratio times the smallest task's total
+  # gets downsampled to that cap (train/val/test each shrunk by the same
+  # factor, preserving split proportions). The current similarity-driven
+  # task assignment (docs/superpowers/specs/2026-07-14-benchmark-
+  # finalization-design.md) already achieves a ~2.9x natural largest-to-
+  # smallest ratio, so this is expected to be a no-op under the current
+  # design -- it exists as a safeguard against future imbalance (a
+  # different graph_size, benign_ratio, or task redesign), not as an active
+  # balancing step now.
+  max_task_ratio: 3.0
+
 # Rows within each split are shuffled (seeded) before chunking. The source
 # Parquet is ordered by canonical_label (Step 1 samples per-class, then
 # concatenates), so chunking without shuffling first would produce
