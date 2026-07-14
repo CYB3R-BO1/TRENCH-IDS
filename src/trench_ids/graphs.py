@@ -1,19 +1,32 @@
 """Step 2 — heterogeneous graph construction.
 
-Builds one self-contained PyTorch Geometric ``HeteroData`` graph per task
-from that task's processed Parquet (``data/processed/task_{t}.parquet``),
-per the node/relation design in docs/dataset-plan.md §3:
+Builds many small, self-contained PyTorch Geometric ``HeteroData`` graphs
+per task from that task's processed Parquet
+(``data/processed/task_{t}.parquet``), per the node/relation design in
+docs/dataset-plan.md §3:
 
   Node types: Host, Flow, Protocol, Port, Service.
   Relations : host->flow, flow->host, flow->port, flow->protocol,
-              flow->service, host->host (aggregated within the task only).
+              flow->service, host->host (aggregated within the mini-graph
+              only).
 
-Flow node identity is one row of the task Parquet (no cross-row merging).
-Host identity is (source_dataset, IP), aggregated within the task only —
-it never persists across tasks. Protocol/L7_PROTO node identity uses the
+Each task's rows are split by train/val/test (the ``split`` column from
+Step 1), then each split's rows are shuffled (seeded by ``seed``) and
+chunked into consecutive mini-graphs of at most ``graph_size`` flows
+(configs/graph.yaml). Chunking within a split keeps every mini-graph on one
+side of the train/val/test boundary; shuffling before chunking keeps each
+mini-graph a representative class mix, since the source Parquet is ordered
+by canonical_label from Step 1's per-class sampling. Flow
+node identity is one row of the chunk; Host identity is (source_dataset,
+IP), aggregated within that mini-graph only — it never persists across
+mini-graphs, splits, or tasks. Protocol/L7_PROTO node identity uses the
 global vocabulary from ``trench_ids.vocab`` so the same value maps to the
-same category across every task; Port stays task-local (raw destination
-port number).
+same category everywhere; Port stays chunk-local (raw destination port
+number).
+
+Continual-learning task boundaries (T1..T4) are unaffected: training still
+proceeds through all of a task's mini-graphs before moving to the next
+task.
 
 Run:  trench-graphs --config configs/graph.yaml
   or: python -m trench_ids.graphs --config configs/graph.yaml
@@ -107,6 +120,14 @@ def _host_host_edges(
     edge_index = agg.index.to_frame(index=False)[["src", "dst"]].to_numpy(dtype=np.int64).T
     edge_attr = agg[["flow_count", "total_bytes", "mean_duration"]].to_numpy(dtype=np.float64)
     return edge_index, edge_attr
+
+
+def _chunk_frame(frame: pd.DataFrame, size: int) -> list[pd.DataFrame]:
+    """Split a frame into consecutive chunks of at most `size` rows each."""
+    return [
+        frame.iloc[start : start + size].reset_index(drop=True)
+        for start in range(0, len(frame), size)
+    ]
 
 
 def build_task_graph(
@@ -204,13 +225,56 @@ def build_task_graph(
     return graph, counts
 
 
+def build_split_graphs(
+    frame: pd.DataFrame,
+    features: list[str],
+    vocab: dict[str, dict[str, int]],
+    graph_size: int,
+    seed: int,
+) -> tuple[list[HeteroData], dict[str, Any]]:
+    """Chunk one task/split's rows into mini-graphs of at most `graph_size` flows.
+
+    Rows are shuffled (seeded) before chunking: the source Parquet is ordered
+    by canonical_label (Step 1 samples per class, then concatenates), so
+    chunking without shuffling first would produce mini-graphs that are
+    almost entirely one attack class instead of a representative mix.
+    """
+    frame = frame.sample(frac=1, random_state=seed).reset_index(drop=True)
+    chunks = _chunk_frame(frame, graph_size)
+    graphs: list[HeteroData] = []
+    flow_counts: list[int] = []
+    host_degree_maxes: list[float] = []
+    class_counts: dict[str, int] = {}
+    for chunk in chunks:
+        graph, counts = build_task_graph(chunk, features, vocab)
+        graphs.append(graph)
+        flow_counts.append(counts["node_counts"]["flow"])
+        host_degree_maxes.append(counts["host_degree"]["max"])
+        for label, n in counts["flow_class_counts"].items():
+            class_counts[label] = class_counts.get(label, 0) + n
+
+    split_report: dict[str, Any] = {
+        "num_graphs": len(graphs),
+        "flows_per_graph": {
+            "min": min(flow_counts) if flow_counts else 0,
+            "max": max(flow_counts) if flow_counts else 0,
+            "mean": float(np.mean(flow_counts)) if flow_counts else 0.0,
+        },
+        "host_degree_max_mean": float(np.mean(host_degree_maxes)) if host_degree_maxes else 0.0,
+        "class_counts": class_counts,
+    }
+    return graphs, split_report
+
+
 def run(config_path: str | Path) -> dict[str, Any]:
-    """Build every task's graph, save it, and write a combined counts report."""
+    """Build every task's mini-graphs, save them, and write a combined counts report."""
     cfg = yaml.safe_load(Path(config_path).read_text())
     processed_dir = Path(cfg["paths"]["processed_dir"])
     out_dir = Path(cfg["paths"]["out_dir"])
     vocab_path = Path(cfg["paths"]["vocab_path"])
     features = cfg["features"]
+    graph_size = cfg["graph_size"]
+    seed = cfg["seed"]
 
     task_paths = sorted(processed_dir.glob("task_*.parquet"))
     if not task_paths:
@@ -220,23 +284,36 @@ def run(config_path: str | Path) -> dict[str, Any]:
     save_vocab(vocab, vocab_path)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    report: dict[str, Any] = {}
+    report: dict[str, Any] = {"graph_size": graph_size}
+    total_graphs = 0
     for path in task_paths:
         task_id = int(path.stem.split("_")[1])
         frame = pd.read_parquet(path)
-        graph, counts = build_task_graph(frame, features, vocab)
-        torch.save(graph, out_dir / f"task_{task_id}.pt")
-        report[str(task_id)] = counts
+        task_report: dict[str, Any] = {}
+        for split in ("train", "val", "test"):
+            split_frame = frame[frame["split"] == split].reset_index(drop=True)
+            graphs, split_report = build_split_graphs(
+                split_frame, features, vocab, graph_size, seed
+            )
+            torch.save(graphs, out_dir / f"task_{task_id}_{split}.pt")
+            task_report[split] = split_report
+            total_graphs += split_report["num_graphs"]
+        report[str(task_id)] = task_report
         print(
-            f"[graphs] task {task_id}: nodes={counts['node_counts']} "
-            f"host_talks_to_host_edges={counts['edge_counts']['host_talks_to_host']:,} "
-            f"host_degree_max={counts['host_degree']['max']:.0f} "
-            f"classes={counts['flow_class_counts']}",
+            f"[graphs] task {task_id}: "
+            + ", ".join(
+                f"{split}={task_report[split]['num_graphs']} graphs "
+                f"(flows/graph mean={task_report[split]['flows_per_graph']['mean']:.0f})"
+                for split in ("train", "val", "test")
+            ),
             flush=True,
         )
 
     (out_dir / "graph_counts.json").write_text(json.dumps(report, indent=2))
-    print(f"[done] wrote {len(report)} graphs + graph_counts.json to {out_dir}")
+    print(
+        f"[done] wrote {total_graphs} graphs (graph_size={graph_size}) "
+        f"+ graph_counts.json to {out_dir}"
+    )
     return report
 
 

@@ -3,8 +3,20 @@
 
 paths:
   processed_dir: data/processed   # task_{t}.parquet from Step 1
-  out_dir: data/graphs            # task_{t}.pt + graph_counts.json written here
+  out_dir: data/graphs            # task_{t}_{split}.pt + graph_counts.json written here
   vocab_path: data/graphs/vocab.json
+
+# Each task's train/val/test rows are chunked into many mini-graphs of at
+# most this many flows each (last chunk per split may be smaller). Rerun
+# with a different value to experiment with graph size (e.g. 100/200/300);
+# point paths.out_dir at a separate directory per value to keep runs apart.
+graph_size: 300
+
+# Rows within each split are shuffled (seeded) before chunking. The source
+# Parquet is ordered by canonical_label (Step 1 samples per-class, then
+# concatenates), so chunking without shuffling first would produce
+# mini-graphs that are almost entirely one attack class.
+seed: 42
 
 # The 37 flow-statistic features (same set used for the similarity analysis in
 # configs/similarity.yaml — excludes the 4 identifier fields + PROTOCOL +

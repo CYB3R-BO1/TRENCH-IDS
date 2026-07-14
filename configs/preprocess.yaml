@@ -9,10 +9,10 @@ paths:
   out_dir: data/processed     # task_{t}.parquet + manifest.json written here
 
 # Dataset directory name -> short source code stamped onto every row.
+# NF-UNSW-NB15-v2 and NF-BoT-IoT-v2 dropped entirely (professor's guidance to
+# reduce implementation complexity -- see docs/dataset-plan.md §1).
 datasets:
-  NF-UNSW-NB15-v2: UNSW
   NF-ToN-IoT-v2: ToN
-  NF-BoT-IoT-v2: BoT
   NF-CSE-CIC-IDS2018-v2: CSE
 
 sampling:

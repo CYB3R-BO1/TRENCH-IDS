@@ -1,5 +1,11 @@
-# Attack-class similarity analysis config (professor-directed Step 1 redesign input).
-# See docs/attack-class-counts.md for how the 14-class pool below was selected.
+# Attack-class similarity analysis config (professor-directed Step 1 redesign).
+#
+# Scope: 2 datasets (ToN-IoT, CSE-CIC-IDS2018), 6 attack classes -- reduced
+# from the original 4-dataset/10-class design per the professor's guidance to
+# cut implementation complexity. NF-UNSW-NB15-v2 and NF-BoT-IoT-v2 are dropped
+# entirely; see docs/attack-class-counts.md for why (UNSW contributes almost
+# nothing to the >=100K-threshold pool once BoT-IoT is also out -- its only
+# relevant contribution, Reconnaissance, is 99.5% supplied by BoT-IoT anyway).
 
 seed: 42
 samples_per_class: 5000
@@ -10,31 +16,21 @@ paths:
   out_dir: data/similarity   # per-class CSVs + centroids.csv + similarity_matrix.csv
 
 datasets:
-  NF-UNSW-NB15-v2: UNSW
   NF-ToN-IoT-v2: ToN
-  NF-BoT-IoT-v2: BoT
   NF-CSE-CIC-IDS2018-v2: CSE
 
-# Candidate pool: the 10 classes with combined count >= 100,000 across all four
-# datasets (docs/attack-class-counts.md "Selected candidate pool" section --
-# stricter 100K/10-class cutoff, chosen over the looser 14-class/10K pool for
-# simpler task construction; Exploits/Fuzzers/Backdoor/Generic dropped).
+# 6-class pool: top classes by ToN+CSE-only combined count, dropping
+# Bot/BruteForce/Infiltration (116K-143K, well below the ~685K-3.8M range of
+# the other six) and Reconnaissance (UNSW+BoT-IoT only, no longer available).
 classes:
   - DDoS
   - DoS
   - Scanning
-  - Reconnaissance
   - XSS
   - Password
   - Injection
-  - Bot
-  - BruteForce
-  - Infiltration
 
-# The 37 flow-statistic features (excludes the 4 identifier fields + PROTOCOL +
-# L7_PROTO, which seed graph node identity in Step 2 rather than the Flow
-# feature vector -- docs/datasets.md SS2.1). Same feature set Step 2's Flow node
-# will use, so centroid similarity here reflects the signal the model will see.
+# Same 37 flow-statistic features as the original analysis (docs/datasets.md SS2.1).
 features:
   - IN_BYTES
   - IN_PKTS

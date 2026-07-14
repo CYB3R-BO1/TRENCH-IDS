@@ -5,10 +5,12 @@ import pytest
 import torch
 
 from trench_ids.graphs import (
+    _chunk_frame,
     _host_features,
     _host_host_edges,
     _host_ids,
     _index_categorical,
+    build_split_graphs,
     build_task_graph,
 )
 
@@ -139,3 +141,80 @@ def test_build_task_graph_full_structure() -> None:
     assert counts["flow_class_counts"] == {"Benign": 2, "DDoS": 2}
     assert counts["host_degree"]["max"] == pytest.approx(4.0)
     assert counts["host_degree"]["min"] == pytest.approx(1.0)
+
+
+def test_chunk_frame_splits_into_consecutive_blocks() -> None:
+    frame = _sample_frame()  # 4 rows
+
+    chunks = _chunk_frame(frame, size=3)
+
+    assert len(chunks) == 2
+    assert len(chunks[0]) == 3
+    assert len(chunks[1]) == 1  # remainder chunk kept, not dropped or padded
+    # Row order preserved, no shuffling.
+    assert chunks[0]["IPV4_SRC_ADDR"].tolist() == ["10.0.0.1", "10.0.0.1", "10.0.0.2"]
+
+
+def test_chunk_frame_exact_multiple_has_no_remainder_chunk() -> None:
+    frame = _sample_frame()  # 4 rows
+
+    chunks = _chunk_frame(frame, size=2)
+
+    assert len(chunks) == 2
+    assert all(len(c) == 2 for c in chunks)
+
+
+def test_build_split_graphs_produces_one_mini_graph_per_chunk() -> None:
+    frame = _sample_frame()
+    vocab = {"PROTOCOL": {"17": 0, "6": 1, "1": 2}, "L7_PROTO": {"1": 0, "2": 1, "5": 2}}
+    features = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
+
+    graphs, split_report = build_split_graphs(frame, features, vocab, graph_size=3, seed=42)
+
+    assert len(graphs) == 2
+    assert graphs[0]["flow"].x.shape[0] == 3
+    assert graphs[1]["flow"].x.shape[0] == 1
+    # Each mini-graph is self-contained: host identity does not span chunks.
+    assert graphs[0]["host"].num_nodes <= 3
+    assert graphs[1]["host"].num_nodes <= 2
+
+    assert split_report["num_graphs"] == 2
+    assert split_report["flows_per_graph"] == {"min": 1, "max": 3, "mean": pytest.approx(2.0)}
+    # Total flows across chunks' class counts matches the original frame.
+    assert sum(split_report["class_counts"].values()) == len(frame)
+
+
+def _class_ordered_frame(n_per_class: int = 20) -> pd.DataFrame:
+    """Rows grouped by class, like Step 1's real output (per-class sampling
+    then concatenation) -- reproduces the ordering that breaks unshuffled
+    chunking."""
+    n = n_per_class * 2
+    labels = ["A"] * n_per_class + ["B"] * n_per_class
+    return pd.DataFrame(
+        {
+            "source_dataset": ["ToN"] * n,
+            "IPV4_SRC_ADDR": [f"10.0.0.{i % 250}" for i in range(n)],
+            "IPV4_DST_ADDR": [f"10.0.1.{i % 250}" for i in range(n)],
+            "L4_SRC_PORT": list(range(1000, 1000 + n)),
+            "L4_DST_PORT": [80] * n,
+            "PROTOCOL": [6] * n,
+            "L7_PROTO": [1] * n,
+            "IN_BYTES": [100] * n,
+            "OUT_BYTES": [50] * n,
+            "FLOW_DURATION_MILLISECONDS": [10] * n,
+            "canonical_label": labels,
+            "split": ["train"] * n,
+        }
+    )
+
+
+def test_build_split_graphs_shuffles_before_chunking() -> None:
+    frame = _class_ordered_frame(n_per_class=20)  # rows 0-19 = "A", 20-39 = "B"
+    vocab = {"PROTOCOL": {"6": 0}, "L7_PROTO": {"1": 0}}
+    features = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
+
+    graphs, _ = build_split_graphs(frame, features, vocab, graph_size=10, seed=42)
+
+    # Without shuffling, every chunk would be monolithic (all "A" or all "B").
+    # With shuffling, at least one chunk must mix both classes.
+    assert any(len(g["flow"].label_names) > 1 for g in graphs)
