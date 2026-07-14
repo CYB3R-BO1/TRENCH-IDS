@@ -66,6 +66,11 @@ from trench_ids.labels import (
 # original NetFlow columns so dedup can operate on the original schema only).
 META_COLS = ["flow_id", "source_dataset", "canonical_label", "task"]
 
+# Anything beyond float32's range is a legitimate float64 value in the raw
+# CSV but silently becomes `inf` when Step 2 (graphs.py) casts Flow features
+# to float32 -- filtered out here so it never reaches a saved graph.
+FLOAT32_MAX = float(np.finfo(np.float32).max)
+
 
 def load_config(path: str | Path) -> dict[str, Any]:
     """Load and lightly validate the preprocessing YAML config."""
@@ -243,6 +248,26 @@ def _stratified_split(
     return split
 
 
+def _drop_corrupted_rows(
+    frame: pd.DataFrame, original_cols: list[str]
+) -> tuple[pd.DataFrame, int]:
+    """Drop rows with a non-finite numeric value, or a finite value that
+    would overflow float32 at Step 2's feature cast.
+
+    Checks every numeric column among ``original_cols`` (the original
+    NetFlow schema, not the metadata columns added by this pipeline) --
+    not just the specific column(s) observed to be corrupted in practice --
+    since the same failure mode could in principle affect any of them.
+    Returns (clean_frame, dropped_count).
+    """
+    numeric_cols = frame[original_cols].select_dtypes(include="number").columns
+    values = frame[numeric_cols].to_numpy(dtype=np.float64)
+    bad_row = ~np.isfinite(values) | (np.abs(values) > FLOAT32_MAX)
+    bad = bad_row.any(axis=1)
+    dropped = int(bad.sum())
+    return frame.loc[~bad].reset_index(drop=True), dropped
+
+
 def assemble_tasks(
     cfg: dict[str, Any],
     attacks: pd.DataFrame,
@@ -274,6 +299,8 @@ def assemble_tasks(
         if frame.empty:
             continue
 
+        frame, corrupted_dropped = _drop_corrupted_rows(frame, original_cols)
+
         if do_dedup:
             before = len(frame)
             frame = frame.drop_duplicates(subset=original_cols, ignore_index=True)
@@ -292,6 +319,7 @@ def assemble_tasks(
             "datasets": list(TASK_DATASETS[task]),
             "n_rows": int(len(frame)),
             "duplicates_dropped": int(dropped),
+            "corrupted_rows_dropped": int(corrupted_dropped),
             "class_counts": {k: int(v) for k, v in frame["canonical_label"].value_counts().items()},
             "split_counts": {k: int(v) for k, v in frame["split"].value_counts().items()},
             "source_counts": {k: int(v) for k, v in frame["source_dataset"].value_counts().items()},
@@ -299,7 +327,7 @@ def assemble_tasks(
         }
         print(
             f"[assemble] task {task} ({TASK_THEMES[task]}): {len(frame):,} rows "
-            f"-> {path.name} (dropped {dropped:,} dups)",
+            f"-> {path.name} (dropped {dropped:,} dups, {corrupted_dropped:,} corrupted)",
             flush=True,
         )
 

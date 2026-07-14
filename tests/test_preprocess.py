@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from trench_ids.preprocess import pass1_counts, pass2_sample
+from trench_ids.preprocess import _drop_corrupted_rows, pass1_counts, pass2_sample
 
 
 def _write_csv(root: Path, dir_name: str, rows: list[tuple[int, str]]) -> None:
@@ -104,3 +104,41 @@ def test_pass2_sample_keeps_every_allowed_attack_row_no_cap(two_dataset_root: Pa
     attacks, _ = pass2_sample(cfg, benign_counts, rng)
 
     assert (attacks["canonical_label"] == "DDoS").sum() == 2
+
+
+def test_drop_corrupted_rows_removes_overflow_and_nonfinite_values() -> None:
+    frame = pd.DataFrame(
+        {
+            "IN_BYTES": [100.0, 6.588e304, np.inf, np.nan, 200.0],
+            "OUT_BYTES": [50.0, 50.0, 50.0, 50.0, 50.0],
+            "Attack": ["ddos"] * 5,
+        }
+    )
+    original_cols = ["IN_BYTES", "OUT_BYTES", "Attack"]
+
+    clean, dropped = _drop_corrupted_rows(frame, original_cols)
+
+    # 3 bad rows removed: float32-overflow (6.588e304), +inf, NaN. The
+    # non-numeric "Attack" column is untouched by the numeric-overflow/
+    # non-finite check.
+    assert dropped == 3
+    assert clean["IN_BYTES"].tolist() == [100.0, 200.0]
+    assert clean.index.tolist() == [0, 1]  # reset_index(drop=True)
+
+
+def test_drop_corrupted_rows_keeps_everything_when_clean() -> None:
+    frame = pd.DataFrame({"IN_BYTES": [100.0, 200.0], "OUT_BYTES": [50.0, 60.0]})
+
+    clean, dropped = _drop_corrupted_rows(frame, ["IN_BYTES", "OUT_BYTES"])
+
+    assert dropped == 0
+    assert len(clean) == 2
+
+
+def test_drop_corrupted_rows_negative_overflow_also_removed() -> None:
+    frame = pd.DataFrame({"IN_BYTES": [100.0, -6.588e304], "OUT_BYTES": [50.0, 50.0]})
+
+    clean, dropped = _drop_corrupted_rows(frame, ["IN_BYTES", "OUT_BYTES"])
+
+    assert dropped == 1
+    assert clean["IN_BYTES"].tolist() == [100.0]
