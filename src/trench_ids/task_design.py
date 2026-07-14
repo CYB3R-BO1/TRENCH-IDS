@@ -5,16 +5,19 @@ concrete task grouping: classes with a pairwise similarity above ``threshold``
 must never land in the same task -- co-locating them gives the model nothing
 to transfer, since both would be learned directly from labels in one task.
 
-Method ("isolate-and-bundle", not minimum-total-similarity pairing): a set of
-classes that are *all* pairwise above threshold (a "conflict clique") cannot
-avoid a conflict no matter how it's split up, so every member of the largest
-such clique gets its own singleton task. The remaining classes -- which by
-construction each have at least one compatible partner -- are paired off via
-minimum-weight perfect matching (still respecting the threshold) to fill out
-the rest of the tasks. This directly targets the actual objective (separate
-classes the model could confuse, evaluate transfer) instead of a proxy
-(minimize total within-task similarity), which pointlessly forces already-
-dissimilar classes into tighter dissimilarity.
+Method ("isolate-and-bundle"): a set of classes that are *all* pairwise
+above threshold (a "conflict clique") cannot avoid a conflict no matter how
+it's split up, so every member of the largest such clique gets its own
+singleton task. The remaining classes -- which by construction each have at
+least one compatible partner -- are paired off via minimum-weight perfect
+matching (still respecting the threshold) to fill out the rest of the
+tasks. When called with ``sizes`` (see ``min_weight_grouping``), the
+matching's primary objective is minimizing the largest resulting task's
+size, with total similarity as a tie-break among equally-balanced options --
+multiple pairings can satisfy the same similarity threshold while differing
+sharply in balance, so total-similarity-only optimization is free to (and,
+empirically, did) pick the worst-balanced valid option. Without ``sizes``,
+the objective is total-similarity-only.
 
 Run:  python -m trench_ids.task_design --config configs/similarity.yaml
 """
@@ -45,25 +48,42 @@ def _group_score(sim: pd.DataFrame, group: tuple[str, ...]) -> float:
 
 
 def min_weight_grouping(
-    sim: pd.DataFrame, threshold: float = 0.5
+    sim: pd.DataFrame, threshold: float = 0.5, sizes: dict[str, float] | None = None
 ) -> tuple[list[tuple[str, ...]], float]:
     """Minimum-weight grouping into pairs, no group over threshold.
 
     An odd number of classes is handled by allowing exactly one group of three
     (otherwise one class would be left over); every other group is a pair.
     Raises if the conflict graph is too dense for a valid grouping to exist.
+
+    If ``sizes`` is given (class -> weight, e.g. flow count), the objective
+    becomes lexicographic: primarily minimize the largest group's total
+    size, then minimize total pairwise similarity as a tie-break among
+    groupings that achieve the same minimal max size. This exists because
+    multiple groupings can satisfy the same similarity threshold while
+    differing sharply in how balanced the resulting tasks are -- minimizing
+    total similarity alone is free to pick among them arbitrarily, and can
+    pick the worst-balanced one (see
+    docs/superpowers/specs/2026-07-14-benchmark-finalization-design.md §1).
+    If ``sizes`` is omitted, the objective is total-similarity-only (prior
+    behavior) -- every candidate's max group size collapses to 0.0, so the
+    lexicographic key reduces to total similarity alone.
     """
     classes = list(sim.index)
     allow_triple = len(classes) % 2 == 1
 
-    best: dict[str, Any] = {"groups": None, "total": float("inf")}
+    def group_size(group: tuple[str, ...]) -> float:
+        return sum(sizes[c] for c in group) if sizes else 0.0
+
+    best: dict[str, Any] = {"groups": None, "total": float("inf"), "max_size": float("inf")}
 
     def recurse(
         remaining: list[str], groups: list[tuple[str, ...]], total: float, triple_used: bool
     ) -> None:
         if not remaining:
-            if total < best["total"]:
-                best["groups"], best["total"] = list(groups), total
+            max_size = max((group_size(g) for g in groups), default=0.0)
+            if (max_size, total) < (best["max_size"], best["total"]):
+                best["groups"], best["total"], best["max_size"] = list(groups), total, max_size
             return
         a = remaining[0]
         rest = remaining[1:]
@@ -119,12 +139,16 @@ def find_max_clique(sim: pd.DataFrame, threshold: float) -> list[str]:
 
 
 def assign_groups(
-    sim: pd.DataFrame, threshold: float = 0.5
+    sim: pd.DataFrame, threshold: float = 0.5, sizes: dict[str, float] | None = None
 ) -> tuple[list[list[str]], list[float]]:
     """Isolate-and-bundle task assignment (see module docstring).
 
     Returns (groups, per-group max internal similarity). Singleton groups
     (isolated clique members) report 0.0 since there is no internal pair.
+    ``sizes``, if given, is threaded into the non-clique remainder's
+    grouping (see ``min_weight_grouping``'s ``sizes`` parameter) -- clique
+    members are singleton tasks regardless of size, so sizes never affects
+    which classes get isolated, only how the remainder pairs up.
     """
     clique = find_max_clique(sim, threshold)
     remaining = [c for c in sim.index if c not in clique]
@@ -134,7 +158,8 @@ def assign_groups(
 
     if remaining:
         rem_sim = sim.loc[remaining, remaining]
-        rem_groups, _ = min_weight_grouping(rem_sim, threshold)
+        rem_sizes = {c: sizes[c] for c in remaining} if sizes else None
+        rem_groups, _ = min_weight_grouping(rem_sim, threshold, rem_sizes)
         for group in rem_groups:
             groups.append(list(group))
             scores.append(max(sim.loc[a, b] for i, a in enumerate(group) for b in group[i + 1 :]))
