@@ -46,6 +46,7 @@ import torch
 import yaml
 from torch_geometric.data import HeteroData
 
+from trench_ids.labels import BENIGN
 from trench_ids.vocab import build_vocab, save_vocab
 
 
@@ -230,20 +231,53 @@ def build_task_graph(
     return graph, counts
 
 
+def _select_benign(
+    attack_rows: pd.DataFrame, benign_rows: pd.DataFrame, benign_ratio: float, seed: int
+) -> pd.DataFrame:
+    """Subsample benign_rows to hit attack:benign == benign_ratio:1.
+
+    Samples without replacement when the pool covers the target; falls back
+    to sampling with replacement when the ratio demands more benign rows
+    than the pool holds (an uncapped task's attack count can now far exceed
+    Step 1's fixed benign_per_task pool -- see
+    docs/superpowers/specs/2026-07-13-dataset-task-respec-design.md §3a).
+    Returns an empty frame if there are no attack rows or no benign pool.
+    """
+    n_attack = len(attack_rows)
+    if n_attack == 0 or benign_rows.empty:
+        return benign_rows.iloc[0:0]
+    target = max(1, round(n_attack / benign_ratio))
+    if target <= len(benign_rows):
+        return benign_rows.sample(n=target, random_state=seed).reset_index(drop=True)
+    reps = -(-target // len(benign_rows))  # ceil division
+    pool = pd.concat([benign_rows] * reps, ignore_index=True)
+    return pool.sample(n=target, random_state=seed).reset_index(drop=True)
+
+
 def build_split_graphs(
     frame: pd.DataFrame,
     features: list[str],
     vocab: dict[str, dict[str, int]],
     graph_size: int,
     seed: int,
+    benign_ratio: float,
 ) -> tuple[list[HeteroData], dict[str, Any]]:
     """Chunk one task/split's rows into mini-graphs of at most `graph_size` flows.
 
-    Rows are shuffled (seeded) before chunking: the source Parquet is ordered
-    by canonical_label (Step 1 samples per class, then concatenates), so
-    chunking without shuffling first would produce mini-graphs that are
-    almost entirely one attack class instead of a representative mix.
+    Benign rows are first subsampled to hit `benign_ratio` (attack:benign,
+    see _select_benign) -- attack rows are always kept in full; only benign
+    rows are ever removed (or repeated). Rows are then shuffled (seeded)
+    before chunking: the source Parquet is ordered by canonical_label (Step
+    1 samples per class, then concatenates), so chunking without shuffling
+    first would produce mini-graphs that are almost entirely one class
+    instead of a representative mix.
     """
+    is_benign = frame["canonical_label"] == BENIGN
+    attack_rows = frame[~is_benign].reset_index(drop=True)
+    benign_rows = frame[is_benign].reset_index(drop=True)
+    benign_selected = _select_benign(attack_rows, benign_rows, benign_ratio, seed)
+
+    frame = pd.concat([attack_rows, benign_selected], ignore_index=True)
     frame = frame.sample(frac=1, random_state=seed).reset_index(drop=True)
     chunks = _chunk_frame(frame, graph_size)
     graphs: list[HeteroData] = []
@@ -280,6 +314,7 @@ def run(config_path: str | Path) -> dict[str, Any]:
     features = cfg["features"]
     graph_size = cfg["graph_size"]
     seed = cfg["seed"]
+    benign_ratio = cfg["sampling"]["benign_ratio"]
 
     task_paths = sorted(processed_dir.glob("task_*.parquet"))
     if not task_paths:
@@ -298,7 +333,7 @@ def run(config_path: str | Path) -> dict[str, Any]:
         for split in ("train", "val", "test"):
             split_frame = frame[frame["split"] == split].reset_index(drop=True)
             graphs, split_report = build_split_graphs(
-                split_frame, features, vocab, graph_size, seed
+                split_frame, features, vocab, graph_size, seed, benign_ratio
             )
             torch.save(graphs, out_dir / f"task_{task_id}_{split}.pt")
             task_report[split] = split_report

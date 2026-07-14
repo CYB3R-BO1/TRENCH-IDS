@@ -169,7 +169,9 @@ def test_build_split_graphs_produces_one_mini_graph_per_chunk() -> None:
     vocab = {"PROTOCOL": {"17": 0, "6": 1, "1": 2}, "L7_PROTO": {"1": 0, "2": 1, "5": 2}}
     features = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
 
-    graphs, split_report = build_split_graphs(frame, features, vocab, graph_size=3, seed=42)
+    graphs, split_report = build_split_graphs(
+        frame, features, vocab, graph_size=3, seed=42, benign_ratio=1.0
+    )
 
     assert len(graphs) == 2
     assert graphs[0]["flow"].x.shape[0] == 3
@@ -213,8 +215,63 @@ def test_build_split_graphs_shuffles_before_chunking() -> None:
     vocab = {"PROTOCOL": {"6": 0}, "L7_PROTO": {"1": 0}}
     features = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
 
-    graphs, _ = build_split_graphs(frame, features, vocab, graph_size=10, seed=42)
+    graphs, _ = build_split_graphs(
+        frame, features, vocab, graph_size=10, seed=42, benign_ratio=1.0
+    )
 
     # Without shuffling, every chunk would be monolithic (all "A" or all "B").
     # With shuffling, at least one chunk must mix both classes.
     assert any(len(g["flow"].label_names) > 1 for g in graphs)
+
+
+def _mixed_frame(n_attack: int, n_benign: int) -> pd.DataFrame:
+    n = n_attack + n_benign
+    labels_ = ["DDoS"] * n_attack + ["Benign"] * n_benign
+    return pd.DataFrame(
+        {
+            "source_dataset": ["ToN"] * n,
+            "IPV4_SRC_ADDR": [f"10.0.0.{i % 200}" for i in range(n)],
+            "IPV4_DST_ADDR": [f"10.0.1.{i % 200}" for i in range(n)],
+            "L4_SRC_PORT": list(range(1000, 1000 + n)),
+            "L4_DST_PORT": [80] * n,
+            "PROTOCOL": [6] * n,
+            "L7_PROTO": [1] * n,
+            "IN_BYTES": [100] * n,
+            "OUT_BYTES": [50] * n,
+            "FLOW_DURATION_MILLISECONDS": [10] * n,
+            "canonical_label": labels_,
+            "split": ["train"] * n,
+        }
+    )
+
+
+def test_build_split_graphs_subsamples_benign_to_target_ratio() -> None:
+    # 20 attack rows, 20 benign rows available; ratio 4:1 -> target 5 benign kept.
+    frame = _mixed_frame(n_attack=20, n_benign=20)
+    vocab = {"PROTOCOL": {"6": 0}, "L7_PROTO": {"1": 0}}
+    features = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
+
+    graphs, split_report = build_split_graphs(
+        frame, features, vocab, graph_size=100, seed=42, benign_ratio=4.0
+    )
+
+    assert len(graphs) == 1
+    assert graphs[0]["flow"].x.shape[0] == 25  # 20 attack + 5 benign (20 / 4.0)
+    assert split_report["class_counts"]["Benign"] == 5
+    assert split_report["class_counts"]["DDoS"] == 20
+
+
+def test_build_split_graphs_reuses_benign_with_replacement_when_pool_too_small() -> None:
+    # 20 attack rows but only 2 benign rows available; ratio 1:1 needs 20
+    # benign -- must reuse (sample with replacement) rather than error or
+    # silently under-fill.
+    frame = _mixed_frame(n_attack=20, n_benign=2)
+    vocab = {"PROTOCOL": {"6": 0}, "L7_PROTO": {"1": 0}}
+    features = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
+
+    graphs, split_report = build_split_graphs(
+        frame, features, vocab, graph_size=100, seed=42, benign_ratio=1.0
+    )
+
+    assert split_report["class_counts"]["Benign"] == 20
+    assert split_report["class_counts"]["DDoS"] == 20
