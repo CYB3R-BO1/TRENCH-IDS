@@ -38,7 +38,7 @@ classes:
   - BruteForce
   - Infiltration
 
-# Same 37 flow-statistic features as the original analysis (docs/datasets.md SS2.1).
+# Same 37 flow-statistic features as configs/graph.yaml (docs/datasets.md §2.1).
 features:
   - IN_BYTES
   - IN_PKTS
