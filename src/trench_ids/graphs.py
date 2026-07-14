@@ -306,6 +306,53 @@ def build_split_graphs(
     return graphs, split_report
 
 
+def _downsample_tasks(
+    out_dir: Path, report: dict[str, Any], max_task_ratio: float, seed: int
+) -> dict[str, Any]:
+    """Cap any task's total graph count (train+val+test) at
+    max_task_ratio times the smallest task's total.
+
+    A task exceeding the cap has its train/val/test lists each randomly
+    subsampled by the same shrink factor (preserving existing split
+    proportions), re-saved to the same task_{t}_{split}.pt paths, and
+    report[t][split]["num_graphs"] updated to match. Tasks within the cap
+    are untouched (file and report both). Returns a JSON-able summary; an
+    empty "trimmed" dict means the cap never triggered.
+    """
+    task_keys = [k for k in report if k not in ("graph_size", "benign_ratio")]
+    totals = {
+        k: sum(report[k][split]["num_graphs"] for split in ("train", "val", "test"))
+        for k in task_keys
+    }
+    min_total = min(totals.values())
+    cap = min_total * max_task_ratio
+
+    summary: dict[str, Any] = {
+        "max_task_ratio": max_task_ratio,
+        "min_task_total": min_total,
+        "cap": cap,
+        "trimmed": {},
+    }
+    for k in task_keys:
+        if totals[k] <= cap:
+            continue
+        shrink = cap / totals[k]
+        rng = np.random.default_rng(seed)
+        after_total = 0
+        for split in ("train", "val", "test"):
+            path = out_dir / f"task_{k}_{split}.pt"
+            graphs = torch.load(path, weights_only=False)  # trusted, first-party output
+            target = max(1, round(len(graphs) * shrink))
+            if target < len(graphs):
+                idx = sorted(rng.choice(len(graphs), size=target, replace=False))
+                graphs = [graphs[i] for i in idx]
+                torch.save(graphs, path)
+            report[k][split]["num_graphs"] = len(graphs)
+            after_total += len(graphs)
+        summary["trimmed"][k] = {"before_total": totals[k], "after_total": after_total}
+    return summary
+
+
 def run(config_path: str | Path) -> dict[str, Any]:
     """Build every task's mini-graphs, save them, and write a combined counts report."""
     cfg = yaml.safe_load(Path(config_path).read_text())
@@ -316,6 +363,7 @@ def run(config_path: str | Path) -> dict[str, Any]:
     graph_size = cfg["graph_size"]
     seed = cfg["seed"]
     benign_ratio = cfg["sampling"]["benign_ratio"]
+    max_task_ratio = cfg["sampling"]["max_task_ratio"]
 
     task_paths = sorted(processed_dir.glob("task_*.parquet"))
     if not task_paths:
@@ -325,8 +373,7 @@ def run(config_path: str | Path) -> dict[str, Any]:
     save_vocab(vocab, vocab_path)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    report: dict[str, Any] = {"graph_size": graph_size}
-    total_graphs = 0
+    report: dict[str, Any] = {"graph_size": graph_size, "benign_ratio": benign_ratio}
     for path in task_paths:
         task_id = int(path.stem.split("_")[1])
         frame = pd.read_parquet(path)
@@ -338,7 +385,6 @@ def run(config_path: str | Path) -> dict[str, Any]:
             )
             torch.save(graphs, out_dir / f"task_{task_id}_{split}.pt")
             task_report[split] = split_report
-            total_graphs += split_report["num_graphs"]
         report[str(task_id)] = task_report
         print(
             f"[graphs] task {task_id}: "
@@ -350,11 +396,30 @@ def run(config_path: str | Path) -> dict[str, Any]:
             flush=True,
         )
 
+    downsampling = _downsample_tasks(out_dir, report, max_task_ratio, seed)
+    report["downsampling"] = downsampling
+
     (out_dir / "graph_counts.json").write_text(json.dumps(report, indent=2))
-    print(
-        f"[done] wrote {total_graphs} graphs (graph_size={graph_size}) "
-        f"+ graph_counts.json to {out_dir}"
+    final_total = sum(
+        report[k][s]["num_graphs"]
+        for k in report
+        if k not in ("graph_size", "benign_ratio", "downsampling")
+        for s in ("train", "val", "test")
     )
+    print(
+        f"[done] wrote {final_total} graphs (graph_size={graph_size}, "
+        f"benign_ratio={benign_ratio}) + graph_counts.json to {out_dir}"
+    )
+    if downsampling["trimmed"]:
+        print(
+            f"[downsample] max_task_ratio={max_task_ratio}: trimmed tasks "
+            f"{sorted(downsampling['trimmed'])}"
+        )
+    else:
+        print(
+            f"[downsample] max_task_ratio={max_task_ratio}: no task exceeded "
+            f"the cap, nothing trimmed"
+        )
     return report
 
 

@@ -3,9 +3,11 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 import torch
+from torch_geometric.data import HeteroData
 
 from trench_ids.graphs import (
     _chunk_frame,
+    _downsample_tasks,
     _host_features,
     _host_host_edges,
     _host_ids,
@@ -279,3 +281,86 @@ def test_build_split_graphs_reuses_benign_with_replacement_when_pool_too_small()
 
     assert split_report["class_counts"]["Benign"] == 20
     assert split_report["class_counts"]["DDoS"] == 20
+
+
+def _write_fake_graphs(path, n: int) -> None:
+    graphs = []
+    for i in range(n):
+        g = HeteroData()
+        g["flow"].x = torch.tensor([[float(i)]])
+        graphs.append(g)
+    torch.save(graphs, path)
+
+
+def test_downsample_tasks_caps_task_exceeding_ratio(tmp_path) -> None:
+    out_dir = tmp_path
+    _write_fake_graphs(out_dir / "task_1_train.pt", 100)
+    _write_fake_graphs(out_dir / "task_1_val.pt", 20)
+    _write_fake_graphs(out_dir / "task_1_test.pt", 20)
+    _write_fake_graphs(out_dir / "task_2_train.pt", 10)
+    _write_fake_graphs(out_dir / "task_2_val.pt", 2)
+    _write_fake_graphs(out_dir / "task_2_test.pt", 2)
+
+    report = {
+        "graph_size": 300,
+        "benign_ratio": 3.0,
+        "1": {
+            "train": {"num_graphs": 100},
+            "val": {"num_graphs": 20},
+            "test": {"num_graphs": 20},
+        },
+        "2": {
+            "train": {"num_graphs": 10},
+            "val": {"num_graphs": 2},
+            "test": {"num_graphs": 2},
+        },
+    }
+
+    summary = _downsample_tasks(out_dir, report, max_task_ratio=3.0, seed=42)
+
+    # task 2 total = 14 (smallest); cap = 14 * 3.0 = 42. task 1 total = 140
+    # exceeds the cap -- trimmed. task 2 is the smallest, never trimmed.
+    assert summary["min_task_total"] == 14
+    assert summary["cap"] == pytest.approx(42.0)
+    assert "1" in summary["trimmed"]
+    assert summary["trimmed"]["1"]["before_total"] == 140
+    assert summary["trimmed"]["1"]["after_total"] <= 42
+    assert "2" not in summary["trimmed"]
+
+    # report mutated in place to reflect the trim.
+    new_total_1 = sum(report["1"][s]["num_graphs"] for s in ("train", "val", "test"))
+    assert new_total_1 <= 42
+    assert report["2"]["train"]["num_graphs"] == 10  # untouched
+
+    # Files on disk actually shrunk for task 1, untouched for task 2.
+    saved_1 = torch.load(out_dir / "task_1_train.pt", weights_only=False)
+    assert len(saved_1) == report["1"]["train"]["num_graphs"]
+    saved_2 = torch.load(out_dir / "task_2_train.pt", weights_only=False)
+    assert len(saved_2) == 10
+
+
+def test_downsample_tasks_no_op_when_already_balanced(tmp_path) -> None:
+    out_dir = tmp_path
+    _write_fake_graphs(out_dir / "task_1_train.pt", 30)
+    _write_fake_graphs(out_dir / "task_1_val.pt", 6)
+    _write_fake_graphs(out_dir / "task_1_test.pt", 6)
+    _write_fake_graphs(out_dir / "task_2_train.pt", 20)
+    _write_fake_graphs(out_dir / "task_2_val.pt", 4)
+    _write_fake_graphs(out_dir / "task_2_test.pt", 4)
+
+    report = {
+        "graph_size": 300,
+        "benign_ratio": 3.0,
+        "1": {"train": {"num_graphs": 30}, "val": {"num_graphs": 6}, "test": {"num_graphs": 6}},
+        "2": {"train": {"num_graphs": 20}, "val": {"num_graphs": 4}, "test": {"num_graphs": 4}},
+    }
+
+    summary = _downsample_tasks(out_dir, report, max_task_ratio=3.0, seed=42)
+
+    # task 1 total=42, task 2 total=28 (smallest); cap=28*3.0=84. Neither
+    # task exceeds the cap -- no-op, matching the real benchmark's expected
+    # behavior at its ~2.9x natural ratio.
+    assert summary["trimmed"] == {}
+    assert report["1"]["train"]["num_graphs"] == 30
+    saved = torch.load(out_dir / "task_1_train.pt", weights_only=False)
+    assert len(saved) == 30
