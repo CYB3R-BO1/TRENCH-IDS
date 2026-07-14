@@ -1,11 +1,12 @@
-# Attack-class similarity analysis config (professor-directed Step 1 redesign).
+# Attack-class similarity analysis config.
 #
-# Scope: 2 datasets (ToN-IoT, CSE-CIC-IDS2018), 6 attack classes -- reduced
-# from the original 4-dataset/10-class design per the professor's guidance to
-# cut implementation complexity. NF-UNSW-NB15-v2 and NF-BoT-IoT-v2 are dropped
-# entirely; see docs/attack-class-counts.md for why (UNSW contributes almost
-# nothing to the >=100K-threshold pool once BoT-IoT is also out -- its only
-# relevant contribution, Reconnaissance, is 99.5% supplied by BoT-IoT anyway).
+# Scope: 3 datasets (ToN-IoT, CSE-CIC-IDS2018, BoT-IoT), 10-class candidate
+# pool. NF-UNSW-NB15-v2 stays excluded (no class survives dropping it once
+# BoT-IoT is back -- see docs/dataset-plan.md §1). Each class is restricted
+# to specific dataset(s) via trench_ids.labels.CLASS_DATASETS (threaded
+# through trench_ids.similarity.count_classes/sample_classes) so a class
+# label that happens to also appear in an unsanctioned dataset (e.g.
+# BoT-IoT's DDoS/DoS rows) never leaks into the pooled sample.
 
 seed: 42
 samples_per_class: 5000
@@ -18,17 +19,24 @@ paths:
 datasets:
   NF-ToN-IoT-v2: ToN
   NF-CSE-CIC-IDS2018-v2: CSE
+  NF-BoT-IoT-v2: BoT
 
-# 6-class pool: top classes by ToN+CSE-only combined count, dropping
-# Bot/BruteForce/Infiltration (116K-143K, well below the ~685K-3.8M range of
-# the other six) and Reconnaissance (UNSW+BoT-IoT only, no longer available).
+# 10-class pool: every canonical class with a CLASS_DATASETS entry in
+# labels.py. Bot/BruteForce/Infiltration (116K-143K) are included despite
+# being an order of magnitude below the other seven (685K-3.8M) -- included
+# for benchmark richness, not because the data changed (see labels.py
+# module docstring).
 classes:
-  - DDoS
-  - DoS
   - Scanning
+  - DDoS
+  - Reconnaissance
   - XSS
+  - DoS
   - Password
   - Injection
+  - Bot
+  - BruteForce
+  - Infiltration
 
 # Same 37 flow-statistic features as the original analysis (docs/datasets.md SS2.1).
 features:

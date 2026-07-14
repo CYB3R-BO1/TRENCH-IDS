@@ -9,24 +9,32 @@ paths:
   out_dir: data/processed     # task_{t}.parquet + manifest.json written here
 
 # Dataset directory name -> short source code stamped onto every row.
-# NF-UNSW-NB15-v2 and NF-BoT-IoT-v2 dropped entirely (professor's guidance to
-# reduce implementation complexity -- see docs/dataset-plan.md §1).
+# NF-UNSW-NB15-v2 stays excluded (no class survives dropping it once
+# BoT-IoT is back -- see docs/dataset-plan.md §1). NF-BoT-IoT-v2 is back in,
+# restricted to Reconnaissance only via trench_ids.labels.CLASS_DATASETS.
 datasets:
   NF-ToN-IoT-v2: ToN
   NF-CSE-CIC-IDS2018-v2: CSE
+  NF-BoT-IoT-v2: BoT
 
 sampling:
-  # Ceiling per canonical ATTACK class, pooled across datasets. Any class with
-  # fewer flows than this is kept in full (this is the "per-class floor" — rare
-  # classes like Worms=164 are never dropped). Lower this to shrink the graphs
-  # built in Step 2; it only trims abundant classes (DoS/DDoS/Scanning/...).
-  attack_per_class_cap: 8000
+  # NOTE: attack_per_class_cap is intentionally REMOVED. Every attack row
+  # that passes trench_ids.labels.CLASS_DATASETS' per-dataset restriction
+  # and isn't in EXCLUDED_CLASSES is kept, in full -- no pre-graph sampling
+  # cap. See docs/superpowers/specs/2026-07-13-dataset-task-respec-design.md
+  # §3. Any class-level balancing now happens after Step 2 graph
+  # construction, on constructed graphs, not here.
 
-  # Benign pool retained per dataset during the streaming pass. Tasks draw their
-  # benign quota from these pools (fresh per task, from the task's own datasets).
+  # Benign pool retained per dataset during the streaming pass. Tasks draw
+  # their benign quota from these pools (fresh per task, from the task's own
+  # datasets). Kept as a runtime/memory safeguard -- not part of the
+  # attack-cap removal.
   benign_per_dataset_cap: 60000
 
-  # Benign flows added to each task (split across that task's contributing datasets).
+  # Benign flows added to each task (split across that task's contributing
+  # datasets). This is a Step 1 pool-size safeguard, not the final
+  # attack:benign ratio a task's graphs see -- Step 2's benign_ratio
+  # (configs/graph.yaml) controls that. See design spec §3a.
   benign_per_task: 8000
 
   # CSV read chunk size (rows). Files are up to 6 GB — never read whole.
@@ -39,5 +47,4 @@ split:
   test: 0.15
 
 # Drop exact-duplicate flow records (identical across all original columns).
-# Applied to the sampled per-task frame (see docs/datasets.md §5 step, §6).
 dedup: true

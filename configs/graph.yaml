@@ -12,6 +12,17 @@ paths:
 # point paths.out_dir at a separate directory per value to keep runs apart.
 graph_size: 300
 
+sampling:
+  # Attack:benign ratio applied per split, before mini-graph chunking (a
+  # Step 2 concern -- configs/preprocess.yaml's benign_per_task is just a
+  # Step 1 pool-size safeguard, not the final ratio graphs see). Sweep
+  # candidates: 2.0, 3.0, 4.0 -- rerun with a different value + a different
+  # paths.out_dir per candidate, same pattern as graph_size, and pick the
+  # final value from CL performance once Step 3 exists (see design spec
+  # §3a). When a split's pooled benign rows can't cover the target, benign
+  # rows are reused (sampled with replacement) rather than capped.
+  benign_ratio: 3.0
+
 # Rows within each split are shuffled (seeded) before chunking. The source
 # Parquet is ordered by canonical_label (Step 1 samples per-class, then
 # concatenates), so chunking without shuffling first would produce
