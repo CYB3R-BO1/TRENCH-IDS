@@ -31,7 +31,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from trench_ids.labels import RAW_TO_CANONICAL, UnknownAttackLabel
+from trench_ids.labels import CLASS_DATASETS, RAW_TO_CANONICAL, UnknownAttackLabel
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -50,37 +50,56 @@ def _map_canonical(attack: pd.Series) -> pd.Series:
     return mapped
 
 
-def count_classes(cfg: dict[str, Any], classes: list[str]) -> Counter:
-    """Count flows per candidate class across all datasets (streaming, Attack column only)."""
+def count_classes(
+    cfg: dict[str, Any],
+    classes: list[str],
+    class_datasets: dict[str, set[str]] | None = None,
+) -> Counter:
+    """Count flows per candidate class, restricted to each class's allowed
+    dataset(s) (streaming, Attack column only).
+
+    class_datasets restricts which dataset(s) a class's rows may be counted
+    from -- e.g. BoT-IoT also has DDoS/DoS-labeled rows, but those must not
+    leak into the DDoS/DoS classes since BoT-IoT's only sanctioned
+    contribution is Reconnaissance. Defaults to trench_ids.labels.CLASS_DATASETS.
+    """
+    class_datasets = class_datasets if class_datasets is not None else CLASS_DATASETS
     raw_dir = Path(cfg["paths"]["raw_dir"])
     chunk_size = cfg["chunk_size"]
     wanted = set(classes)
     counts: Counter = Counter()
-    for dir_name in cfg["datasets"]:
+    for dir_name, code in cfg["datasets"].items():
         csv = _dataset_csv(raw_dir, dir_name)
         print(f"[count] {dir_name} ...", flush=True)
         for chunk in pd.read_csv(csv, usecols=["Attack"], chunksize=chunk_size):
             canon = _map_canonical(chunk["Attack"])
             vc = canon.value_counts()
             for cls, n in vc.items():
-                if cls in wanted:
+                if cls in wanted and code in class_datasets.get(cls, set()):
                     counts[cls] += int(n)
     return counts
 
 
 def sample_classes(
-    cfg: dict[str, Any], classes: list[str], counts: Counter, rng: np.random.Generator
+    cfg: dict[str, Any],
+    classes: list[str],
+    counts: Counter,
+    rng: np.random.Generator,
+    class_datasets: dict[str, set[str]] | None = None,
 ) -> dict[str, pd.DataFrame]:
-    """Exact uniform sample of ``samples_per_class`` rows per class, no replacement.
+    """Exact uniform sample of ``samples_per_class`` rows per class, no replacement,
+    restricted to each class's allowed dataset(s).
 
-    Equivalent in result to reservoir sampling (a uniform random subset of fixed
-    size drawn from a stream) but implemented via pre-selected occurrence
-    indices, since the exact per-class total is already known from
-    ``count_classes``. For each class, ``n_target`` of its ``total`` occurrences
-    (0-indexed, in stream order) are chosen up front; as the stream is scanned,
-    a running per-class occurrence counter is compared against that selection.
-    Every class ends up with exactly ``min(n_target, total)`` rows.
+    Equivalent in result to reservoir sampling (a uniform random subset of
+    fixed size drawn from a stream) but implemented via pre-selected
+    occurrence indices, since the exact per-class total (already
+    CLASS_DATASETS-restricted) is known from ``count_classes``. For each
+    class, ``n_target`` of its ``total`` occurrences (0-indexed, in stream
+    order *within its allowed datasets*) are chosen up front; as each
+    allowed dataset's stream is scanned, a running per-class occurrence
+    counter is compared against that selection.
     """
+    class_datasets = class_datasets if class_datasets is not None else CLASS_DATASETS
     raw_dir = Path(cfg["paths"]["raw_dir"])
     chunk_size = cfg["chunk_size"]
     n_target = cfg["samples_per_class"]
@@ -94,9 +113,12 @@ def sample_classes(
     for dir_name, code in cfg["datasets"].items():
         csv = _dataset_csv(raw_dir, dir_name)
         print(f"[sample] {dir_name} ...", flush=True)
+        allowed_here = {c for c in wanted if code in class_datasets.get(c, set())}
+        if not allowed_here:
+            continue
         for chunk in pd.read_csv(csv, chunksize=chunk_size):
             canon = _map_canonical(chunk["Attack"])
-            mask = canon.isin(wanted)
+            mask = canon.isin(allowed_here)
             if not mask.any():
                 continue
             sub = chunk.loc[mask].reset_index(drop=True)
