@@ -39,17 +39,25 @@ the 37 flow-statistic features, then standardize those per-class means
 (z-score across the 10 class means, not the underlying samples), (3) cosine
 similarity between the standardized means.
 
-Task assignment is **isolate-and-bundle**: classes that are all pairwise
-above a similarity threshold (a "conflict clique") cannot avoid a
-conflicting co-location no matter how they're split, so every member of the
-largest such clique gets its own singleton task; the remaining classes are
-paired off via minimum-weight matching, still respecting the threshold. For
-this 10-class pool, threshold 0.35 (stable across 0.21-0.55) yields 6 tasks:
-{Scanning} isolated, {Reconnaissance} isolated, {XSS, DDoS}, {Password,
-Infiltration}, {DoS, Injection}, {Bot, BruteForce}. XSS<->Infiltration is
-the single highest cosine pair in the whole matrix (0.706) and lands in
-different, non-adjacent tasks (T3 vs. T4); Scanning<->Reconnaissance is the
-second-highest (0.628), also isolated from each other (T1 vs. T2).
+Task assignment is **isolate-and-bundle** with a **size-aware tie-break**:
+classes that are all pairwise above a similarity threshold (a "conflict
+clique") cannot avoid a conflicting co-location no matter how they're
+split, so every member of the largest such clique gets its own singleton
+task; the remaining classes are paired off via minimum-weight matching,
+still respecting the threshold, but among pairings that tie on the
+threshold constraint the one minimizing the *largest resulting task's
+size* wins (total similarity is only the secondary tie-break) --
+see ``trench_ids.task_design.min_weight_grouping``'s ``sizes`` parameter.
+For this 10-class pool, threshold 0.35 (stable across 0.21-0.55) isolates
+{Scanning} and {Reconnaissance}; among the 78 threshold-valid pairings of
+the remaining 8 classes, {DDoS, Infiltration}, {DoS, Injection}, {Password,
+Bot}, {XSS, BruteForce} minimizes the largest task's size (3.79M flows,
+bounded by Scanning itself -- no valid pairing can do better) instead of
+total pairwise similarity, which happened to select the single
+worst-balanced valid pairing ({XSS, DDoS} at 5.88M flows, the design's
+original choice). See
+docs/superpowers/specs/2026-07-14-benchmark-finalization-design.md §1 for
+the full enumeration.
 
 If the candidate pool or task assignment changes, change it here too --
 nothing else should hardcode label strings, dataset restrictions, or task
@@ -132,23 +140,24 @@ EXCLUDED_CLASSES: frozenset[str] = frozenset(
     {"Backdoor", "MITM", "Ransomware", "Web Attacks", "Theft"}
 )
 
-# Canonical ATTACK class -> continual-learning task id (T1..T6). Isolate-and-
-# bundle task assignment (module docstring, trench_ids.task_design):
+# Canonical ATTACK class -> continual-learning task id (T1..T6). Size-aware
+# isolate-and-bundle task assignment (module docstring,
+# docs/superpowers/specs/2026-07-14-benchmark-finalization-design.md §1):
 # {Scanning} and {Reconnaissance} are singleton (isolated) tasks; the
-# remaining eight classes pair off via minimum-weight matching, all
-# respecting the 0.35 similarity threshold (stable across 0.21-0.55).
+# remaining eight classes pair off minimizing the largest resulting task's
+# size (3.79M flows), all respecting the 0.35 similarity threshold.
 # Benign is deliberately NOT assigned a task: it is the shared negative/
 # background class injected fresh into EVERY task, not a task of its own.
 CANONICAL_TO_TASK: dict[str, int] = {
     "Scanning": 1,
     "Reconnaissance": 2,
-    "XSS": 3,
     "DDoS": 3,
-    "Password": 4,
-    "Infiltration": 4,
-    "DoS": 5,
-    "Injection": 5,
-    "Bot": 6,
+    "Infiltration": 3,
+    "DoS": 4,
+    "Injection": 4,
+    "Password": 5,
+    "Bot": 5,
+    "XSS": 6,
     "BruteForce": 6,
 }
 
@@ -157,25 +166,24 @@ CANONICAL_TO_TASK: dict[str, int] = {
 TASK_THEMES: dict[int, str] = {
     1: "Scanning",
     2: "Reconnaissance",
-    3: "XSS + DDoS",
-    4: "Password + Infiltration",
-    5: "DoS + Injection",
-    6: "Bot + BruteForce",
+    3: "DDoS + Infiltration",
+    4: "DoS + Injection",
+    5: "Password + Bot",
+    6: "XSS + BruteForce",
 }
 
 # Datasets that contribute each task's *attack* classes, and therefore the
 # datasets a task draws its fresh benign subset from. Derived from
-# CLASS_DATASETS. 3 of 6 tasks are single-dataset (T1 ToN-only, T2 BoT-IoT-
-# only, T6 CSE-only) — unlike the prior design, not every task spans 2+
-# datasets; that constraint was specific to the earlier complexity-reduction
-# guidance and isn't restated here.
+# CLASS_DATASETS. T1 (ToN-only) and T2 (BoT-IoT-only) are single-dataset;
+# every other task now spans both ToN and CSE (T3-T6 each pair a
+# ToN-restricted or multi-dataset class with a CSE-restricted one).
 TASK_DATASETS: dict[int, tuple[str, ...]] = {
     1: ("ToN",),
     2: ("BoT",),
     3: ("ToN", "CSE"),
     4: ("ToN", "CSE"),
     5: ("ToN", "CSE"),
-    6: ("CSE",),
+    6: ("ToN", "CSE"),
 }
 
 NUM_TASKS = len(TASK_THEMES)

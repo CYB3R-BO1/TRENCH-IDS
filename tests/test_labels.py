@@ -147,29 +147,35 @@ def test_every_task_has_theme_and_datasets() -> None:
 
 
 def test_attack_classes_for_task_matches_locked_six_task_table() -> None:
-    # Isolate-and-bundle grouping from the spike computation (design spec §2):
-    # threshold 0.35, stable across 0.21-0.55.
+    # Size-aware isolate-and-bundle grouping (design spec
+    # 2026-07-14-benchmark-finalization-design.md §1.2): among all 78
+    # threshold-valid pairings of the 8 non-isolated classes, this table
+    # minimizes the largest task's size (3.79M flows, bounded by Scanning
+    # itself) rather than total pairwise similarity.
     for task in TASK_THEMES:
         assert BENIGN not in labels.attack_classes_for_task(task)
     assert set(labels.attack_classes_for_task(1)) == {"Scanning"}
     assert set(labels.attack_classes_for_task(2)) == {"Reconnaissance"}
-    assert set(labels.attack_classes_for_task(3)) == {"XSS", "DDoS"}
-    assert set(labels.attack_classes_for_task(4)) == {"Password", "Infiltration"}
-    assert set(labels.attack_classes_for_task(5)) == {"DoS", "Injection"}
-    assert set(labels.attack_classes_for_task(6)) == {"Bot", "BruteForce"}
+    assert set(labels.attack_classes_for_task(3)) == {"DDoS", "Infiltration"}
+    assert set(labels.attack_classes_for_task(4)) == {"DoS", "Injection"}
+    assert set(labels.attack_classes_for_task(5)) == {"Password", "Bot"}
+    assert set(labels.attack_classes_for_task(6)) == {"XSS", "BruteForce"}
     for c in EXCLUDED_CLASSES:
         assert all(c not in labels.attack_classes_for_task(t) for t in TASK_THEMES)
 
 
 def test_task_datasets_reflect_single_vs_multi_dataset_tasks() -> None:
-    # T1 (Scanning) is ToN-only, T2 (Reconnaissance) is BoT-IoT-only, T6
-    # (Bot+BruteForce) is CSE-only; T3/T4/T5 span both ToN and CSE.
+    # T1 (Scanning) is ToN-only, T2 (Reconnaissance) is BoT-IoT-only -- both
+    # unchanged from before. Under the rebalanced table, T3-T6 all pair a
+    # ToN-only class with a CSE-only class (or span both via a multi-dataset
+    # class), so all four now span both datasets (previously only T3-T5
+    # did; T6 was CSE-only under the old pairing).
     assert TASK_DATASETS[1] == ("ToN",)
     assert TASK_DATASETS[2] == ("BoT",)
     assert set(TASK_DATASETS[3]) == {"ToN", "CSE"}
     assert set(TASK_DATASETS[4]) == {"ToN", "CSE"}
     assert set(TASK_DATASETS[5]) == {"ToN", "CSE"}
-    assert TASK_DATASETS[6] == ("CSE",)
+    assert set(TASK_DATASETS[6]) == {"ToN", "CSE"}
 
 
 def test_raw_to_canonical_has_no_gaps_for_configured_datasets() -> None:
