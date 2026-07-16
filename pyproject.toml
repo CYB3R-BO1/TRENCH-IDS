@@ -26,6 +26,7 @@ dev = [
 trench-preprocess = "trench_ids.preprocess:main"
 trench-similarity = "trench_ids.similarity:main"
 trench-graphs = "trench_ids.graphs:main"
+trench-graph-composition = "trench_ids.graph_composition:main"
 
 [build-system]
 requires = ["hatchling"]
