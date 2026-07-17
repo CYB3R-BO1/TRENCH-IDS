@@ -11,7 +11,6 @@ from trench_ids.model.rhgnn import (
     RelationSpecificHeteroGNN,
     RelationSpecificLayer,
     port_bucket,
-    to_bidirectional,
 )
 
 FLOW_DIM = 5
@@ -94,42 +93,6 @@ def test_port_bucket_clamps_out_of_range_values() -> None:
 
 
 # ---------------------------------------------------------------------------
-# to_bidirectional
-# ---------------------------------------------------------------------------
-
-
-def test_to_bidirectional_gives_flow_all_five_incoming_relations() -> None:
-    g = to_bidirectional(_synthetic_graph())
-    incoming = {rel for (src, rel, dst) in g.edge_index_dict if dst == "flow"}
-    assert incoming == {
-        "originates",
-        "rev_terminates_at",
-        "rev_targets_port",
-        "rev_uses_protocol",
-        "rev_uses_service",
-    }
-
-
-def test_to_bidirectional_symmetrizes_host_host_in_place() -> None:
-    g = _synthetic_graph()
-    before = g["host", "communicates_with", "host"].edge_index.shape[1]
-    g2 = to_bidirectional(g)
-    after = g2["host", "communicates_with", "host"].edge_index.shape[1]
-    assert after >= before
-    # No separate "rev_communicates_with" relation is created (same node
-    # type on both ends -- ToUndirected symmetrizes in place instead).
-    assert ("host", "rev_communicates_with", "host") not in g2.edge_index_dict
-
-
-def test_to_bidirectional_does_not_mutate_input_when_cloned() -> None:
-    g = _synthetic_graph()
-    original_edge_count = g["host", "originates", "flow"].edge_index.shape[1]
-    to_bidirectional(g.clone())
-    assert g["host", "originates", "flow"].edge_index.shape[1] == original_edge_count
-    assert ("flow", "rev_originates", "host") not in g.edge_index_dict
-
-
-# ---------------------------------------------------------------------------
 # NodeFeatureEncoders
 # ---------------------------------------------------------------------------
 
@@ -158,7 +121,7 @@ def test_node_feature_encoders_produce_hidden_dim_for_every_node_type() -> None:
 
 
 def test_relation_specific_conv_keeps_relations_separate_per_node_type() -> None:
-    g = to_bidirectional(_synthetic_graph())
+    g = _synthetic_graph()
     encoders = NodeFeatureEncoders(16, protocol_vocab_size=5, service_vocab_size=10,
                                     flow_feature_dim=FLOW_DIM, host_feature_dim=HOST_DIM)
     x_dict = encoders(g)
@@ -167,33 +130,26 @@ def test_relation_specific_conv_keeps_relations_separate_per_node_type() -> None
 
     relation_embeds = conv(x_dict, g.edge_index_dict)
 
-    assert set(relation_embeds["flow"].keys()) == {
-        "originates",
-        "rev_terminates_at",
-        "rev_targets_port",
-        "rev_uses_protocol",
-        "rev_uses_service",
-    }
+    assert set(relation_embeds["flow"].keys()) == {"originates"}
     for tensor in relation_embeds["flow"].values():
         assert tensor.shape == (6, 16)
     assert set(relation_embeds["host"].keys()) == {
         "terminates_at",
-        "rev_originates",
         "communicates_with",
     }
     assert set(relation_embeds["protocol"].keys()) == {"uses_protocol"}
 
 
 def test_relation_specific_conv_uses_distinct_weights_per_relation() -> None:
-    g = to_bidirectional(_synthetic_graph())
+    g = _synthetic_graph()
     node_types, edge_types = g.metadata()
     conv = RelationSpecificConv(edge_types, hidden_dim=8)
 
     originates_w = conv.rel_lins["host__originates__flow"].weight
-    rev_terminates_w = conv.rel_lins["host__rev_terminates_at__flow"].weight
+    terminates_w = conv.rel_lins["flow__terminates_at__host"].weight
 
-    assert originates_w is not rev_terminates_w
-    assert not torch.allclose(originates_w, rev_terminates_w)
+    assert originates_w is not terminates_w
+    assert not torch.allclose(originates_w, terminates_w)
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +191,7 @@ def test_semantic_attention_gradients_flow_to_all_relations() -> None:
 
 
 def test_relation_specific_layer_attention_sums_to_one_per_node_type() -> None:
-    g = to_bidirectional(_synthetic_graph())
+    g = _synthetic_graph()
     node_types, edge_types = g.metadata()
     encoders = NodeFeatureEncoders(16, protocol_vocab_size=5, service_vocab_size=10,
                                     flow_feature_dim=FLOW_DIM, host_feature_dim=HOST_DIM)
@@ -253,7 +209,7 @@ def test_relation_specific_layer_attention_sums_to_one_per_node_type() -> None:
 
 
 def test_full_model_forward_pass_shapes() -> None:
-    g = to_bidirectional(_synthetic_graph())
+    g = _synthetic_graph()
     model = RelationSpecificHeteroGNN.from_graph(
         g, hidden_dim=16, protocol_vocab_size=5, service_vocab_size=10, num_layers=2
     )
@@ -275,7 +231,7 @@ def test_full_model_forward_pass_shapes() -> None:
 
 
 def test_full_model_gradients_reach_relation_specific_weights() -> None:
-    g = to_bidirectional(_synthetic_graph())
+    g = _synthetic_graph()
     model = RelationSpecificHeteroGNN.from_graph(
         g, hidden_dim=16, protocol_vocab_size=5, service_vocab_size=10, num_layers=1
     )
@@ -294,7 +250,7 @@ def test_full_model_gradients_reach_relation_specific_weights() -> None:
 
 
 def test_relation_specific_hetero_gnn_from_graph_matches_metadata() -> None:
-    g = to_bidirectional(_synthetic_graph())
+    g = _synthetic_graph()
     model = RelationSpecificHeteroGNN.from_graph(
         g, hidden_dim=8, protocol_vocab_size=5, service_vocab_size=10
     )

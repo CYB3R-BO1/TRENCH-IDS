@@ -13,7 +13,6 @@ from trench_ids.model.rhgnn import (
     RelationSpecificLayer,
     RelationSpecificOutput,
     port_bucket,
-    to_bidirectional,
 )
 
 __all__ = [
@@ -24,5 +23,4 @@ __all__ = [
     "RelationSpecificLayer",
     "RelationSpecificOutput",
     "port_bucket",
-    "to_bidirectional",
 ]

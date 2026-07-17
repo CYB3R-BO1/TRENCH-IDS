@@ -11,25 +11,27 @@ transferability estimation) can use either.
 
 This module does not modify the frozen Step 1/2 pipeline or the on-disk
 graphs (``data/graphs*/*.pt``) in any way -- it only reads the ``HeteroData``
-mini-graphs those steps already produced. The one graph-level transform this
-module applies is ``to_bidirectional``, a thin wrapper around PyG's
-``ToUndirected``, applied in memory at model-input time (never written back
-to disk): the stored mini-graphs are one-directional per the Step 2 design
-(e.g. ``flow--terminates_at-->host`` only, no ``host->flow`` counterpart),
-but the spec calls for a Flow node to receive information via all five of
-its incident relations (originates, terminates_at, uses_protocol,
-uses_service, targets_port). ``ToUndirected`` adds each relation's reverse
-edge (named ``rev_<relation>``, except for ``host--communicates_with-->
-host``, which is same-type on both ends and is instead symmetrized in
-place), giving Flow exactly those five incoming relations without needing to
-touch how Step 2 builds or stores its graphs. Verified directly against a
-real saved mini-graph (``data/graphs_ratio4/task_5_test.pt``): after the
-transform, Flow has incoming relations
-``{originates, rev_terminates_at, rev_targets_port, rev_uses_protocol,
-rev_uses_service}`` (5), Host has ``{terminates_at, rev_originates,
-communicates_with}`` (3), and Protocol/Service/Port each keep their single
-original incoming relation (1) -- for those single-relation node types,
-fusion is a no-op (``SemanticAttention`` short-circuits to beta=1.0).
+mini-graphs those steps already produced, exactly as stored, on their
+original 6 one-directional relations (``host--originates-->flow``,
+``flow--terminates_at-->host``, ``flow--targets_port-->port``,
+``flow--uses_protocol-->protocol``, ``flow--uses_service-->service``,
+``host--communicates_with-->host``). No reverse edges are added: each
+relation encodes a specific real-world direction (e.g. "host originated this
+flow"), and a synthetic ``rev_originates`` edge ("flow originated this
+host"?) has no such meaning -- inventing one would blur exactly the
+relation-specific semantics this architecture exists to preserve. Per
+professor's explicit instruction, relations stay one-way.
+
+One consequence, verified directly against a real saved mini-graph
+(``data/graphs_ratio4/task_5_test.pt``): incoming-relation counts per node
+type are asymmetric rather than uniform. Flow has exactly one incoming
+relation (``originates``, from Host); Host has two (``terminates_at`` from
+Flow, ``communicates_with`` from Host); Protocol, Service, and Port each have
+exactly one (``uses_protocol``, ``uses_service``, ``targets_port``, all from
+Flow). For every node type but Host, ``SemanticAttention`` fusion is
+therefore a no-op over a single relation (beta=1.0) rather than a genuine
+weighted combination -- an honest reflection of what the directed schema
+actually provides, not a bug to work around.
 """
 
 from __future__ import annotations
@@ -40,21 +42,12 @@ from dataclasses import dataclass, field
 import torch
 from torch import nn
 from torch_geometric.data import HeteroData
-from torch_geometric.transforms import ToUndirected
 
 from trench_ids.model.attention_fusion import SemanticAttention
 from trench_ids.model.relation_conv import RelationSpecificConv
 
 FLOW_FEATURE_DIM = 37  # len(configs/graph.yaml: features)
 HOST_FEATURE_DIM = 4  # total_flows, avg_bytes_as_src, avg_bytes_as_dst, unique_ports_contacted
-
-
-def to_bidirectional(graph: HeteroData) -> HeteroData:
-    """Add reverse edges so every node type can receive from all its incident
-    relations. In-memory only -- never mutates the saved ``.pt`` files; call
-    this once per mini-graph when loading it for the model (see module
-    docstring for why this is needed and what it produces on this schema)."""
-    return ToUndirected()(graph)
 
 
 def port_bucket(port_number: torch.Tensor, num_buckets: int) -> torch.Tensor:
@@ -185,10 +178,11 @@ class RelationSpecificHeteroGNN(nn.Module):
     """Full Step 3 encoder: raw-feature encoding -> N relation-specific +
     attention-fusion layers.
 
-    Call ``to_bidirectional`` on a graph before passing it to ``forward``.
-    Build with ``from_graph`` rather than the constructor directly in normal
-    use -- it reads the edge/node types straight from a sample graph so the
-    relation-specific weight set always matches the schema being trained on.
+    Operates directly on a graph as loaded from disk -- no edge transform
+    needed before calling ``forward``. Build with ``from_graph`` rather than
+    the constructor directly in normal use -- it reads the edge/node types
+    straight from a sample graph so the relation-specific weight set always
+    matches the schema being trained on.
     """
 
     def __init__(
@@ -225,10 +219,9 @@ class RelationSpecificHeteroGNN(nn.Module):
         port_buckets: int = 32,
     ) -> RelationSpecificHeteroGNN:
         """Build a model whose relation-specific weights match `sample_graph`'s
-        metadata exactly. `sample_graph` must already be bidirectional (see
-        `to_bidirectional`) -- metadata is fixed at construction time since
+        metadata exactly -- metadata is fixed at construction time since
         every mini-graph in this benchmark shares the same 5 node types / 6
-        base relations (11 after `to_bidirectional`)."""
+        one-directional relations."""
         node_types, edge_types = sample_graph.metadata()
         return cls(
             edge_types,

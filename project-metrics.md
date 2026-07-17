@@ -1,6 +1,6 @@
 # TRENCH-IDS - Project Metrics
 
-This file is the single place to find every hard number about the project - dataset scale, class distribution, task design, pipeline output, and test/runtime stats. Update it whenever Step 1/Step 2 are rerun or the class/task design changes; treat every number here as sourced from an actual file on disk (cited inline), never estimated.
+This file is the single place to find every hard number about the project - dataset scale, class distribution, task design, pipeline output, and test/runtime stats. Update it whenever Step 1/Step 2 are rerun or the class/task design changes; treat every number here as sourced from an actual file on disk (cited inline), never estimated. For the narrative/architecture picture - what each component does and how they connect (including branches, shared inputs, dead-end diagnostics, and the one real feedback loop) - see `flow.md`. For a dated changelog of when each piece was built and why - see `log.md`.
 
 **Benchmark objective:** TRENCH-IDS is a benchmark for **task-incremental continual learning on heterogeneous, graph-structured network intrusion detection data** - 6 sequential tasks, each introducing new attack classes (plus a fresh Benign subset) built from real NetFlow v2 traffic, feeding into a relation-specific heterogeneous GNN trained under continual learning (full proposed pipeline: `CLAUDE.md` "Research goal").
 
@@ -18,6 +18,8 @@ This file is the single place to find every hard number about the project - data
 | Graph size (max flows/mini-graph) | 300 |
 | Total mini-graphs, `benign_ratio=4.0` set | 65,378 |
 | `benign_ratio` sweep candidates produced | 2.0 / 3.0 / 4.0 |
+| Step 3 model parameters (default config: `hidden_dim=64`, 1 layer) | 86,226 |
+| Step 3 relations used (one-directional, no reverse edges) | 6 |
 
 ### Pipeline overview
 
@@ -43,7 +45,13 @@ Step 2: heterogeneous graph construction +  graphs.py -> data/graphs*/task_*_*.p
 Mini-graphs (list[HeteroData] per task/split, node/relation schema in S6)
         |
         v
-Step 3 (not yet started): relation-specific GNN + continual-learning loop
+Step 3: relation-specific encoding + attention   src/trench_ids/model/*.py       (S7, see §13)
+  fusion (implemented) -> per-relation + fused
+  node embeddings
+        |
+        v
+Step 4 (not yet started): classifier + relation-specific memory bank,
+  transferability estimation, relation-aware EWC continual-learning loop
 ```
 
 ---
@@ -355,14 +363,89 @@ No crashes, OOM, or data-level timeouts at real scale - all three Step 2 runs co
 | Benign pool sizing | Tracked, not yet resolved | `benign_per_task=8000` (Step 1 safeguard) is still far smaller than a task's attack count (T1 alone is 3.78M attack rows), so `_select_benign`'s with-replacement fallback still reuses each pooled benign flow heavily for the larger tasks. Not raised in this round - the finalization design scoped only the 3-way `benign_ratio` sweep (now actually produced, §6), not a `benign_per_task` increase. Track as a future Step 3 data-quality item if benign-flow repetition turns out to matter for training. |
 | Choosing the winning `benign_ratio` | Deferred to Step 3 | All three candidate sets (2.0/3.0/4.0) now exist in full (§6, §7) with `benign_ratio` and `max_task_ratio` recorded in each `graph_counts.json`. Picking the best one needs real continual-learning training/forgetting metrics, which don't exist until Step 3's model is built. |
 
-**Step 1 and Step 2 are now frozen** (per user direction, 2026-07-14) - no further data-pipeline redesign unless the professor requests it or a genuine bug is discovered. Effort moves to Step 3 (the relation-specific heterogeneous GNN and continual-learning model) next.
+**Step 1 and Step 2 are now frozen** (per user direction, 2026-07-14) - no further data-pipeline redesign unless the professor requests it or a genuine bug is discovered. Step 3 (relation-specific encoder + attention fusion, §13) is implemented and verified; effort moves to Step 4 (classifier + relation-specific memory bank, transferability estimation, relation-aware EWC) next. Picking the winning `benign_ratio` still awaits real continual-learning training/forgetting curves from Step 4, not just Step 3's encoder existing.
 
 ---
 
-## 12. Where these numbers come from
+## 13. Step 3 - relation-specific heterogeneous GNN + attention fusion
+
+Implemented 2026-07-16 in `src/trench_ids/model/` (`relation_conv.py`, `attention_fusion.py`, `rhgnn.py`, `__init__.py`) + `configs/model.yaml` + `tests/test_model.py`. Reads Step 2's saved `HeteroData` mini-graphs unmodified - **no changes to any Step 1/2 file** (`graphs.py`, `preprocess.py`, `labels.py`), **no downsampling added**. **Revised 2026-07-17**: removed the in-memory `ToUndirected`/reverse-edge step per the professor's explicit instruction that relations must stay one-way - each relation encodes a specific real-world direction (e.g. "host originated this flow"), and a synthetic reverse edge has no such meaning, so adding one would blur the relation-specific semantics the architecture exists to preserve. All numbers below are freshly re-measured against real saved graphs and the real full test suite on the corrected, one-directional model (not carried over from the earlier bidirectional version).
+
+Step 3 converts the heterogeneous mini-graphs produced by Step 2 into relation-aware node embeddings: it first learns a separate representation per relation for every node, then fuses those representations through semantic attention into one final embedding per node.
+
+### 13.1 Architecture size
+
+Every node's raw Step 2 features are first normalized and projected into a common hidden dimension (Flow/Host: `LayerNorm -> Linear`; Protocol/Service: vocab-indexed `Embedding`; Port: bucketed `Embedding`) - see §13.3 for why the `LayerNorm` step was necessary. The model operates directly on Step 2's **6 one-directional relations exactly as stored on disk** - no reverse edges are added, so a node only receives messages along relations where it is the destination. Confirmed against a real saved graph (`data/graphs_ratio4/task_4_train.pt`):
+
+| Node type | Incoming relations |
+|---|---:|
+| Flow | 1 (`originates`, from Host) |
+| Host | 2 (`terminates_at` from Flow, `communicates_with` from Host) |
+| Protocol | 1 (`uses_protocol`, from Flow) |
+| Service | 1 (`uses_service`, from Flow) |
+| Port | 1 (`targets_port`, from Flow) |
+
+This is asymmetric by design, not an oversight: Flow is the *source* of 4 of the 6 relations (`terminates_at`, `targets_port`, `uses_protocol`, `uses_service`) and the *destination* of only 1 (`originates`), so semantic attention fusion is a genuine multi-relation combination only for Host - every other node type fuses over a single relation (a no-op, β=1.0). This is an honest reflection of what the directed schema provides, not a bug to work around.
+
+Global vocab sizes actually used (`data/graphs_ratio4/vocab.json`): **Protocol = 5**, **Service (`L7_PROTO`) = 216**.
+
+### 13.2 Parameter count (`RelationSpecificHeteroGNN`, real instantiation against `task_4_train.pt`)
+
+| Config | Total params | Node-feature encoders | Relation-conv (per layer) | Attention fusion (per layer) |
+|---|---:|---:|---:|---:|
+| `hidden_dim=64`, 1 layer (**current `configs/model.yaml` default**) | **86,226** | 19,026 | 24,960 | 42,240 |
+| `hidden_dim=64`, 2 layers | 153,426 | 19,026 | 24,960 ×2 | 42,240 ×2 |
+| `hidden_dim=128`, 1 layer | 220,242 | 37,970 | 99,072 | 83,200 |
+
+Relation-conv parameters scale as **O(R × H²)**, where R is the number of relations (6) and H is `hidden_dim` - one full `nn.Linear(H, H)` weight matrix per relation, confirmed by the `hidden_dim=64→128` row (H² quadruples, 24,960 → 99,072 ≈ 4×). This is what enables relation-specific message passing, as each relation learns an independent transformation rather than sharing weights with any other relation.
+
+### 13.3 Real-data forward/backward integration check
+
+32 real mini-graphs from `data/graphs_ratio4/task_4_train.pt` (task 4 = DoS + Injection + Benign, 3 classes), batched via PyG's `DataLoader`, real vocab sizes, `hidden_dim=64`, 1 layer, plus a `nn.Linear(64, 3)` classifier head on `output.fused["flow"]`:
+
+| Metric | Value |
+|---|---:|
+| Batched flow nodes | 9,600 (32 graphs × 300 flows) |
+| Cross-entropy loss (random init, 3 classes) | 1.0663 (≈ ln 3 = 1.099, as expected untrained) |
+| Forward + backward wall time | 0.045 s (CPU) |
+| `host--originates-->flow` weight grad, abs-sum (post-LayerNorm-fix) | 23.39 |
+| `host--originates-->flow` weight grad, abs-sum (pre-LayerNorm-fix, unnormalized raw features) | ~1e12 |
+
+The LayerNorm fix (added to `NodeFeatureEncoders` after this issue surfaced on real data) remains a **~10 orders-of-magnitude** reduction in gradient magnitude, from unusable to a stable, trainable range, on the corrected one-directional model.
+
+Attention weights (`output.attention`) at random initialization, per node type. Flow/Protocol/Service/Port each have exactly one incoming relation, so fusion is a trivial identity (β=1.0); Host is the only node type with a genuine two-relation fusion, and its weights are near-uniform (~0.5 each) as expected before any training:
+
+| Node type | Relation | β (untrained) |
+|---|---|---:|
+| Flow | `originates` | 1.000 |
+| Host | `terminates_at` | 0.531 |
+| Host | `communicates_with` | 0.469 |
+| Protocol | `uses_protocol` | 1.000 |
+| Service | `uses_service` | 1.000 |
+| Port | `targets_port` | 1.000 |
+
+Each node type's weights sum to 1.000 (softmax-guaranteed, also asserted directly in `test_relation_specific_layer_attention_sums_to_one_per_node_type`).
+
+### 13.4 Test suite
+
+**77 tests passing** (`.venv/Scripts/python.exe -m pytest -q`, 0 failures, same 2 pre-existing `torch.jit.script` deprecation warnings as §10) - up from 64 (§10) with the addition of `tests/test_model.py` (**13 tests**: `port_bucket` range/monotonicity/clamping, `NodeFeatureEncoders` output shapes, `RelationSpecificConv` per-relation separation and distinct weights, `SemanticAttention` identity/softmax-sum/gradient-flow, `RelationSpecificLayer` per-node-type attention sum-to-one, full-model forward-pass shapes and gradient reachability, `from_graph` metadata matching). Test count dropped from 80 to 77 on 2026-07-17 when the 3 tests specific to the removed `to_bidirectional` transform were deleted along with the function. `ruff check src tests` passes clean on all files.
+
+### 13.5 Design choices (brief - see code docstrings in `src/trench_ids/model/` for full justification)
+
+- **No reverse edges** (revised 2026-07-17): relations stay exactly as Step 2 stores them, one-way. Each relation encodes a specific directional real-world fact; a synthetic `rev_<relation>` edge has no such meaning and would undercut the relation-specific premise of the architecture. The tradeoff, made explicitly rather than engineered around, is that most node types (all but Host) fuse over a single incoming relation.
+- **HAN-style semantic attention** (Wang et al., WWW 2019) over GAT-style node-conditioned attention: produces one importance weight per relation (not per node), directly reusable for the later transferability-estimation/relation-aware-EWC steps.
+- **Port bucketing** (log1p-scaled, 32 buckets) instead of a raw 65536-row `nn.Embedding`: Port has no global vocabulary (chunk-local by Step 2 design), so a raw-port embedding would never generalize across mini-graphs.
+- **LayerNorm on raw Flow/Host features** before the linear projection: required because raw NetFlow byte/packet counters span huge dynamic ranges (§13.3).
+
+Source: `src/trench_ids/model/relation_conv.py`, `src/trench_ids/model/attention_fusion.py`, `src/trench_ids/model/rhgnn.py`, `configs/model.yaml`, `tests/test_model.py`; parameter counts and integration-check numbers measured directly against `data/graphs_ratio4/task_4_train.pt` and `data/graphs_ratio4/vocab.json` (not estimated).
+
+---
+
+## 14. Where these numbers come from
 
 - Dataset/class/task design: `docs/dataset-plan.md`, `docs/attack-class-counts.md`, `docs/attack-similarity-matrix.md`, `src/trench_ids/labels.py`, `src/trench_ids/task_design.py`
 - Step 1 output: `data/processed/manifest.json` (gitignored, regenerate via `trench_ids.preprocess`)
 - Step 2 output: `data/graphs/graph_counts.json`, `data/graphs_ratio2/graph_counts.json`, `data/graphs_ratio4/graph_counts.json` (gitignored, regenerate via `trench_ids.graphs --config <configs/graph*.yaml>`)
 - Graph composition (§8): `src/trench_ids/graph_composition.py`, `data/graphs_ratio4/graph_composition.json`, `data/graphs_ratio4/graph_composition_matrix.csv` (gitignored, regenerate via `python -m trench_ids.graph_composition --graphs-dir data/graphs_ratio4`)
 - Design rationale: `docs/superpowers/specs/2026-07-13-dataset-task-respec-design.md` (original respec), `docs/superpowers/specs/2026-07-14-benchmark-finalization-design.md` (task rebalancing, corrupted-row filter, downsampling cap, benign_ratio sweep)
+- Step 3 model + metrics (§13): `src/trench_ids/model/`, `configs/model.yaml`, `tests/test_model.py` (parameter counts and integration numbers measured directly, not checked into git - rerun the snippets in §13 to reproduce)

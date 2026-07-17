@@ -31,11 +31,11 @@ class RelationSpecificConv(nn.Module):
     ``{relation_name: Tensor[num_nodes_of_that_type, hidden_dim]}`` -- one
     tensor per *incoming* relation, not summed together. Relation names are
     each edge type's middle element (e.g. ``"originates"``,
-    ``"rev_terminates_at"``); this is unique per destination node type for
-    the current TRENCH-IDS schema (5 node types, 6 relations, doubled to 11
-    directed edge types by ``trench_ids.model.rhgnn.to_bidirectional``) -- if
-    a future schema change introduces two relations with the same name into
-    the same destination type, key by the full edge-type tuple instead.
+    ``"terminates_at"``); this is unique per destination node type for the
+    current TRENCH-IDS schema (5 node types, 6 one-directional relations,
+    used exactly as stored -- no reverse edges) -- if a future schema change
+    introduces two relations with the same name into the same destination
+    type, key by the full edge-type tuple instead.
     """
 
     def __init__(self, edge_types: list[tuple[str, str, str]], hidden_dim: int) -> None:
