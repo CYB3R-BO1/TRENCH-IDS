@@ -46,8 +46,17 @@ import torch
 import yaml
 from torch_geometric.data import HeteroData
 
-from trench_ids.labels import BENIGN
+from trench_ids.labels import BENIGN, canonical_classes
 from trench_ids.vocab import build_vocab, save_vocab
+
+# Fixed global class -> index mapping for Flow node labels (graph["flow"].y),
+# same order/meaning in every mini-graph across every task/split/graph_size/
+# benign_ratio set. Must NOT be built per mini-graph from that chunk's local
+# canonical_label.unique() -- a classifier trained across mini-graphs needs
+# one stable label space (index 4 always means the same class everywhere),
+# or CrossEntropyLoss gets contradictory supervision batch to batch.
+LABEL_NAMES = canonical_classes()
+LABEL_LOOKUP = {name: i for i, name in enumerate(LABEL_NAMES)}
 
 
 def _index_categorical(values: pd.Series) -> tuple[np.ndarray, list]:
@@ -150,9 +159,7 @@ def build_task_graph(
     protocol_vocab_ids = [vocab["PROTOCOL"][str(v)] for v in protocol_values]
     service_vocab_ids = [vocab["L7_PROTO"][str(v)] for v in service_values]
 
-    label_names = sorted(frame["canonical_label"].unique().tolist())
-    label_lookup = {name: i for i, name in enumerate(label_names)}
-    y = frame["canonical_label"].map(label_lookup).to_numpy(dtype=np.int64)
+    y = frame["canonical_label"].map(LABEL_LOOKUP).to_numpy(dtype=np.int64)
 
     hh_edge_index, hh_edge_attr = _host_host_edges(frame, src_idx, dst_idx)
 
@@ -160,7 +167,7 @@ def build_task_graph(
 
     graph["flow"].x = torch.tensor(frame[features].to_numpy(dtype=np.float32))
     graph["flow"].y = torch.tensor(y)
-    graph["flow"].label_names = label_names
+    graph["flow"].label_names = LABEL_NAMES
     graph["flow"].flow_id = frame["flow_id"].tolist()
     for split in ("train", "val", "test"):
         graph["flow"][f"{split}_mask"] = torch.tensor((frame["split"] == split).to_numpy())

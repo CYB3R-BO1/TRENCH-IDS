@@ -6,6 +6,7 @@ import torch
 from torch_geometric.data import HeteroData
 
 from trench_ids.graphs import (
+    LABEL_NAMES,
     _chunk_frame,
     _downsample_tasks,
     _host_features,
@@ -110,9 +111,13 @@ def test_build_task_graph_full_structure() -> None:
     # Flow nodes: one per row, features in the given order.
     assert graph["flow"].x.shape == (4, 3)
     assert torch.equal(graph["flow"].x[0], torch.tensor([100.0, 50.0, 10.0]))
-    assert graph["flow"].label_names == ["Benign", "DDoS"]
+    # label_names/y use the fixed global class mapping (LABEL_NAMES), not a
+    # per-chunk local one -- the same class must map to the same index in
+    # every mini-graph so a classifier gets consistent supervision.
+    assert graph["flow"].label_names == LABEL_NAMES
     assert graph["flow"].flow_id == ["ToN-0", "ToN-1", "ToN-2", "ToN-3"]
-    assert graph["flow"].y.tolist() == [0, 1, 0, 1]
+    benign_idx, ddos_idx = LABEL_NAMES.index("Benign"), LABEL_NAMES.index("DDoS")
+    assert graph["flow"].y.tolist() == [benign_idx, ddos_idx, benign_idx, ddos_idx]
     assert graph["flow"].train_mask.tolist() == [True, True, False, False]
     assert graph["flow"].val_mask.tolist() == [False, False, True, False]
     assert graph["flow"].test_mask.tolist() == [False, False, False, True]
@@ -195,7 +200,7 @@ def _class_ordered_frame(n_per_class: int = 20) -> pd.DataFrame:
     then concatenation) -- reproduces the ordering that breaks unshuffled
     chunking."""
     n = n_per_class * 2
-    labels = ["A"] * n_per_class + ["B"] * n_per_class
+    labels = ["Benign"] * n_per_class + ["DDoS"] * n_per_class
     return pd.DataFrame(
         {
             "source_dataset": ["ToN"] * n,
@@ -216,7 +221,7 @@ def _class_ordered_frame(n_per_class: int = 20) -> pd.DataFrame:
 
 
 def test_build_split_graphs_shuffles_before_chunking() -> None:
-    frame = _class_ordered_frame(n_per_class=20)  # rows 0-19 = "A", 20-39 = "B"
+    frame = _class_ordered_frame(n_per_class=20)  # rows 0-19 = Benign, 20-39 = DDoS
     vocab = {"PROTOCOL": {"6": 0}, "L7_PROTO": {"1": 0}}
     features = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
 
@@ -224,9 +229,11 @@ def test_build_split_graphs_shuffles_before_chunking() -> None:
         frame, features, vocab, graph_size=10, seed=42, benign_ratio=1.0
     )
 
-    # Without shuffling, every chunk would be monolithic (all "A" or all "B").
-    # With shuffling, at least one chunk must mix both classes.
-    assert any(len(g["flow"].label_names) > 1 for g in graphs)
+    # Without shuffling, every chunk would be monolithic (all Benign or all
+    # DDoS). With shuffling, at least one chunk must mix both classes.
+    # label_names is now the fixed global list in every chunk regardless of
+    # content, so mixing must be checked via the actual y values instead.
+    assert any(len(set(g["flow"].y.tolist())) > 1 for g in graphs)
 
 
 def _mixed_frame(n_attack: int, n_benign: int) -> pd.DataFrame:
