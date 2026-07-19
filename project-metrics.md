@@ -209,6 +209,35 @@ Downsampling: `min_task_total=5,404` (task 5), `cap=16,212` - nothing trimmed.
 
 Flows/graph mean is ~300 (capped by `graph_size`) for every task/split/set except the last (remainder) chunk. Choosing the winning `benign_ratio` is deferred to Step 3 (needs real CL training/forgetting metrics, not available yet) - see §11.
 
+### 6.4 Node type schema - features and relations (per node type)
+
+**Node types and features:**
+
+| Node type | Features |
+|---|---|
+| Flow | 37 raw NetFlow flow-statistics features + class label |
+| Host | 4 features: total_flows, avg_bytes_as_src, avg_bytes_as_dst, unique_ports_contacted |
+| Protocol | none - categorical ID only (vocab size 5) |
+| Service | none - categorical ID only (vocab size 216) |
+| Port | none - categorical ID only (32 buckets) |
+
+**Relations:**
+
+| Relation | From -> To |
+|---|---|
+| originates | Host -> Flow |
+| terminates_at | Flow -> Host |
+| targets_port | Flow -> Port |
+| uses_protocol | Flow -> Protocol |
+| uses_service | Flow -> Service |
+| communicates_with | Host -> Host |
+
+Flow's 37 features (`configs/graph.yaml: features`): `IN_BYTES`, `IN_PKTS`, `OUT_BYTES`, `OUT_PKTS`, `TCP_FLAGS`, `CLIENT_TCP_FLAGS`, `SERVER_TCP_FLAGS`, `FLOW_DURATION_MILLISECONDS`, `DURATION_IN`, `DURATION_OUT`, `MIN_TTL`, `MAX_TTL`, `LONGEST_FLOW_PKT`, `SHORTEST_FLOW_PKT`, `MIN_IP_PKT_LEN`, `MAX_IP_PKT_LEN`, `SRC_TO_DST_SECOND_BYTES`, `DST_TO_SRC_SECOND_BYTES`, `RETRANSMITTED_IN_BYTES`, `RETRANSMITTED_IN_PKTS`, `RETRANSMITTED_OUT_BYTES`, `RETRANSMITTED_OUT_PKTS`, `SRC_TO_DST_AVG_THROUGHPUT`, `DST_TO_SRC_AVG_THROUGHPUT`, `NUM_PKTS_UP_TO_128_BYTES`, `NUM_PKTS_128_TO_256_BYTES`, `NUM_PKTS_256_TO_512_BYTES`, `NUM_PKTS_512_TO_1024_BYTES`, `NUM_PKTS_1024_TO_1514_BYTES`, `TCP_WIN_MAX_IN`, `TCP_WIN_MAX_OUT`, `ICMP_TYPE`, `ICMP_IPV4_TYPE`, `DNS_QUERY_ID`, `DNS_QUERY_TYPE`, `DNS_TTL_ANSWER`, `FTP_COMMAND_RET_CODE`.
+
+Note: Protocol, Service, and Port have no continuous feature vector - they're identified only by which embedding-table row they index. Only Flow and Host carry real multi-dimensional feature vectors.
+
+Source: `configs/graph.yaml`, `src/trench_ids/graphs.py`, `src/trench_ids/model/rhgnn.py`, `src/trench_ids/vocab.py`.
+
 ---
 
 ## 7. Graph topology statistics
@@ -370,70 +399,72 @@ No crashes, OOM, or data-level timeouts at real scale - all three Step 2 runs co
 
 ## 13. Step 3 - relation-specific heterogeneous GNN + attention fusion
 
-Implemented 2026-07-16 in `src/trench_ids/model/` (`relation_conv.py`, `attention_fusion.py`, `rhgnn.py`, `__init__.py`) + `configs/model.yaml` + `tests/test_model.py`. Reads Step 2's saved `HeteroData` mini-graphs unmodified - **no changes to any Step 1/2 file** (`graphs.py`, `preprocess.py`, `labels.py`), **no downsampling added**. **Revised 2026-07-17**: removed the in-memory `ToUndirected`/reverse-edge step per the professor's explicit instruction that relations must stay one-way - each relation encodes a specific real-world direction (e.g. "host originated this flow"), and a synthetic reverse edge has no such meaning, so adding one would blur the relation-specific semantics the architecture exists to preserve. All numbers below are freshly re-measured against real saved graphs and the real full test suite on the corrected, one-directional model (not carried over from the earlier bidirectional version).
+Implemented 2026-07-16 in `src/trench_ids/model/` (`relation_conv.py`, `attention_fusion.py`, `rhgnn.py`, `__init__.py`) + `configs/model.yaml` + `tests/test_model.py`. Reads Step 2's saved `HeteroData` mini-graphs unmodified. **Revised 2026-07-17**: removed the in-memory `ToUndirected`/reverse-edge step per the professor's explicit instruction that relations must stay one-way - a synthetic generic `rev_<relation>` edge has no real-world meaning. **Revised again 2026-07-19** (professor's guidance, two parts): (1) `graphs.py` gained 5 new, individually-named reverse relations (`originated_by`, `terminated_by`, `targeted_by`, `protocol_of`, `service_of` - this *is* a Step 2 change, the one carve-out to the Step 1/2 freeze the professor explicitly requested), each with correct passive-voice semantics rather than a generic `rev_X` prefix, giving Flow 5 incoming relations instead of 1 and Host 3 instead of 2; (2) `RelationSpecificConv` now concatenates each destination node's own current embedding into every one of its relation-specific aggregations before a per-relation combine layer (GraphSAGE-style, Hamilton et al. NeurIPS 2017) - previously a relation's stored embedding was 100% neighbor signal, 0% self, worst for Flow (the classification target). All numbers below are freshly re-measured against the regenerated real saved graphs (`data/graphs`, 69,737 graphs, unchanged count from before the schema change) and the real full test suite on the 11-relation, self-preserving model.
 
 Step 3 converts the heterogeneous mini-graphs produced by Step 2 into relation-aware node embeddings: it first learns a separate representation per relation for every node, then fuses those representations through semantic attention into one final embedding per node.
 
 ### 13.1 Architecture size
 
-Every node's raw Step 2 features are first normalized and projected into a common hidden dimension (Flow/Host: `LayerNorm -> Linear`; Protocol/Service: vocab-indexed `Embedding`; Port: bucketed `Embedding`) - see §13.3 for why the `LayerNorm` step was necessary. The model operates directly on Step 2's **6 one-directional relations exactly as stored on disk** - no reverse edges are added, so a node only receives messages along relations where it is the destination. Confirmed against a real saved graph (`data/graphs_ratio4/task_4_train.pt`):
+Every node's raw Step 2 features are first normalized and projected into a common hidden dimension (Flow/Host: `LayerNorm -> Linear`; Protocol/Service: vocab-indexed `Embedding`; Port: bucketed `Embedding`) - see §13.3 for why the `LayerNorm` step was necessary. The model operates on Step 2's **11 relations** (the original 6 one-directional relations plus 5 reverse relations added 2026-07-19). Confirmed against a regenerated real saved graph (`data/graphs/task_4_test.pt`):
 
 | Node type | Incoming relations |
 |---|---:|
-| Flow | 1 (`originates`, from Host) |
-| Host | 2 (`terminates_at` from Flow, `communicates_with` from Host) |
+| Flow | 5 (`originates` from Host, `targeted_by` from Port, `protocol_of` from Protocol, `service_of` from Service, `terminated_by` from Host) |
+| Host | 3 (`terminates_at` from Flow, `originated_by` from Flow, `communicates_with` from Host) |
 | Protocol | 1 (`uses_protocol`, from Flow) |
 | Service | 1 (`uses_service`, from Flow) |
 | Port | 1 (`targets_port`, from Flow) |
 
-This is asymmetric by design, not an oversight: Flow is the *source* of 4 of the 6 relations (`terminates_at`, `targets_port`, `uses_protocol`, `uses_service`) and the *destination* of only 1 (`originates`), so semantic attention fusion is a genuine multi-relation combination only for Host - every other node type fuses over a single relation (a no-op, β=1.0). This is an honest reflection of what the directed schema provides, not a bug to work around.
+Flow went from the most starved node type (1 incoming relation, the classification target) to the richest; Host from 2 to 3. Protocol/Service/Port are unaffected - the new relations only enrich Flow's and Host's incoming side, consistent with those three node types having no continuous feature vector to enrich (§6.4). Semantic attention fusion is now a genuine multi-relation combination for both Flow and Host, not just Host.
 
-Global vocab sizes actually used (`data/graphs_ratio4/vocab.json`): **Protocol = 5**, **Service (`L7_PROTO`) = 216**.
+Global vocab sizes actually used (`data/graphs/vocab.json`): **Protocol = 5**, **Service (`L7_PROTO`) = 216**.
 
-### 13.2 Parameter count (`RelationSpecificHeteroGNN`, real instantiation against `task_4_train.pt`)
+### 13.2 Parameter count (`RelationSpecificHeteroGNN`, real instantiation against regenerated `task_4_train.pt`)
 
 | Config | Total params | Node-feature encoders | Relation-conv (per layer) | Attention fusion (per layer) |
 |---|---:|---:|---:|---:|
-| `hidden_dim=64`, 1 layer (**current `configs/model.yaml` default**) | **86,226** | 19,026 | 24,960 | 42,240 |
-| `hidden_dim=64`, 2 layers | 153,426 | 19,026 | 24,960 ×2 | 42,240 ×2 |
-| `hidden_dim=128`, 1 layer | 220,242 | 37,970 | 99,072 | 83,200 |
+| `hidden_dim=64`, 1 layer (**current `configs/model.yaml` default**) | **197,842** | 19,026 | 136,576 | 42,240 |
 
-Relation-conv parameters scale as **O(R × H²)**, where R is the number of relations (6) and H is `hidden_dim` - one full `nn.Linear(H, H)` weight matrix per relation, confirmed by the `hidden_dim=64→128` row (H² quadruples, 24,960 → 99,072 ≈ 4×). This is what enables relation-specific message passing, as each relation learns an independent transformation rather than sharing weights with any other relation.
+Relation-conv parameters scale as **O(R × 3H²)** now, where R is the number of relations (11, up from 6) and H is `hidden_dim` - each relation now has *two* full-rank matrices, `rel_lins[r]` (`H×H`, transforms neighbor messages) and the new `combine_lins[r]` (`2H×H`, folds the destination's own embedding + aggregated neighbor message back down to `H`), vs. one `H×H` matrix per relation before. Relation-conv params rose from 24,960 (6 relations, one `H×H` each) to 136,576 (11 relations, one `H×H` + one `2H×H` each) - both the relation count and the per-relation cost increased.
 
 ### 13.3 Real-data forward/backward integration check
 
-32 real mini-graphs from `data/graphs_ratio4/task_4_train.pt` (task 4 = DoS + Injection + Benign, 3 classes), batched via PyG's `DataLoader`, real vocab sizes, `hidden_dim=64`, 1 layer, plus a `nn.Linear(64, 3)` classifier head on `output.fused["flow"]`:
+32 real mini-graphs from the regenerated `data/graphs/task_4_train.pt` (task 4 = DoS + Injection + Benign, 3 classes), batched via PyG's `DataLoader`, real vocab sizes, `hidden_dim=64`, 1 layer, plus a `nn.Linear(64, 3)` classifier head on `output.fused["flow"]`:
 
 | Metric | Value |
 |---|---:|
 | Batched flow nodes | 9,600 (32 graphs × 300 flows) |
-| Cross-entropy loss (random init, 3 classes) | 1.0663 (≈ ln 3 = 1.099, as expected untrained) |
-| Forward + backward wall time | 0.045 s (CPU) |
-| `host--originates-->flow` weight grad, abs-sum (post-LayerNorm-fix) | 23.39 |
-| `host--originates-->flow` weight grad, abs-sum (pre-LayerNorm-fix, unnormalized raw features) | ~1e12 |
+| Cross-entropy loss (random init, 3 classes) | 1.0768 (≈ ln 3 = 1.099, as expected untrained) |
+| Forward + backward wall time | 0.205 s (CPU) - up from 0.045s pre-change: more relations (11 vs 6) and the added concat+combine step per relation |
+| `host--originates-->flow` weight grad, abs-sum | 1.617 |
 
-The LayerNorm fix (added to `NodeFeatureEncoders` after this issue surfaced on real data) remains a **~10 orders-of-magnitude** reduction in gradient magnitude, from unusable to a stable, trainable range, on the corrected one-directional model.
-
-Attention weights (`output.attention`) at random initialization, per node type. Flow/Protocol/Service/Port each have exactly one incoming relation, so fusion is a trivial identity (β=1.0); Host is the only node type with a genuine two-relation fusion, and its weights are near-uniform (~0.5 each) as expected before any training:
+Attention weights (`output.attention`) at random initialization, per node type. Flow and Host now each have a genuine multi-relation fusion (near-uniform weights across relations, as expected before any training); Protocol/Service/Port are still a trivial single-relation identity (β=1.0), unaffected by this change:
 
 | Node type | Relation | β (untrained) |
 |---|---|---:|
-| Flow | `originates` | 1.000 |
-| Host | `terminates_at` | 0.531 |
-| Host | `communicates_with` | 0.469 |
+| Flow | `originates` | 0.191 |
+| Flow | `targeted_by` | 0.194 |
+| Flow | `protocol_of` | 0.214 |
+| Flow | `service_of` | 0.194 |
+| Flow | `terminated_by` | 0.206 |
+| Host | `terminates_at` | 0.342 |
+| Host | `communicates_with` | 0.317 |
+| Host | `originated_by` | 0.341 |
 | Protocol | `uses_protocol` | 1.000 |
 | Service | `uses_service` | 1.000 |
 | Port | `targets_port` | 1.000 |
 
-Each node type's weights sum to 1.000 (softmax-guaranteed, also asserted directly in `test_relation_specific_layer_attention_sums_to_one_per_node_type`).
+Each node type's weights sum to 1.000 (softmax-guaranteed, also asserted directly in `test_relation_specific_layer_attention_sums_to_one_per_node_type`). A new integration test, `test_relation_specific_conv_incorporates_destination_own_features`, confirms the self-preservation fix directly: perturbing `x_dict["flow"]` while holding all neighbor messages fixed changes every one of Flow's 5 relation embeddings (on the pre-fix code this test would fail, since neighbor messages alone determined the output).
 
 ### 13.4 Test suite
 
-**77 tests passing** (`.venv/Scripts/python.exe -m pytest -q`, 0 failures, same 2 pre-existing `torch.jit.script` deprecation warnings as §10) - up from 64 (§10) with the addition of `tests/test_model.py` (**13 tests**: `port_bucket` range/monotonicity/clamping, `NodeFeatureEncoders` output shapes, `RelationSpecificConv` per-relation separation and distinct weights, `SemanticAttention` identity/softmax-sum/gradient-flow, `RelationSpecificLayer` per-node-type attention sum-to-one, full-model forward-pass shapes and gradient reachability, `from_graph` metadata matching). Test count dropped from 80 to 77 on 2026-07-17 when the 3 tests specific to the removed `to_bidirectional` transform were deleted along with the function. `ruff check src tests` passes clean on all files.
+**78 tests passing** (`.venv/Scripts/python.exe -m pytest -q`, 0 failures, same 2 pre-existing `torch.jit.script` deprecation warnings as §10) - up from 77 with the addition of `test_relation_specific_conv_incorporates_destination_own_features` in `tests/test_model.py` (now **14 tests**). `tests/test_graphs.py` gained assertions (not new tests) for the 5 new reverse-relation `edge_index` tensors and `edge_counts` entries. `ruff check src tests` passes clean on all files.
 
 ### 13.5 Design choices (brief - see code docstrings in `src/trench_ids/model/` for full justification)
 
-- **No reverse edges** (revised 2026-07-17): relations stay exactly as Step 2 stores them, one-way. Each relation encodes a specific directional real-world fact; a synthetic `rev_<relation>` edge has no such meaning and would undercut the relation-specific premise of the architecture. The tradeoff, made explicitly rather than engineered around, is that most node types (all but Host) fuse over a single incoming relation.
+- **11 relations, individually-named reverses** (revised 2026-07-19, supersedes the 2026-07-17 "no reverse edges" note below): the earlier rejection was specifically of a *generic* `rev_<relation>` edge with no real-world meaning (e.g. "flow originated this host"?), not of reverse edges in general. The professor's 5 new relations (`originated_by`, `terminated_by`, `targeted_by`, `protocol_of`, `service_of`) are individually named with correct passive-voice semantics ("this flow was originated by this host"), so they don't have that problem. This resolves the actual objection (bad naming / blurred semantics) rather than reversing the instruction.
+- **Per-relation self-concatenation** (new 2026-07-19): `RelationSpecificConv` concatenates each destination node's own current embedding into every relation's neighbor-aggregated message before a per-relation combine layer projects back to `hidden_dim` (GraphSAGE-style, Hamilton et al. NeurIPS 2017). Fixes the prior 0%-self-signal gap in every relation-specific and fused embedding (worst for Flow). `SemanticAttention` fusion needed no change - it never had a self-term to begin with.
+- ~~**No reverse edges** (2026-07-17, superseded above): relations stay exactly as Step 2 stores them, one-way.~~
 - **HAN-style semantic attention** (Wang et al., WWW 2019) over GAT-style node-conditioned attention: produces one importance weight per relation (not per node), directly reusable for the later transferability-estimation/relation-aware-EWC steps.
 - **Port bucketing** (log1p-scaled, 32 buckets) instead of a raw 65536-row `nn.Embedding`: Port has no global vocabulary (chunk-local by Step 2 design), so a raw-port embedding would never generalize across mini-graphs.
 - **LayerNorm on raw Flow/Host features** before the linear projection: required because raw NetFlow byte/packet counters span huge dynamic ranges (§13.3).

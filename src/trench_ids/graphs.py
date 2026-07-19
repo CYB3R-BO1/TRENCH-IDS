@@ -6,10 +6,24 @@ per task from that task's processed Parquet
 docs/dataset-plan.md §3:
 
   Node types: Host, Flow, Protocol, Port, Service.
-  Relations : host->flow (originates), flow->host (terminates_at),
-              flow->port (targets_port), flow->protocol (uses_protocol),
-              flow->service (uses_service), host->host (communicates_with,
-              aggregated within the mini-graph only).
+  Relations : host->flow (originates), flow->host src role (originated_by),
+              flow->host dst role (terminates_at), host->flow dst role
+              (terminated_by), flow->port (targets_port), port->flow
+              (targeted_by), flow->protocol (uses_protocol), protocol->flow
+              (protocol_of), flow->service (uses_service), service->flow
+              (service_of), host->host (communicates_with, aggregated
+              within the mini-graph only).
+
+  The 5 reverse relations (originated_by/terminated_by/targeted_by/
+  protocol_of/service_of) were added per the professor's explicit
+  instruction so Flow -- the classification target -- receives messages
+  along 5 incoming relations instead of 1 (``originates`` was previously
+  its only incoming edge); Host goes from 2 incoming relations to 3
+  (``originated_by`` added). ``communicates_with`` (host->host) has no
+  reverse -- only the 5 Flow-centric relations do. Protocol/Service/Port
+  still have exactly 1 incoming relation each (unaffected), consistent with
+  them carrying no continuous feature vector to enrich (see
+  ``trench_ids.model.rhgnn``).
 
 Each task's rows are split by train/val/test (the ``split`` column from
 Step 1), then each split's rows are shuffled (seeded by ``seed``) and
@@ -25,7 +39,7 @@ global vocabulary from ``trench_ids.vocab`` so the same value maps to the
 same category everywhere; Port stays chunk-local (raw destination port
 number).
 
-Continual-learning task boundaries (T1..T4) are unaffected: training still
+Continual-learning task boundaries (T1..T6) are unaffected: training still
 proceeds through all of a task's mini-graphs before moving to the next
 task.
 
@@ -209,6 +223,26 @@ def build_task_graph(
         hh_edge_attr, dtype=torch.float32
     )
 
+    # 5 new reverse relations (professor-specified) so Flow -- the
+    # classification target -- receives messages along 5 incoming relations
+    # instead of 1, and Host along 3 instead of 2. No reverse is added for
+    # communicates_with (host->host).
+    graph["flow", "originated_by", "host"].edge_index = torch.tensor(
+        np.stack([np.arange(num_flow), src_idx]), dtype=torch.int64
+    )
+    graph["host", "terminated_by", "flow"].edge_index = torch.tensor(
+        np.stack([dst_idx, np.arange(num_flow)]), dtype=torch.int64
+    )
+    graph["port", "targeted_by", "flow"].edge_index = torch.tensor(
+        np.stack([port_idx, np.arange(num_flow)]), dtype=torch.int64
+    )
+    graph["protocol", "protocol_of", "flow"].edge_index = torch.tensor(
+        np.stack([protocol_idx, np.arange(num_flow)]), dtype=torch.int64
+    )
+    graph["service", "service_of", "flow"].edge_index = torch.tensor(
+        np.stack([service_idx, np.arange(num_flow)]), dtype=torch.int64
+    )
+
     host_degree = host_x[:, 0]
     counts: dict[str, Any] = {
         "node_counts": {
@@ -225,6 +259,11 @@ def build_task_graph(
             "flow_uses_protocol": num_flow,
             "flow_uses_service": num_flow,
             "host_communicates_with_host": int(hh_edge_index.shape[1]),
+            "flow_originated_by_host": num_flow,
+            "host_terminated_by_flow": num_flow,
+            "port_targeted_by_flow": num_flow,
+            "protocol_protocol_of_flow": num_flow,
+            "service_service_of_flow": num_flow,
         },
         "flow_class_counts": {
             k: int(v) for k, v in frame["canonical_label"].value_counts().items()

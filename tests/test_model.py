@@ -19,8 +19,9 @@ HOST_DIM = 2
 
 def _synthetic_graph() -> HeteroData:
     """A small HeteroData mirroring the real Step 2 schema exactly (5 node
-    types, 6 one-directional relations) -- small enough for fast unit tests,
-    same shape conventions as `trench_ids.graphs.build_task_graph`."""
+    types, 11 relations -- the original 6 one-directional relations plus 5
+    reverse relations) -- small enough for fast unit tests, same shape
+    conventions as `trench_ids.graphs.build_task_graph`."""
     g = HeteroData()
 
     g["flow"].x = torch.randn(6, FLOW_DIM)
@@ -61,6 +62,23 @@ def _synthetic_graph() -> HeteroData:
     )
     g["host", "communicates_with", "host"].edge_index = torch.tensor(
         [[0, 1], [1, 2]]
+    )
+
+    # 5 reverse relations (mirror the 5 flow-centric relations above).
+    g["flow", "originated_by", "host"].edge_index = torch.stack(
+        [torch.arange(6), src_host]
+    )
+    g["host", "terminated_by", "flow"].edge_index = torch.stack(
+        [dst_host, torch.arange(6)]
+    )
+    g["port", "targeted_by", "flow"].edge_index = torch.stack(
+        [port_idx, torch.arange(6)]
+    )
+    g["protocol", "protocol_of", "flow"].edge_index = torch.stack(
+        [protocol_idx, torch.arange(6)]
+    )
+    g["service", "service_of", "flow"].edge_index = torch.stack(
+        [service_idx, torch.arange(6)]
     )
 
     return g
@@ -130,14 +148,51 @@ def test_relation_specific_conv_keeps_relations_separate_per_node_type() -> None
 
     relation_embeds = conv(x_dict, g.edge_index_dict)
 
-    assert set(relation_embeds["flow"].keys()) == {"originates"}
+    assert set(relation_embeds["flow"].keys()) == {
+        "originates",
+        "targeted_by",
+        "protocol_of",
+        "service_of",
+        "terminated_by",
+    }
     for tensor in relation_embeds["flow"].values():
         assert tensor.shape == (6, 16)
     assert set(relation_embeds["host"].keys()) == {
         "terminates_at",
         "communicates_with",
+        "originated_by",
     }
     assert set(relation_embeds["protocol"].keys()) == {"uses_protocol"}
+
+
+def test_relation_specific_conv_incorporates_destination_own_features() -> None:
+    """The self-preservation fix: a relation's stored embedding must depend
+    on the destination node's own current embedding, not just neighbor
+    messages -- on the pre-fix code this test would fail (aggregated
+    neighbor messages alone, x_dict[dst_type] never referenced)."""
+    g = _synthetic_graph()
+    encoders = NodeFeatureEncoders(
+        16,
+        protocol_vocab_size=5,
+        service_vocab_size=10,
+        flow_feature_dim=FLOW_DIM,
+        host_feature_dim=HOST_DIM,
+    )
+    x_dict = encoders(g)
+    node_types, edge_types = g.metadata()
+    conv = RelationSpecificConv(edge_types, hidden_dim=16)
+
+    baseline = conv(x_dict, g.edge_index_dict)
+
+    perturbed_x_dict = dict(x_dict)
+    perturbed_x_dict["flow"] = x_dict["flow"] + 100.0
+    perturbed = conv(perturbed_x_dict, g.edge_index_dict)
+
+    # Relations whose destination is "flow" must change when flow's own
+    # embedding changes, even though neighbor messages (from host/port/
+    # protocol/service) are untouched.
+    for relation in ("originates", "targeted_by", "protocol_of", "service_of", "terminated_by"):
+        assert not torch.allclose(baseline["flow"][relation], perturbed["flow"][relation])
 
 
 def test_relation_specific_conv_uses_distinct_weights_per_relation() -> None:

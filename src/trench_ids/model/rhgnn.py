@@ -11,27 +11,41 @@ transferability estimation) can use either.
 
 This module does not modify the frozen Step 1/2 pipeline or the on-disk
 graphs (``data/graphs*/*.pt``) in any way -- it only reads the ``HeteroData``
-mini-graphs those steps already produced, exactly as stored, on their
-original 6 one-directional relations (``host--originates-->flow``,
-``flow--terminates_at-->host``, ``flow--targets_port-->port``,
-``flow--uses_protocol-->protocol``, ``flow--uses_service-->service``,
-``host--communicates_with-->host``). No reverse edges are added: each
-relation encodes a specific real-world direction (e.g. "host originated this
-flow"), and a synthetic ``rev_originates`` edge ("flow originated this
-host"?) has no such meaning -- inventing one would blur exactly the
-relation-specific semantics this architecture exists to preserve. Per
-professor's explicit instruction, relations stay one-way.
+mini-graphs those steps already produced, exactly as stored. As of
+2026-07-19 the schema is **11 relations**: the original 6 one-directional
+relations (``host--originates-->flow``, ``flow--terminates_at-->host``,
+``flow--targets_port-->port``, ``flow--uses_protocol-->protocol``,
+``flow--uses_service-->service``, ``host--communicates_with-->host``) plus 5
+reverse relations (``flow--originated_by-->host``,
+``host--terminated_by-->flow``, ``port--targeted_by-->flow``,
+``protocol--protocol_of-->flow``, ``service--service_of-->flow``), added per
+the professor's explicit instruction. Unlike the earlier rejected
+``ToUndirected()`` reverse-edge attempt (see git history, 2026-07-17), these
+5 are individually named with correctly passive-voice semantics (e.g. "this
+flow was originated by this host") rather than a generic ``rev_X`` prefix, so
+they don't blur relation-specific meaning the way a synthetic
+``rev_originates`` would have.
 
-One consequence, verified directly against a real saved mini-graph
-(``data/graphs_ratio4/task_5_test.pt``): incoming-relation counts per node
-type are asymmetric rather than uniform. Flow has exactly one incoming
-relation (``originates``, from Host); Host has two (``terminates_at`` from
-Flow, ``communicates_with`` from Host); Protocol, Service, and Port each have
-exactly one (``uses_protocol``, ``uses_service``, ``targets_port``, all from
-Flow). For every node type but Host, ``SemanticAttention`` fusion is
-therefore a no-op over a single relation (beta=1.0) rather than a genuine
-weighted combination -- an honest reflection of what the directed schema
-actually provides, not a bug to work around.
+One consequence, verified directly against a regenerated real mini-graph:
+incoming-relation counts per node type are no longer as asymmetric as before.
+Flow now has 5 incoming relations (``originates`` from Host, plus
+``targeted_by``, ``protocol_of``, ``service_of``, ``terminated_by``); Host
+has 3 (``terminates_at`` and ``originated_by`` from Flow, ``communicates_with``
+from Host); Protocol, Service, and Port still have exactly one each
+(``uses_protocol``, ``uses_service``, ``targets_port``, all from Flow) --
+unaffected, since the new relations only enrich Flow's and Host's incoming
+side. For those three, ``SemanticAttention`` fusion is still a no-op over a
+single relation (beta=1.0); for Flow and Host it is now a genuine multi-
+relation combination.
+
+**Per-relation self-preservation** (professor's instruction, 2026-07-19):
+richer incoming relations alone don't put a node's own features into its
+embedding -- ``RelationSpecificConv`` (see that module's docstring) now
+concatenates each destination node's own current embedding into every one of
+its relation-specific aggregations before a per-relation combine layer
+projects back to ``hidden_dim``. ``SemanticAttention`` fusion is unchanged
+and needs no self-term: it only ever combines the relation embeddings it's
+given, and by the time it runs those already carry self-information.
 """
 
 from __future__ import annotations

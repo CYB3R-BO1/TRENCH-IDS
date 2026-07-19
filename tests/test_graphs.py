@@ -144,9 +144,39 @@ def test_build_task_graph_full_structure() -> None:
     assert graph["host", "communicates_with", "host"].edge_index.shape == (2, 3)
     assert graph["host", "communicates_with", "host"].edge_attr.shape == (3, 3)
 
+    # 5 new reverse relations: each mirrors an existing relation's index
+    # arrays with source/destination swapped, giving Flow 5 incoming
+    # relations (originates + these 4) and Host 3 (terminates_at,
+    # communicates_with, originated_by).
+    assert torch.equal(
+        graph["flow", "originated_by", "host"].edge_index,
+        torch.tensor([[0, 1, 2, 3], [0, 0, 1, 0]]),
+    )
+    assert torch.equal(
+        graph["host", "terminated_by", "flow"].edge_index,
+        torch.tensor([[1, 2, 0, 1], [0, 1, 2, 3]]),
+    )
+    assert torch.equal(
+        graph["port", "targeted_by", "flow"].edge_index,
+        torch.tensor([[0, 1, 0, 0], [0, 1, 2, 3]]),
+    )
+    assert torch.equal(
+        graph["protocol", "protocol_of", "flow"].edge_index,
+        torch.tensor([[0, 0, 1, 0], [0, 1, 2, 3]]),
+    )
+    assert torch.equal(
+        graph["service", "service_of", "flow"].edge_index,
+        torch.tensor([[0, 1, 0, 0], [0, 1, 2, 3]]),
+    )
+
     # Counts report mirrors the graph.
     assert counts["node_counts"] == {"flow": 4, "host": 3, "protocol": 2, "service": 2, "port": 2}
     assert counts["edge_counts"]["host_communicates_with_host"] == 3
+    assert counts["edge_counts"]["flow_originated_by_host"] == 4
+    assert counts["edge_counts"]["host_terminated_by_flow"] == 4
+    assert counts["edge_counts"]["port_targeted_by_flow"] == 4
+    assert counts["edge_counts"]["protocol_protocol_of_flow"] == 4
+    assert counts["edge_counts"]["service_service_of_flow"] == 4
     assert counts["flow_class_counts"] == {"Benign": 2, "DDoS": 2}
     assert counts["host_degree"]["max"] == pytest.approx(4.0)
     assert counts["host_degree"]["min"] == pytest.approx(1.0)
