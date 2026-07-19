@@ -507,11 +507,34 @@ All 10 attack classes present (Benign correctly excluded - attack-type-only memo
 - **Memory bank computed post-hoc per task**, not accumulated during training: one no-grad pass over the task's train split right after its training epochs finish, so the stored means reflect the just-trained encoder rather than an average over encoder states from earlier, less-trained epochs.
 - **Hydra added this step** (`configs/train.yaml`), matching pyproject.toml's standing plan to add it "when the training loop (Step 4+) begins." `hydra.job.chdir: false` keeps the working directory at wherever the command was invoked from, so `data/graphs`-relative paths behave the same as every earlier step's plain-argparse config.
 
-Source: `src/trench_ids/cl/`, `configs/train.yaml`, `tests/test_memory_bank.py`, `tests/test_train.py`; forgetting matrix and memory bank measured directly from a real run (`runs/step4/`, gitignored, rerun via `trench-train` or `python -m trench_ids.cl.train` to reproduce).
+Source: `src/trench_ids/cl/`, `configs/train.yaml`, `tests/test_memory_bank.py`, `tests/test_train.py`; forgetting matrix and memory bank measured directly from a real run (`runs/step4/`, gitignored, rerun via `trench-train` or `python -m trench_ids.cl.train` to reproduce). Re-running with the same seed (42) reproduces the forgetting matrix in §14.1 exactly (verified: values match to displayed precision across two independent runs).
 
 ---
 
-## 15. Where these numbers come from
+## 15. Step 5 - transferability estimation
+
+Implemented 2026-07-19 in `src/trench_ids/cl/transferability.py` + `tests/test_transferability.py`. Per CLAUDE.md's proposed pipeline, step 5: after computing task *t*'s new per-class-per-relation means (§14.2) and *before* merging them into the bank, compare each new class against every class already in the bank, **same relation only** (different relations are different learned subspaces - a `terminated_by` mean and a `protocol_of` mean for the same pair of classes aren't comparable to each other). No aggregation into a single transferability score - that's step 6 (relation importance weights), still an open item, out of scope here. Hooked directly into the Step 4 loop (`train.py`): `runs/step4/transferability_task_{t}.json` per task, gitignored, regenerate via the same `trench-train` run that produces §14's outputs. Task 1 produces an empty report (`{"Scanning": {}}`) - nothing exists in the bank yet, expected, not a bug.
+
+### 15.1 The two flagged pairs, checked against the real embeddings
+
+`docs/attack-similarity-matrix.md` flagged two pairs as standouts in the raw-feature cosine-similarity matrix used for task assignment: XSS↔Infiltration (0.706, the highest in the whole 10-class matrix, landing in non-adjacent tasks T6 vs T3) and Scanning↔Reconnaissance (0.628, second-highest, isolated in T1 vs T2). Checking whether that raw-feature-level similarity carries over into the learned per-relation embeddings (`runs/step4/transferability_task_6.json`, `transferability_task_2.json`):
+
+| Pair | `originates` | `terminated_by` | `targeted_by` | `protocol_of` | `service_of` |
+|---|---:|---:|---:|---:|---:|
+| XSS (T6) vs Infiltration (T3) | 0.180 | **0.468** | 0.098 | **0.568** | 0.088 |
+| Reconnaissance (T2) vs Scanning (T1) | -0.354 | 0.029 | -0.654 | -0.363 | -0.095 |
+
+**Mixed result, reported as-is rather than cherry-picked**: XSS↔Infiltration shows a *partial* match - 2 of 5 relations (`terminated_by`, `protocol_of`) moderately positive, roughly consistent with the raw-feature finding, the other 3 near zero. Scanning↔Reconnaissance shows **no** elevated similarity at all - every relation is at or below zero, the opposite of what the raw-feature similarity would predict. The most plausible explanation is §14.1's forgetting result itself: Scanning's bank entry was computed right after task 1, before 5 more tasks of un-mitigated sequential fine-tuning further changed the encoder (task 1's own test accuracy had already fallen from 0.926 to 0.197 by task 6, §14.1), so by the time Reconnaissance's mean is computed under the task-6 encoder, it's being compared against a Scanning mean computed under a substantially different, earlier version of the same encoder - not a like-for-like comparison. This is itself a real finding worth flagging to the professor: **a memory bank frozen at each task's end becomes progressively less comparable to older entries as an un-mitigated encoder keeps drifting**, which is exactly the problem steps 6-7 (relation importance weights, relation-aware EWC) are meant to fix by regularizing which parameters are allowed to drift.
+
+### 15.2 Test suite
+
+**95 tests passing** (`.venv/Scripts/python.exe -m pytest -q`, 0 failures) - up from 86 (§14.3) with `tests/test_transferability.py` (**9 tests**: cosine similarity identical/orthogonal/opposite/known-angle/zero-vector cases, empty-bank report shape, same-relation-only comparison, relations not shared by both classes are skipped, every bank class is covered). `ruff check src tests` passes clean.
+
+Source: `src/trench_ids/cl/transferability.py`, `tests/test_transferability.py`; real transferability reports measured directly from `runs/step4/transferability_task_*.json` (gitignored, regenerate via `trench-train`).
+
+---
+
+## 16. Where these numbers come from
 
 - Dataset/class/task design: `docs/dataset-plan.md`, `docs/attack-class-counts.md`, `docs/attack-similarity-matrix.md`, `src/trench_ids/labels.py`, `src/trench_ids/task_design.py`
 - Step 1 output: `data/processed/manifest.json` (gitignored, regenerate via `trench_ids.preprocess`)
@@ -520,3 +543,4 @@ Source: `src/trench_ids/cl/`, `configs/train.yaml`, `tests/test_memory_bank.py`,
 - Design rationale: `docs/superpowers/specs/2026-07-13-dataset-task-respec-design.md` (original respec), `docs/superpowers/specs/2026-07-14-benchmark-finalization-design.md` (task rebalancing, corrupted-row filter, downsampling cap, benign_ratio sweep)
 - Step 3 model + metrics (§13): `src/trench_ids/model/`, `configs/model.yaml`, `tests/test_model.py` (parameter counts and integration numbers measured directly, not checked into git - rerun the snippets in §13 to reproduce)
 - Step 4 training + memory bank (§14): `src/trench_ids/cl/`, `configs/train.yaml` (gitignored `runs/step4/` output, rerun via `trench-train` to reproduce)
+- Step 5 transferability estimation (§15): `src/trench_ids/cl/transferability.py` (gitignored `runs/step4/transferability_task_*.json` output, produced by the same `trench-train` run as Step 4)

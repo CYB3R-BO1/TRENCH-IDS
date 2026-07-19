@@ -35,6 +35,7 @@ from torch_geometric.data import HeteroData
 from torch_geometric.loader import DataLoader
 
 from trench_ids.cl.memory_bank import RelationMeanAccumulator, merge_into_bank, save_memory_bank
+from trench_ids.cl.transferability import estimate_transferability
 from trench_ids.labels import NUM_TASKS, canonical_classes
 from trench_ids.model.rhgnn import RelationSpecificHeteroGNN
 from trench_ids.vocab import load_vocab
@@ -187,6 +188,15 @@ def main(cfg: DictConfig) -> None:
         task_means = compute_task_memory_means(
             model, train_graphs, device, cfg.train.batch_size, label_names
         )
+
+        # Step 5: compare this task's new classes against the bank as it
+        # stood *before* this task (task 1 has nothing to compare against --
+        # expected, not a bug), before merging the new means in.
+        transferability = estimate_transferability(task_means, memory_bank)
+        (out_dir / f"transferability_task_{task}.json").write_text(
+            json.dumps(transferability, indent=2)
+        )
+
         memory_bank = merge_into_bank(memory_bank, task_means)
 
         def _accuracy_for(evaluated_task: int) -> float:
