@@ -5,6 +5,9 @@ dataset/
 # Generated preprocessing outputs (task_*.parquet, manifest.json)
 data/
 
+# Step 4+ training run outputs (checkpoints, memory bank, forgetting matrix)
+runs/
+
 # Python
 __pycache__/
 *.py[cod]

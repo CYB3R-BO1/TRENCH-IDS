@@ -469,11 +469,49 @@ Each node type's weights sum to 1.000 (softmax-guaranteed, also asserted directl
 - **Port bucketing** (log1p-scaled, 32 buckets) instead of a raw 65536-row `nn.Embedding`: Port has no global vocabulary (chunk-local by Step 2 design), so a raw-port embedding would never generalize across mini-graphs.
 - **LayerNorm on raw Flow/Host features** before the linear projection: required because raw NetFlow byte/packet counters span huge dynamic ranges (§13.3).
 
-Source: `src/trench_ids/model/relation_conv.py`, `src/trench_ids/model/attention_fusion.py`, `src/trench_ids/model/rhgnn.py`, `configs/model.yaml`, `tests/test_model.py`; parameter counts and integration-check numbers measured directly against `data/graphs_ratio4/task_4_train.pt` and `data/graphs_ratio4/vocab.json` (not estimated).
+Source: `src/trench_ids/model/relation_conv.py`, `src/trench_ids/model/attention_fusion.py`, `src/trench_ids/model/rhgnn.py`, `configs/model.yaml`, `tests/test_model.py`; parameter counts and integration-check numbers measured directly against the regenerated `data/graphs/task_4_train.pt` and `data/graphs/vocab.json` (not estimated).
 
 ---
 
-## 14. Where these numbers come from
+## 14. Step 4 - classifier training + relation-specific memory bank
+
+Implemented 2026-07-19 in `src/trench_ids/cl/` (`train.py`, `memory_bank.py`, `__init__.py`) + `configs/train.yaml` (Hydra-composed - added as a dependency this step, per pyproject.toml's own stated plan) + `tests/test_train.py` + `tests/test_memory_bank.py`. Sequential fine-tuning across T1-T6 in order: one shared classifier head (`nn.Linear(hidden_dim, 11)`, over the full global label space including Benign) on top of Step 3's `output.fused["flow"]`, trained jointly with the encoder via cross-entropy, **no replay/EWC** (that's step 7, still an open item - this is a plain baseline). Real run: `data/graphs` (regenerated, 11-relation schema), `hidden_dim=64`, `epochs_per_task=5`, `batch_size=8`, Adam `lr=1e-3`, on **GPU** (`NVIDIA GeForce RTX 3050 Laptop GPU`, this machine gained a CUDA device between 2026-07-15 and 2026-07-19 - resolved automatically via `torch.cuda.is_available()`, no config change needed to use it).
+
+### 14.1 Forgetting matrix (real run, `runs/step4/forgetting_matrix.json`)
+
+Rows = task just finished training; columns = task being evaluated (test split); diagonal = that task's own post-training accuracy, off-diagonal = accuracy on a previously-learned task's classes after training has moved on.
+
+| Trained through | T1 | T2 | T3 | T4 | T5 | T6 |
+|---|---:|---:|---:|---:|---:|---:|
+| T1 | **0.926** | | | | | |
+| T2 | 0.162 | **0.945** | | | | |
+| T3 | 0.151 | 0.052 | **0.955** | | | |
+| T4 | 0.154 | 0.191 | 0.204 | **0.875** | | |
+| T5 | 0.246 | 0.228 | 0.241 | 0.242 | **0.991** | |
+| T6 | 0.197 | 0.208 | 0.247 | 0.238 | 0.248 | **0.997** |
+
+Every task reaches high accuracy on itself when trained (0.87-0.997, diagonal), and every task's accuracy collapses once training moves to the next task (off-diagonal, e.g. T1 drops from 0.926 to 0.162 as soon as T2 is trained) - textbook catastrophic forgetting from plain sequential fine-tuning with a shared classifier head and no forgetting-mitigation mechanism. This is the expected baseline result, not a bug: it is exactly the problem steps 5-7 (transferability estimation, relation importance weights, relation-aware EWC) exist to address, and it's the forgetting curve CLAUDE.md flagged as needed before the `benign_ratio` sweep (§6) can be decided.
+
+### 14.2 Relation-specific memory bank (real run, `runs/step4/memory_bank.pt`)
+
+All 10 attack classes present (Benign correctly excluded - attack-type-only memory), each with a mean vector (`hidden_dim=64`) for all 5 of Flow's incoming relations (`originates`, `targeted_by`, `protocol_of`, `service_of`, `terminated_by`), computed in a no-grad pass over that class's task's train split right after training on it: `Scanning`, `Reconnaissance`, `DDoS`, `Infiltration`, `DoS`, `Injection`, `Password`, `Bot`, `XSS`, `BruteForce`.
+
+### 14.3 Test suite
+
+**86 tests passing** (`.venv/Scripts/python.exe -m pytest -q`, 0 failures) - up from 78 (§13.4) with `tests/test_memory_bank.py` (**5 tests**: hand-computed per-class-per-relation means, cross-batch accumulation, all-Benign-batch produces empty means, merge adds new classes, merge rejects a duplicate class) and `tests/test_train.py` (**3 tests**: `forgetting_row` bookkeeping - evaluates every previously-seen task, single-entry after the first task, calls the accuracy function exactly once per task - stubbed, no real model/graphs needed). `ruff check src tests` passes clean.
+
+### 14.4 Design choices (brief)
+
+- **Class-incremental, not task-incremental**: one shared classifier head over the fixed global label space (`trench_ids.labels.canonical_classes()`, already built into Step 2's `graph["flow"].y`) - no task ID at inference. This is what makes the forgetting matrix meaningful (accuracy on old classes without being told which task they belong to).
+- **No replay/EWC in this step**: deliberately a plain sequential-fine-tuning baseline. Steps 5-7 (transferability estimation, importance weights, relation-aware EWC) are what's supposed to fix the forgetting shown in §14.1 - measuring the un-mitigated baseline first is the point.
+- **Memory bank computed post-hoc per task**, not accumulated during training: one no-grad pass over the task's train split right after its training epochs finish, so the stored means reflect the just-trained encoder rather than an average over encoder states from earlier, less-trained epochs.
+- **Hydra added this step** (`configs/train.yaml`), matching pyproject.toml's standing plan to add it "when the training loop (Step 4+) begins." `hydra.job.chdir: false` keeps the working directory at wherever the command was invoked from, so `data/graphs`-relative paths behave the same as every earlier step's plain-argparse config.
+
+Source: `src/trench_ids/cl/`, `configs/train.yaml`, `tests/test_memory_bank.py`, `tests/test_train.py`; forgetting matrix and memory bank measured directly from a real run (`runs/step4/`, gitignored, rerun via `trench-train` or `python -m trench_ids.cl.train` to reproduce).
+
+---
+
+## 15. Where these numbers come from
 
 - Dataset/class/task design: `docs/dataset-plan.md`, `docs/attack-class-counts.md`, `docs/attack-similarity-matrix.md`, `src/trench_ids/labels.py`, `src/trench_ids/task_design.py`
 - Step 1 output: `data/processed/manifest.json` (gitignored, regenerate via `trench_ids.preprocess`)
@@ -481,3 +519,4 @@ Source: `src/trench_ids/model/relation_conv.py`, `src/trench_ids/model/attention
 - Graph composition (§8): `src/trench_ids/graph_composition.py`, `data/graphs_ratio4/graph_composition.json`, `data/graphs_ratio4/graph_composition_matrix.csv` (gitignored, regenerate via `python -m trench_ids.graph_composition --graphs-dir data/graphs_ratio4`)
 - Design rationale: `docs/superpowers/specs/2026-07-13-dataset-task-respec-design.md` (original respec), `docs/superpowers/specs/2026-07-14-benchmark-finalization-design.md` (task rebalancing, corrupted-row filter, downsampling cap, benign_ratio sweep)
 - Step 3 model + metrics (§13): `src/trench_ids/model/`, `configs/model.yaml`, `tests/test_model.py` (parameter counts and integration numbers measured directly, not checked into git - rerun the snippets in §13 to reproduce)
+- Step 4 training + memory bank (§14): `src/trench_ids/cl/`, `configs/train.yaml` (gitignored `runs/step4/` output, rerun via `trench-train` to reproduce)

@@ -1,0 +1,39 @@
+# Step 4 — classifier + relation-specific memory bank training config.
+# Composed via Hydra (added 2026-07-19, per pyproject.toml's own stated
+# plan: "add it when the training loop (Step 4+) begins").
+# See src/trench_ids/cl/train.py for the loop this configures.
+
+model:
+  # Matches configs/model.yaml's established Step 3 default — reused
+  # rather than re-derived.
+  hidden_dim: 64
+  attn_dim: 128
+  num_layers: 1
+  port_buckets: 32
+
+optim:
+  name: adam
+  learning_rate: 0.001
+
+train:
+  epochs_per_task: 5
+  batch_size: 8
+  seed: 42
+  # "cuda" if available, else "cpu" -- resolved in code
+  # (torch.cuda.is_available()), never hardcoded here, since this repo runs
+  # across machines with and without a CUDA device.
+  device: auto
+
+paths:
+  graphs_dir: data/graphs
+  out_dir: runs/step4
+
+# Keep the working directory as wherever the command was invoked from (repo
+# root, normally) -- Hydra's default per-run output-dir chdir would break
+# the relative paths above.
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.out_dir}/hydra
+
