@@ -17,12 +17,21 @@ optim:
 
 train:
   epochs_per_task: 5
+  warmup_epochs: 2
   batch_size: 8
   seed: 42
   # "cuda" if available, else "cpu" -- resolved in code
   # (torch.cuda.is_available()), never hardcoded here, since this repo runs
   # across machines with and without a CUDA device.
   device: auto
+
+# Relation-aware Online EWC (Steps 6-8) -- placeholder defaults, tuned
+# experimentally, not methodology-derived values.
+ewc:
+  lambda_r: 1.0
+  lambda_s: 1.0
+  lambda_u: 1.0
+  gamma: 0.9
 
 paths:
   graphs_dir: data/graphs
