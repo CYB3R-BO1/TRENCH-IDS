@@ -5,7 +5,11 @@ import math
 import pytest
 import torch
 
-from trench_ids.cl.transferability import estimate_transferability, relation_cosine_similarity
+from trench_ids.cl.transferability import (
+    aggregate_transferability_scores,
+    estimate_transferability,
+    relation_cosine_similarity,
+)
 
 
 def test_relation_cosine_similarity_identical_vectors_is_one() -> None:
@@ -87,3 +91,36 @@ def test_estimate_transferability_covers_every_bank_class() -> None:
     assert set(report["XSS"].keys()) == {"Infiltration", "Scanning"}
     assert report["XSS"]["Infiltration"]["originates"] == pytest.approx(1.0)
     assert report["XSS"]["Scanning"]["originates"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_aggregate_transferability_scores_means_across_all_pairs() -> None:
+    report = {
+        "XSS": {
+            "Infiltration": {"originates": 0.8, "terminated_by": 0.2},
+            "Scanning": {"originates": 0.4},
+        }
+    }
+
+    s_r = aggregate_transferability_scores(report, flow_relations=["originates", "terminated_by"])
+
+    # originates: mean(0.8, 0.4) = 0.6
+    assert s_r["originates"].item() == pytest.approx(0.6)
+    # terminated_by: only one pair -> 0.2
+    assert s_r["terminated_by"].item() == pytest.approx(0.2)
+
+
+def test_aggregate_transferability_scores_defaults_to_zero_for_empty_bank() -> None:
+    s_r = aggregate_transferability_scores({}, flow_relations=["originates", "terminated_by"])
+
+    assert s_r["originates"].item() == pytest.approx(0.0)
+    assert s_r["terminated_by"].item() == pytest.approx(0.0)
+
+
+def test_aggregate_transferability_scores_covers_every_flow_relation() -> None:
+    report = {"XSS": {"Infiltration": {"originates": 1.0}}}
+
+    s_r = aggregate_transferability_scores(
+        report, flow_relations=["originates", "terminated_by", "targeted_by"]
+    )
+
+    assert set(s_r.keys()) == {"originates", "terminated_by", "targeted_by"}

@@ -53,3 +53,28 @@ def estimate_transferability(
                 for relation in shared_relations
             }
     return report
+
+
+def aggregate_transferability_scores(
+    report: dict[str, dict[str, dict[str, float]]], flow_relations: list[str]
+) -> dict[str, torch.Tensor]:
+    """Collapse ``estimate_transferability``'s nested per-pair output into
+    one scalar ``S_r`` per Flow relation -- the mean cosine similarity
+    across every ``(new_class, old_class)`` pair that shares that relation
+    (design §3's "Mean over all pairs" decision). ``0.0`` for a relation
+    with zero pairs to average (an empty bank at task 1, or a relation that
+    happens to share no old classes) -- consistent with
+    ``relation_cosine_similarity``'s own 0.0 default for undefined
+    comparisons."""
+    sums = {relation: 0.0 for relation in flow_relations}
+    counts = {relation: 0 for relation in flow_relations}
+    for old_classes in report.values():
+        for relations in old_classes.values():
+            for relation, cosine in relations.items():
+                if relation in sums:
+                    sums[relation] += cosine
+                    counts[relation] += 1
+    return {
+        relation: torch.tensor(sums[relation] / counts[relation] if counts[relation] else 0.0)
+        for relation in flow_relations
+    }
