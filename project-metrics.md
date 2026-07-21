@@ -589,7 +589,117 @@ Source: `src/trench_ids/cl/ewc.py`, `src/trench_ids/cl/importance.py`, `src/tren
 
 ---
 
-## 17. Where these numbers come from
+## 17. Coarse lambda sweep for Online EWC (real runs, 2026-07-21)
+
+Per the professor's explicit direction after §16 ("do not touch the algorithm yet - run a coarse lambda sweep first"): before revisiting the learned relation-weighting mechanism (`w_r` collapse, §16.2), establish whether standard, unweighted-by-`w_r` Online EWC reduces forgetting on TRENCH-IDS at all. Two code additions in `src/trench_ids/cl/` supported this (TDD, both covered by new tests):
+
+- **`ewc.disable_learned_weighting`** (`configs/train.yaml`, `train.py`'s `train_one_task`): when true, `w_r` is fixed at `1.0` for every Flow relation instead of routed through `ImportanceMLP`, so `lambda_r = lambda_s = lambda_u = lambda` applies one uniform, unweighted penalty to all 12 EWC groups. (`lambda_r = 0` alone is *not* equivalent - it would zero out the 5 Flow relations' regularization entirely rather than applying standard EWC to them like every other group.)
+- **`ewc.log_loss_components`** + `OnlineEWCManager.loss_breakdown()` (`ewc.py`): optional per-full-loss-epoch diagnostic log (`runs/<out_dir>/loss_components_task_{t}.jsonl`) of `L_cls`, each EWC category's raw (unweighted) penalty sum, and the final lambda-scaled total - added specifically to distinguish "lambda too small to matter" from "lambda substantial, still no effect."
+- **`average_forgetting()` / `final_average_accuracy()`** (`train.py`) + a `summary.json` writer per run (avg. forgetting, final avg. accuracy, runtime, lambda/gamma/seed) - one line per run for the sweep table below.
+
+Six runs, `lambda = lambda_r = lambda_s = lambda_u ∈ {0.01, 0.1, 1, 10, 100, 1000}`, `disable_learned_weighting=true`, everything else held fixed (seed 42, `epochs_per_task=5`, `warmup_epochs=2`, `batch_size=8`, Adam `lr=1e-3`, `gamma=0.9`, `data/graphs` (11-relation, `benign_ratio=3.0`), GPU (`NVIDIA GeForce RTX 3050 Laptop GPU`)):
+
+| lambda | Avg. forgetting | Final avg. accuracy | Runtime |
+|---:|---:|---:|---:|
+| 0.01 | 0.7365 | 0.3371 | 65.1 min |
+| 0.1 | 0.7489 | 0.3260 | 48.2 min |
+| 1 | 0.7103 | 0.3589 | 39.8 min |
+| 10 | 0.7304 | 0.3410 | 48.8 min |
+| 100 | 0.7138 | 0.3543 | 40.4 min |
+| 1000 | 0.7112 | 0.3549 | 44.4 min |
+
+**No monotonic trend across 5 orders of magnitude** - both metrics stay within a 0.71-0.75 (forgetting) / 0.326-0.359 (accuracy) band that reads as run-to-run noise, not a lambda response. Per-task accuracies are near-identical across all six runs (e.g. T1's post-T6 accuracy: 0.108-0.235 across every lambda tested, no ordering by lambda). Task 1's own accuracy after its own training (0.9239875496506603) is bit-identical to 15 decimal places in every run - expected, since the EWC penalty is exactly 0 for task 1 in every run (no prior task to regularize against yet), which also confirms the harness applies `lambda` identically and correctly across runs.
+
+### 17.1 Is the flat result because lambda never got large enough? Instrumented diagnostic (`runs/lambda_1000_instrumented/`)
+
+A seventh run at `lambda=1000` (otherwise identical config) with `ewc.log_loss_components=true` measured `L_cls` against the lambda-scaled EWC penalty directly, per task, at the start and end of each task's 3 full-loss epochs:
+
+| Task | L_cls (epoch 0 to 2) | lambda\*L_EWC (epoch 0 to 2) | Ratio (epoch 0, epoch 2) |
+|---|---|---|---|
+| T1 | 0.2697 to 0.2694 | 0.0 (both) | - (no prior task, expected) |
+| T2 | 0.1309 to 0.1291 | 0.0102 to 0.0018 | 7.8%, 1.4% |
+| T3 | 0.1294 to 0.1284 | 0.0137 to 0.0038 | 10.6%, 2.9% |
+| T4 | 0.3449 to 0.3368 | 0.0363 to 0.0122 | 10.5%, 3.6% |
+| T5 | 0.0355 to 0.0332 | 0.0567 to 0.0069 | **160%**, 20.7% |
+| T6 | 0.0188 to 0.0164 | 0.0332 to 0.0056 | **177%**, 34.3% |
+
+By T5-T6, the EWC penalty **exceeds** `L_cls` at the start of full-loss training (160-177%), dropping to 21-34% by the epoch's end as the optimizer partially satisfies it. This rules out "lambda was too weak to matter" as the explanation for §17's flat sweep result, at least for the parameter groups the penalty actually reaches (see §17.2) - the penalty is demonstrably large enough to dominate the loss in later tasks, and forgetting still didn't improve at any lambda tested.
+
+### 17.2 Why `other_raw` is exactly 0.0 in every run: an architectural property, not a bug
+
+The same instrumented run showed the 6 non-Flow-relation EWC groups (`terminates_at`, `targets_port`, `uses_protocol`, `uses_service`, `communicates_with`, `originated_by`) contributing **exactly** `0.0` penalty in every epoch of every task - not just small, exactly zero. Root-caused (systematic-debugging, both on a synthetic tiny graph and on a real batch from `data/graphs/task_1_train.pt`) to `num_layers=1` (the training default, `configs/train.yaml`/`configs/model.yaml`): `RelationSpecificHeteroGNN`'s single `RelationSpecificLayer` computes a fused embedding for every node type in one pass, but `train.py` only ever reads `output.fused["flow"]` for the classifier. The 6 "other" relations' outputs land in `fused["host"]`/`fused["port"]`/`fused["protocol"]`/`fused["service"]`, which nothing downstream of the loss consumes - so `d(loss)/d(other_params)` is exactly zero (confirmed as literal `grad is None`, not a small nonzero value, on every one of those parameters). `estimate_fisher`'s `if p.grad is not None` guard therefore never accumulates anything for them. Verified identically on both the synthetic graph and a real batch (`shared`: 16/28 params with gradient, all 5 `FLOW_RELATIONS` groups: 4/4, all 6 "other" groups: 0/4 - exact match between synthetic and real data).
+
+This is a real, separate architectural finding, not an EWC bug or a partitioning/Fisher implementation error: **with a single message-passing layer and a Flow-only classifier, the 6 relations that don't feed directly into Flow (and the 4 non-Flow `SemanticAttention` fusion modules) never receive a training signal at all and remain at random initialization for the entire run**, regardless of lambda. `num_layers=2` would let a second layer consume those relations' outputs (fixing gradient reachability) but was not tested here - it addresses a different question (whether those 6 relations can be trained at all) than the one this sweep answers (whether standard Online EWC, applied to the parameters that *do* receive gradient, mitigates forgetting).
+
+### 17.3 Conclusion, precisely scoped
+
+> Under the current TRENCH-IDS architecture (`num_layers=1`), Online EWC applied to all trainable parameters influencing the classification objective (the `shared` group plus the 5 Flow-incoming relations) did not reduce catastrophic forgetting over a lambda sweep spanning five orders of magnitude (0.01-1000), even though the penalty became substantial - exceeding `L_cls` - in later tasks. The 6 relations structurally disconnected from the loss at `num_layers=1` never received any EWC penalty (or any training signal at all) in any run, an architectural property rather than a confound in this conclusion, since they were never part of what the loss or the penalty could reach either way.
+
+Combined with §16.2's `w_r`-collapse finding, three variants have now been evaluated on TRENCH-IDS: plain sequential fine-tuning (§14.1), relation-aware weighted EWC at placeholder lambda=1.0 (§16.1-16.2), and standard (unweighted) Online EWC swept over five orders of magnitude (this section) - none reduce catastrophic forgetting relative to the plain baseline.
+
+### 17.4 Three-way comparison at matched lambda=1.0 (fair comparison, same architecture)
+
+Per explicit user direction not to change the architecture mid-study: rather than rerunning relation-aware EWC (already run in §16 at `lambda=1.0`, `num_layers=1`), applying `average_forgetting()`/`final_average_accuracy()` to the three runs that share that exact `lambda` and architecture already on disk gives the fair, matched comparison directly, no additional GPU time needed:
+
+| Variant | Avg. forgetting | Final avg. accuracy |
+|---|---:|---:|
+| Plain fine-tuning, no EWC (`runs/step4_baseline/`, §14.1) | 0.7108 | 0.3558 |
+| Plain unweighted Online EWC, `lambda=1.0` (`runs/lambda_1/`, §17) | 0.7103 | 0.3589 |
+| Relation-aware weighted EWC, `lambda=1.0` (`runs/step4/`, §16) | 0.7054 | 0.3622 |
+
+All three sit within 0.705-0.711 (forgetting) / 0.356-0.362 (accuracy) - indistinguishable from the noise band the sweep already established (0.71-0.75 across `lambda` 0.01-1000, §17). The relation-aware variant is marginally best on both metrics, but the margin (0.005 forgetting, 0.006 accuracy) doesn't exceed that noise band. **This confirms §17.3's conclusion extends to the relation-aware variant**: none of plain fine-tuning, standard Online EWC, or relation-aware weighted EWC meaningfully reduces catastrophic forgetting on TRENCH-IDS under `num_layers=1`.
+
+### 17.5 Test suite
+
+**130 tests passing** (`.venv/Scripts/python.exe -m pytest -q`, 0 failures) - up from 121 (§16.3) with 5 new tests in `tests/test_ewc.py` (`loss_breakdown()`'s keys, zero-before-any-update, `total_weighted` matching `loss()`, and `flow_raw`'s independence from `w_r`) and 4 new tests in `tests/test_train.py` (`disable_learned_weighting` fixing `w_r=1.0` and confirming `importance_mlp` receives no gradient, the `epoch_log_path` JSONL writer, and `average_forgetting`/`final_average_accuracy`'s hand-computed values). `ruff check src tests` passes clean.
+
+Source: `src/trench_ids/cl/ewc.py` (`OnlineEWCManager.loss_breakdown`), `src/trench_ids/cl/train.py` (`disable_learned_weighting`, `epoch_log_path`, `average_forgetting`, `final_average_accuracy`), `configs/train.yaml` (`ewc.disable_learned_weighting`, `ewc.log_loss_components`) - gitignored `runs/lambda_{0.01,0.1,1,10,100,1000}/summary.json` and `runs/lambda_1000_instrumented/loss_components_task_*.jsonl` output, all reproducible via `python -m trench_ids.cl.train ewc.disable_learned_weighting=true ewc.lambda_s=<L> ewc.lambda_u=<L> ewc.lambda_r=<L> paths.out_dir=runs/lambda_<L>` (add `ewc.log_loss_components=true` for the §17.1 diagnostic).
+
+---
+
+## 18. `num_layers=2` gradient-reachability ablation (real run, 2026-07-21)
+
+### 18.0 Summary across all four variants (§14, §16, §17, §18)
+
+| Variant | Avg. forgetting | Final avg. accuracy | Previously-dead relations trainable? | `w_r` collapse? |
+|---|---:|---:|:---:|:---:|
+| Fine-tuning (no EWC) | 0.7108 | 0.3558 | N/A | N/A |
+| Plain unweighted EWC (λ=1.0) | 0.7103 | 0.3589 | No | N/A |
+| Relation-aware EWC, `num_layers=1` (λ=1.0) | 0.7054 | 0.3622 | No | Yes |
+| Relation-aware EWC, `num_layers=2` (λ=1.0) | **0.7423** | 0.3593 | **Yes** | **Yes** |
+
+Full detail per variant: §14.1 (fine-tuning), §17 (λ sweep, plain EWC), §16 (relation-aware EWC, `num_layers=1`), the rest of this section below (`num_layers=2`).
+
+**Objective**: test whether increasing GNN depth resolves the zero-gradient limitation identified in §17.2 (the 6 non-Flow relations receive no gradient at `num_layers=1`, since their outputs are never consumed by anything the loss depends on). Per explicit user direction: this is a deliberate follow-up ablation run *before* the `num_layers=1` baseline is used for anything else - not a redesign of the frozen baseline, and not to be repeated/expanded before Step 10.
+
+**Method**: repeat the relation-aware weighted EWC run (§16) with exactly one change, `model.num_layers=2`; every other setting identical (seed 42, `lambda_r=lambda_s=lambda_u=1.0`, `gamma=0.9`, `epochs_per_task=5` (2 warm-up + 3 full-loss), `batch_size=8`, Adam `lr=1e-3`, `data/graphs`, GPU). `ewc.log_loss_components=true` for direct Fisher/gradient confirmation (`runs/step4_num_layers2/loss_components_task_*.jsonl`).
+
+**Observation 1 - gradient reachability is restored, confirmed both architecturally and empirically.** A single forward/backward pass on a real batch (`data/graphs/task_1_train.pt`) showed layer 0's "other"-relation parameters (`terminates_at`, `targets_port`, `uses_protocol`, `uses_service`, `communicates_with`, `originated_by`) now have real gradients - 4 of each group's 8 parameters (the layer-0 copy), because layer 0's non-Flow node fused embeddings now feed into layer 1's Flow-relation inputs. Layer 1's own "other"-relation parameters remain permanently dead (their outputs are still never consumed) - a structural property of *any* depth, not specific to `num_layers=2`: the *last* layer's non-Flow relations are always dead-ended, only earlier layers' copies can ever receive gradient. Confirmed in the real run's loss logs: `other_raw` (exactly `0.0` in every epoch of every task at `num_layers=1`, §17.2) is now genuinely non-zero throughout (e.g. task 5: 2.0e-5, task 6: 9.8e-6).
+
+**Observation 2 - forgetting and accuracy are statistically indistinguishable from every `num_layers=1` variant.**
+
+| Variant | Avg. forgetting | Final avg. accuracy |
+|---|---:|---:|
+| Plain fine-tuning, `num_layers=1` (§14.1) | 0.7108 | 0.3558 |
+| Plain unweighted EWC, `lambda=1.0`, `num_layers=1` (§17) | 0.7103 | 0.3589 |
+| Relation-aware weighted EWC, `lambda=1.0`, `num_layers=1` (§16) | 0.7054 | 0.3622 |
+| **Relation-aware weighted EWC, `lambda=1.0`, `num_layers=2`** | **0.7423** | **0.3593** |
+
+`num_layers=2`'s forgetting (0.7423) falls inside the noise band the lambda sweep already established (0.7103-0.7489 across `lambda` 0.01-1000, §17), if anything at the higher/worse end rather than lower - not a directional improvement. Final accuracy (0.3593) likewise sits in the middle of every `num_layers=1` variant's range.
+
+**Observation 3 - the `w_r` collapse persists with near-identical dynamics, independent of depth.** Task 1's uniform initial value (0.4566, vs 0.5355 at `num_layers=1` - both are the untrained-MLP default, differ only because the encoder's random init differs) collapses by task 2 to ~0.0006-0.0015 (vs 1.06e-4 to 1.06e-3 at `num_layers=1`) and by task 6 to ~2.3e-6 to 5.8e-6 (vs 0.65e-6 to 4.78e-6 at `num_layers=1`) - same shape, same order of magnitude, same task-over-task deepening collapse identified in §16.2. Making the 6 "other" relations trainable did not change the mechanism driving `w_r` toward zero, since that mechanism (nothing in the per-task local objective rewards keeping `w_r` large for future retention) is a property of the loss formulation, not the encoder depth.
+
+**Conclusion**: gradient reachability was successfully restored (Observation 1 confirms the §17.2 architectural reasoning empirically, not just by proof), but is **not** the primary cause of catastrophic forgetting on TRENCH-IDS - Observation 2 shows no measurable improvement once that confound is removed. This is a stronger result than a simple depth-1-vs-2 comparison: it isolates and rules out an alternative explanation a reviewer could otherwise raise ("maybe the method fails because 6 of 11 relations never train"), and Observation 3 points at the actual remaining bottleneck - the relation-importance-weighting mechanism (`w_r`'s trivial zero optimum, §16.2), not the GNN architecture. `num_layers=2` is not adopted going forward; `num_layers=1` remains the frozen baseline architecture, per explicit user direction not to let this ablation redefine it.
+
+### 18.1 Test suite
+
+No test changes required for this run (`model.num_layers` was already a config-driven parameter, `RelationSpecificHeteroGNN`/`OnlineEWCManager`/`train.py` all already generalize to any layer count - covered by `tests/test_model.py`'s existing multi-layer coverage and `test_ewc.py`'s `test_partition_parameter_names_groups_across_multiple_layers`). Still 130 tests passing.
+
+Source: `runs/step4_num_layers2/` (gitignored: `summary.json`, `forgetting_matrix.json`, `loss_components_task_*.jsonl`, `importance_weights_task_*.json`, `transferability_task_*.json`) - reproduce via `python -m trench_ids.cl.train model.num_layers=2 ewc.lambda_s=1.0 ewc.lambda_u=1.0 ewc.lambda_r=1.0 ewc.log_loss_components=true paths.out_dir=runs/step4_num_layers2`.
+
+---
+
+## 19. Where these numbers come from
 
 - Dataset/class/task design: `docs/dataset-plan.md`, `docs/attack-class-counts.md`, `docs/attack-similarity-matrix.md`, `src/trench_ids/labels.py`, `src/trench_ids/task_design.py`
 - Step 1 output: `data/processed/manifest.json` (gitignored, regenerate via `trench_ids.preprocess`)
@@ -600,3 +710,5 @@ Source: `src/trench_ids/cl/ewc.py`, `src/trench_ids/cl/importance.py`, `src/tren
 - Step 4 training + memory bank (§14): `src/trench_ids/cl/`, `configs/train.yaml` (gitignored `runs/step4/` output, rerun via `trench-train` to reproduce)
 - Step 5 transferability estimation (§15): `src/trench_ids/cl/transferability.py` (gitignored `runs/step4/transferability_task_*.json` output, produced by the same `trench-train` run as Step 4)
 - Steps 6-8 relation-aware EWC (§16): `src/trench_ids/cl/ewc.py`, `src/trench_ids/cl/importance.py`, `docs/superpowers/specs/2026-07-21-relation-aware-ewc-design.md` (gitignored `runs/step4/importance_weights_task_*.json` and `runs/step4_baseline/forgetting_matrix.json` output, produced by the same `trench-train` run)
+- Coarse lambda sweep + gradient-reachability root cause (§17): `src/trench_ids/cl/ewc.py` (`loss_breakdown`), `src/trench_ids/cl/train.py` (`disable_learned_weighting`, `log_loss_components`, `average_forgetting`, `final_average_accuracy`) (gitignored `runs/lambda_*/summary.json` and `runs/lambda_1000_instrumented/loss_components_task_*.jsonl`, reproduce via `python -m trench_ids.cl.train ewc.disable_learned_weighting=true ewc.lambda_s=<L> ewc.lambda_u=<L> ewc.lambda_r=<L> paths.out_dir=runs/lambda_<L>`)
+- `num_layers=2` gradient-reachability ablation (§18): `runs/step4_num_layers2/` (gitignored, reproduce via `python -m trench_ids.cl.train model.num_layers=2 ewc.lambda_s=1.0 ewc.lambda_u=1.0 ewc.lambda_r=1.0 ewc.log_loss_components=true paths.out_dir=runs/step4_num_layers2`)
