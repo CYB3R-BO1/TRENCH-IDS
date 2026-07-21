@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 from torch_geometric.data import HeteroData
 
@@ -97,3 +98,43 @@ def test_partition_parameter_names_groups_across_multiple_layers() -> None:
     groups = partition_parameter_names(model, classifier, FLOW_RELATIONS)
     # 2 layers x 4 names (rel_lins/combine_lins weight+bias) = 8 for one relation.
     assert len(groups["originates"]) == 8
+
+
+def test_online_ewc_state_penalty_is_zero_before_first_update() -> None:
+    from trench_ids.cl.ewc import OnlineEWCState
+
+    state = OnlineEWCState(["a"], gamma=0.9)
+    current = {"a": torch.tensor([1.0, 2.0])}
+    assert state.penalty(current).item() == 0.0
+
+
+def test_online_ewc_state_penalty_matches_hand_computed_value_after_update() -> None:
+    from trench_ids.cl.ewc import OnlineEWCState
+
+    state = OnlineEWCState(["a"], gamma=0.9)
+    fisher = {"a": torch.tensor([2.0, 4.0])}
+    theta_star = {"a": torch.tensor([1.0, 1.0])}
+    state.update(fisher, theta_star)
+
+    current = {"a": torch.tensor([3.0, 1.0])}
+    # sum(fisher * (current - theta_star)**2) = 2*(3-1)^2 + 4*(1-1)^2 = 8 + 0 = 8
+    assert state.penalty(current).item() == pytest.approx(8.0)
+
+
+def test_online_ewc_state_gamma_blends_fisher_across_two_updates() -> None:
+    from trench_ids.cl.ewc import OnlineEWCState
+
+    state = OnlineEWCState(["a"], gamma=0.5)
+    state.update({"a": torch.tensor([4.0])}, {"a": torch.tensor([0.0])})
+    state.update({"a": torch.tensor([2.0])}, {"a": torch.tensor([0.0])})
+    # fisher = 0.5*4 + 2 = 4.0
+    assert state.fisher["a"].item() == pytest.approx(4.0)
+
+
+def test_online_ewc_state_theta_star_is_overwritten_not_blended() -> None:
+    from trench_ids.cl.ewc import OnlineEWCState
+
+    state = OnlineEWCState(["a"], gamma=0.9)
+    state.update({"a": torch.tensor([1.0])}, {"a": torch.tensor([5.0])})
+    state.update({"a": torch.tensor([1.0])}, {"a": torch.tensor([9.0])})
+    assert state.theta_star["a"].item() == pytest.approx(9.0)

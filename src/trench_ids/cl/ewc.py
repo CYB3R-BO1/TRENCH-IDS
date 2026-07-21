@@ -58,3 +58,40 @@ def partition_parameter_names(
     for name, _ in classifier.named_parameters():
         groups["shared"].append(f"classifier.{name}")
     return groups
+
+
+class OnlineEWCState:
+    """Running Fisher + reference-parameter (theta*) snapshot for one
+    parameter group, Online EWC style (Schwarz et al. 2018) -- constant
+    memory regardless of how many tasks have been seen, since each
+    ``update()`` blends the new Fisher estimate into the running one rather
+    than storing a separate Fisher per task."""
+
+    def __init__(self, parameter_names: list[str], gamma: float) -> None:
+        self.parameter_names = list(parameter_names)
+        self.gamma = gamma
+        self.fisher: dict[str, torch.Tensor] = {}
+        self.theta_star: dict[str, torch.Tensor] = {}
+        self.initialized = False
+
+    def update(
+        self, fisher_estimate: dict[str, torch.Tensor], current_params: dict[str, torch.Tensor]
+    ) -> None:
+        for name in self.parameter_names:
+            new_fisher = fisher_estimate[name].detach()
+            if name in self.fisher:
+                self.fisher[name] = self.gamma * self.fisher[name] + new_fisher
+            else:
+                self.fisher[name] = new_fisher.clone()
+            self.theta_star[name] = current_params[name].detach().clone()
+        self.initialized = True
+
+    def penalty(self, current_params: dict[str, torch.Tensor]) -> torch.Tensor:
+        any_param = current_params[self.parameter_names[0]]
+        if not self.initialized:
+            return torch.zeros((), device=any_param.device, dtype=any_param.dtype)
+        total = torch.zeros((), device=any_param.device, dtype=any_param.dtype)
+        for name in self.parameter_names:
+            diff = current_params[name] - self.theta_star[name]
+            total = total + (self.fisher[name] * diff.pow(2)).sum()
+        return total
