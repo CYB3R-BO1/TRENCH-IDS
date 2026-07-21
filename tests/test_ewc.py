@@ -3,8 +3,14 @@ from __future__ import annotations
 import pytest
 import torch
 from torch_geometric.data import HeteroData
+from torch_geometric.loader import DataLoader
 
-from trench_ids.cl.ewc import FLOW_RELATIONS, all_named_parameters, partition_parameter_names
+from trench_ids.cl.ewc import (
+    FLOW_RELATIONS,
+    all_named_parameters,
+    estimate_fisher,
+    partition_parameter_names,
+)
 from trench_ids.model.rhgnn import RelationSpecificHeteroGNN
 
 FLOW_DIM = 3
@@ -138,3 +144,38 @@ def test_online_ewc_state_theta_star_is_overwritten_not_blended() -> None:
     state.update({"a": torch.tensor([1.0])}, {"a": torch.tensor([5.0])})
     state.update({"a": torch.tensor([1.0])}, {"a": torch.tensor([9.0])})
     assert state.theta_star["a"].item() == pytest.approx(9.0)
+
+
+def test_estimate_fisher_covers_every_named_parameter() -> None:
+    g, model, classifier = _tiny_model_and_classifier()
+    loader = DataLoader([g, g], batch_size=1)
+    device = torch.device("cpu")
+
+    fisher = estimate_fisher(model, classifier, loader, device)
+
+    expected_names = set(all_named_parameters(model, classifier).keys())
+    assert set(fisher.keys()) == expected_names
+
+
+def test_estimate_fisher_values_are_nonnegative() -> None:
+    g, model, classifier = _tiny_model_and_classifier()
+    loader = DataLoader([g, g], batch_size=1)
+    device = torch.device("cpu")
+
+    fisher = estimate_fisher(model, classifier, loader, device)
+
+    for tensor in fisher.values():
+        assert (tensor >= 0).all()
+
+
+def test_estimate_fisher_restores_training_mode() -> None:
+    g, model, classifier = _tiny_model_and_classifier()
+    loader = DataLoader([g, g], batch_size=1)
+    device = torch.device("cpu")
+    model.train()
+    classifier.train()
+
+    estimate_fisher(model, classifier, loader, device)
+
+    assert model.training
+    assert classifier.training

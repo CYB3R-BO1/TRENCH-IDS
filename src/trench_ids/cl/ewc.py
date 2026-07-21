@@ -15,7 +15,9 @@ from __future__ import annotations
 import re
 
 import torch
+import torch.nn.functional as F
 from torch import nn
+from torch_geometric.loader import DataLoader
 
 FLOW_RELATIONS = ["originates", "terminated_by", "targeted_by", "protocol_of", "service_of"]
 
@@ -95,3 +97,47 @@ class OnlineEWCState:
             diff = current_params[name] - self.theta_star[name]
             total = total + (self.fisher[name] * diff.pow(2)).sum()
         return total
+
+
+def estimate_fisher(
+    model: nn.Module,
+    classifier: nn.Module,
+    dataloader: DataLoader,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    """One evaluation-mode forward/backward pass (no optimizer step) over
+    ``dataloader``, covering *every* named parameter across ``model`` and
+    ``classifier`` at once -- deliberately not called per parameter group,
+    so a task transition costs exactly one pass over the data regardless of
+    how the 12 EWC groups later partition the result (design §2). Squared
+    per-batch gradients are accumulated and averaged over the number of
+    batches -- the batch-gradient-squared Fisher approximation, not the true
+    per-example empirical Fisher."""
+    was_training = model.training
+    model.eval()
+    classifier.eval()
+
+    params = all_named_parameters(model, classifier)
+    squared_grad_sums = {name: torch.zeros_like(p) for name, p in params.items()}
+    num_batches = 0
+
+    for batch in dataloader:
+        batch = batch.to(device)
+        for p in params.values():
+            p.grad = None
+        output = model(batch)
+        logits = classifier(output.fused["flow"])
+        loss = F.cross_entropy(logits, batch["flow"].y)
+        loss.backward()
+        for name, p in params.items():
+            if p.grad is not None:
+                squared_grad_sums[name] += p.grad.detach().pow(2)
+        num_batches += 1
+
+    if was_training:
+        model.train()
+        classifier.train()
+
+    if num_batches == 0:
+        return squared_grad_sums
+    return {name: total / num_batches for name, total in squared_grad_sums.items()}
