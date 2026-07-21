@@ -113,7 +113,8 @@ def estimate_fisher(
     per-batch gradients are accumulated and averaged over the number of
     batches -- the batch-gradient-squared Fisher approximation, not the true
     per-example empirical Fisher."""
-    was_training = model.training
+    model_was_training = model.training
+    classifier_was_training = classifier.training
     model.eval()
     classifier.eval()
 
@@ -134,8 +135,9 @@ def estimate_fisher(
                 squared_grad_sums[name] += p.grad.detach().pow(2)
         num_batches += 1
 
-    if was_training:
+    if model_was_training:
         model.train()
+    if classifier_was_training:
         classifier.train()
 
     if num_batches == 0:

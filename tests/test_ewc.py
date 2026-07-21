@@ -179,3 +179,16 @@ def test_estimate_fisher_restores_training_mode() -> None:
 
     assert model.training
     assert classifier.training
+
+
+def test_estimate_fisher_restores_mismatched_training_modes_independently() -> None:
+    g, model, classifier = _tiny_model_and_classifier()
+    loader = DataLoader([g, g], batch_size=1)
+    device = torch.device("cpu")
+    model.train()
+    classifier.eval()
+
+    estimate_fisher(model, classifier, loader, device)
+
+    assert model.training
+    assert not classifier.training
