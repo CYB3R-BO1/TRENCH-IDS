@@ -137,6 +137,7 @@ def train_one_task(
     # Step 3-4: transferability against the bank as of task t-1 -> S_r -> w_r.
     transferability = estimate_transferability(temp_means, bank)
     s_r = aggregate_transferability_scores(transferability, FLOW_RELATIONS)
+    s_r = {relation: value.to(device) for relation, value in s_r.items()}
 
     # Step 5: full-loss epochs. w_r is recomputed fresh from the cached S_r
     # every batch (not cached itself) so the MLP trains via backprop without
