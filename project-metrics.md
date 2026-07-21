@@ -534,7 +534,60 @@ Source: `src/trench_ids/cl/transferability.py`, `tests/test_transferability.py`;
 
 ---
 
-## 16. Where these numbers come from
+## 16. Steps 6-8 - relation-aware transferability-guided EWC
+
+Implemented 2026-07-21 in `src/trench_ids/cl/ewc.py` (`FLOW_RELATIONS`, `OnlineEWCState`, `estimate_fisher`, `OnlineEWCManager`), `src/trench_ids/cl/importance.py` (`ImportanceMLP`), extensions to `src/trench_ids/cl/transferability.py` (`aggregate_transferability_scores`) and `src/trench_ids/cl/train.py` (warm-up epochs + the three-term combined EWC loss), plus `configs/train.yaml` (`train.warmup_epochs: 2`, new `ewc:` block). Full design: `docs/superpowers/specs/2026-07-21-relation-aware-ewc-design.md`. Per task: 2 warm-up epochs (plain classification loss only) -> temporary prototypes -> transferability against the bank as of the previous task -> `S_r` (mean cosine per Flow relation) -> `w_r = sigma(ImportanceMLP(S_r))` -> 3 full-loss epochs under `L = L_cls + lambda_u * L_EWC^other + lambda_s * L_EWC^shared + lambda_r * sum_r(w_r * L_EWC^(r))` -> one whole-model Fisher pass -> final prototypes (discarding the warm-up's temporary ones) merged into the bank. Online EWC (Schwarz et al. 2018): one running Fisher + one reference-parameter snapshot per of 12 parameter groups (1 shared, 5 Flow relations, 6 other relations), blended across tasks via `gamma`, never a separate Fisher per task. Placeholder lambdas/gamma (not tuned): `lambda_r = lambda_s = lambda_u = 1.0`, `gamma = 0.9`. Real run: same `data/graphs` (11-relation schema), `hidden_dim=64`, `epochs_per_task=5` (2 warm-up + 3 full-loss), `batch_size=8`, Adam `lr=1e-3` (now also covering `ImportanceMLP`'s parameters), GPU (`NVIDIA GeForce RTX 3050 Laptop GPU`), seed 42.
+
+### 16.1 Forgetting matrix (real run, `runs/step4/forgetting_matrix.json`) vs the plain-fine-tuning baseline
+
+Baseline (§14.1, no EWC) saved to `runs/step4_baseline/forgetting_matrix.json` before this run overwrote `runs/step4/`.
+
+| Trained through | T1 | T2 | T3 | T4 | T5 | T6 |
+|---|---:|---:|---:|---:|---:|---:|
+| T1 | **0.924** | | | | | |
+| T2 | 0.193 | **0.944** | | | | |
+| T3 | 0.170 | 0.109 | **0.954** | | | |
+| T4 | 0.179 | 0.172 | 0.204 | **0.891** | | |
+| T5 | 0.232 | 0.076 | 0.238 | 0.215 | **0.990** | |
+| T6 | 0.235 | 0.221 | 0.240 | 0.240 | 0.240 | **0.997** |
+
+Final-row (T6) retention, EWC run vs. baseline (§14.1):
+
+| Evaluated task | Baseline (no EWC) | EWC run | Difference |
+|---|---:|---:|---:|
+| T1 | 0.197 | 0.235 | +0.038 |
+| T2 | 0.208 | 0.221 | +0.013 |
+| T3 | 0.247 | 0.240 | -0.007 |
+| T4 | 0.238 | 0.240 | +0.002 |
+| T5 | 0.248 | 0.240 | -0.008 |
+| T6 (own task) | 0.996 | 0.997 | +0.001 |
+
+**No meaningful improvement over the plain-fine-tuning baseline** - every difference is within noise (largest is +0.038 on T1), and the shape of the forgetting curve (near-total collapse of every earlier task's accuracy once training moves past it) is essentially unchanged. Root cause identified in §16.2.
+
+### 16.2 Learned relation-importance weights (real run, `runs/step4/importance_weights_task_{t}.json`)
+
+| Task | `originates` | `terminated_by` | `targeted_by` | `protocol_of` | `service_of` |
+|---|---:|---:|---:|---:|---:|
+| T1 | 0.5355 | 0.5355 | 0.5355 | 0.5355 | 0.5355 |
+| T2 | 1.10e-4 | 1.06e-3 | 4.24e-5 | 7.84e-5 | 3.60e-4 |
+| T3 | 2.26e-5 | 7.96e-6 | 2.08e-5 | 3.46e-6 | 9.99e-6 |
+| T4 | 5.06e-7 | 5.19e-6 | 6.46e-6 | 4.17e-6 | 6.76e-6 |
+| T5 | 2.73e-6 | 4.72e-7 | 5.98e-7 | 1.44e-5 | 8.65e-7 |
+| T6 | 8.65e-7 | 2.70e-6 | 8.81e-7 | 4.78e-6 | 6.45e-7 |
+
+T1's five identical values are expected: with an empty bank, `S_r = 0.0` for every relation (§0's design-agreed default), so `ImportanceMLP` at its initial weights produces the same output for every relation - not yet a meaningful learned signal. From T2 onward, **every `w_r` collapses to a value within a few orders of magnitude of zero**, and the collapse only deepens task over task (T2's largest value, 1.06e-3, is already three orders of magnitude below 1.0; by T4-T6 every value is below 1.5e-5).
+
+**Why this happens, and why it directly explains §16.1's flat result:** `w_r` is left attached to the autograd graph and trained end-to-end via backprop through the combined loss's `lambda_r * w_r * L_EWC^(r)` term (design's explicit, deliberate choice - see the design doc §3 and the "leave attached" decision made during design review). But minimizing that same combined loss gives gradient descent a direct, unconditional incentive to shrink `w_r` toward 0: doing so strictly reduces the loss (the penalty term shrinks) without any corresponding cost to `L_cls`, since `w_r` has no direct bearing on the current task's own classification accuracy - only on how strongly *old* parameters are protected. There is no term in the per-task local objective that rewards keeping `w_r` large for the sake of *future* retention, so nothing opposes the collapse. This is a genuine, reportable methodological finding rather than an implementation bug: **an end-to-end-trained importance weight that only ever appears multiplied into its own penalty term has a trivial optimum at zero**, which functionally disables the weighted-EWC term almost immediately and reduces the method to something very close to the plain sequential-fine-tuning baseline - consistent with §16.1 showing no meaningful improvement. Fixing this would need either (a) detaching `w_r` per-task (the alternative considered and rejected during design, which trades this failure mode for an untrained, permanently-at-initialization MLP) or (b) a genuinely different training signal for the MLP, e.g. a meta-objective that rewards `w_r` choices retrospectively based on measured forgetting - noted in the design doc's Explicitly Out of Scope section as a possible future direction, now with empirical motivation behind it.
+
+### 16.3 Test suite
+
+**120 tests passing** (`.venv/Scripts/python.exe -m pytest -q`, 0 failures) - up from 95 (§15.2) with `tests/test_ewc.py` (**16 tests**: `FLOW_RELATIONS`/parameter partitioning across single- and multi-layer models, `OnlineEWCState` gamma-blending and theta*-overwrite hand-computed math, `estimate_fisher` single-whole-model-pass coverage and independent train/eval mode restoration for `model` and `classifier`, `OnlineEWCManager`'s three-way loss weighting), `tests/test_importance.py` (**4 tests**: shape, output range, weight-sharing across relations, gradient flow), 3 new tests in `tests/test_transferability.py` (`aggregate_transferability_scores` mean-across-pairs, empty-bank zero default, full relation coverage), and 3 new tests in `tests/test_train.py` (`split_warmup_and_full_loss_epochs` bookkeeping, a device-mismatch regression test for `S_r`). `ruff check src tests` passes clean.
+
+Source: `src/trench_ids/cl/ewc.py`, `src/trench_ids/cl/importance.py`, `src/trench_ids/cl/transferability.py`, `src/trench_ids/cl/train.py`, `configs/train.yaml`; forgetting matrix, memory bank, transferability reports, and importance weights measured directly from a real run (`runs/step4/`, gitignored, rerun via `trench-train` or `python -m trench_ids.cl.train` to reproduce; the pre-EWC baseline is preserved at `runs/step4_baseline/forgetting_matrix.json`, also gitignored).
+
+---
+
+## 17. Where these numbers come from
 
 - Dataset/class/task design: `docs/dataset-plan.md`, `docs/attack-class-counts.md`, `docs/attack-similarity-matrix.md`, `src/trench_ids/labels.py`, `src/trench_ids/task_design.py`
 - Step 1 output: `data/processed/manifest.json` (gitignored, regenerate via `trench_ids.preprocess`)
@@ -544,3 +597,4 @@ Source: `src/trench_ids/cl/transferability.py`, `tests/test_transferability.py`;
 - Step 3 model + metrics (§13): `src/trench_ids/model/`, `configs/model.yaml`, `tests/test_model.py` (parameter counts and integration numbers measured directly, not checked into git - rerun the snippets in §13 to reproduce)
 - Step 4 training + memory bank (§14): `src/trench_ids/cl/`, `configs/train.yaml` (gitignored `runs/step4/` output, rerun via `trench-train` to reproduce)
 - Step 5 transferability estimation (§15): `src/trench_ids/cl/transferability.py` (gitignored `runs/step4/transferability_task_*.json` output, produced by the same `trench-train` run as Step 4)
+- Steps 6-8 relation-aware EWC (§16): `src/trench_ids/cl/ewc.py`, `src/trench_ids/cl/importance.py`, `docs/superpowers/specs/2026-07-21-relation-aware-ewc-design.md` (gitignored `runs/step4/importance_weights_task_*.json` and `runs/step4_baseline/forgetting_matrix.json` output, produced by the same `trench-train` run)
