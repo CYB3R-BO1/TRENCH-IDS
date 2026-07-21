@@ -7,6 +7,7 @@ from torch_geometric.loader import DataLoader
 
 from trench_ids.cl.ewc import (
     FLOW_RELATIONS,
+    OnlineEWCManager,
     all_named_parameters,
     estimate_fisher,
     partition_parameter_names,
@@ -192,3 +193,56 @@ def test_estimate_fisher_restores_mismatched_training_modes_independently() -> N
 
     assert model.training
     assert not classifier.training
+
+
+def test_online_ewc_manager_loss_is_zero_before_any_update() -> None:
+    _, model, classifier = _tiny_model_and_classifier()
+    manager = OnlineEWCManager(
+        model, classifier, FLOW_RELATIONS, gamma=0.9, lambda_r=1.0, lambda_s=1.0, lambda_u=1.0,
+    )
+    w_r = {relation: torch.tensor(1.0) for relation in FLOW_RELATIONS}
+
+    loss = manager.loss(model, classifier, w_r)
+
+    assert loss.item() == pytest.approx(0.0)
+
+
+def test_online_ewc_manager_loss_nonzero_after_update_and_param_change() -> None:
+    g, model, classifier = _tiny_model_and_classifier()
+    loader = DataLoader([g, g], batch_size=1)
+    device = torch.device("cpu")
+    manager = OnlineEWCManager(
+        model, classifier, FLOW_RELATIONS, gamma=0.9, lambda_r=1.0, lambda_s=1.0, lambda_u=1.0,
+    )
+
+    manager.update_all(model, classifier, loader, device)
+    with torch.no_grad():
+        for p in model.parameters():
+            p += 1.0  # move every parameter away from its just-recorded theta*
+
+    w_r = {relation: torch.tensor(1.0) for relation in FLOW_RELATIONS}
+    loss = manager.loss(model, classifier, w_r)
+
+    assert loss.item() > 0.0
+
+
+def test_online_ewc_manager_weights_flow_relations_by_w_r() -> None:
+    g, model, classifier = _tiny_model_and_classifier()
+    loader = DataLoader([g, g], batch_size=1)
+    device = torch.device("cpu")
+    manager = OnlineEWCManager(
+        model, classifier, FLOW_RELATIONS, gamma=0.9, lambda_r=1.0, lambda_s=0.0, lambda_u=0.0,
+    )
+    manager.update_all(model, classifier, loader, device)
+    with torch.no_grad():
+        for p in model.parameters():
+            p += 1.0
+
+    w_zero = {relation: torch.tensor(0.0) for relation in FLOW_RELATIONS}
+    w_one = {relation: torch.tensor(1.0) for relation in FLOW_RELATIONS}
+
+    loss_zero = manager.loss(model, classifier, w_zero)
+    loss_one = manager.loss(model, classifier, w_one)
+
+    assert loss_zero.item() == pytest.approx(0.0)
+    assert loss_one.item() > 0.0

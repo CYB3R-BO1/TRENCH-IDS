@@ -143,3 +143,51 @@ def estimate_fisher(
     if num_batches == 0:
         return squared_grad_sums
     return {name: total / num_batches for name, total in squared_grad_sums.items()}
+
+
+class OnlineEWCManager:
+    """Owns all 12 ``OnlineEWCState`` instances (1 shared + 5 Flow relations
+    + 6 other relations) so ``train.py`` only calls ``loss()``/``update_all()``
+    instead of coordinating 12 objects itself (design §2's approved code
+    structure)."""
+
+    def __init__(
+        self,
+        model: nn.Module,
+        classifier: nn.Module,
+        flow_relations: list[str],
+        gamma: float,
+        lambda_r: float,
+        lambda_s: float,
+        lambda_u: float,
+    ) -> None:
+        self.flow_relations = list(flow_relations)
+        self.lambda_r = lambda_r
+        self.lambda_s = lambda_s
+        self.lambda_u = lambda_u
+        self.groups = partition_parameter_names(model, classifier, flow_relations)
+        self.states = {
+            group_name: OnlineEWCState(names, gamma) for group_name, names in self.groups.items()
+        }
+
+    def loss(
+        self, model: nn.Module, classifier: nn.Module, w_r: dict[str, torch.Tensor]
+    ) -> torch.Tensor:
+        params = all_named_parameters(model, classifier)
+        total = self.lambda_s * self.states["shared"].penalty(params)
+        for group_name, state in self.states.items():
+            if group_name == "shared":
+                continue
+            if group_name in self.flow_relations:
+                total = total + self.lambda_r * w_r[group_name] * state.penalty(params)
+            else:
+                total = total + self.lambda_u * state.penalty(params)
+        return total
+
+    def update_all(
+        self, model: nn.Module, classifier: nn.Module, dataloader: DataLoader, device: torch.device
+    ) -> None:
+        fisher_estimate = estimate_fisher(model, classifier, dataloader, device)
+        params = all_named_parameters(model, classifier)
+        for state in self.states.values():
+            state.update(fisher_estimate, params)
