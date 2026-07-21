@@ -15,6 +15,7 @@ Run: python -m trench_ids.cl.transferability_report
 from __future__ import annotations
 
 import json
+import statistics
 from pathlib import Path
 from typing import Any
 
@@ -43,3 +44,46 @@ def load_transferability_records(
                         "cosine": cosine,
                     })
     return records
+
+
+def relation_wise_summary(records: list[dict[str, Any]]) -> dict[str, dict[str, float | int]]:
+    """{relation: {"mean", "std", "n"}} across every recorded pair,
+    regardless of task. "std" is population standard deviation
+    (statistics.pstdev), matching numpy's default ddof=0."""
+    by_relation: dict[str, list[float]] = {}
+    for record in records:
+        by_relation.setdefault(record["relation"], []).append(record["cosine"])
+    return {
+        relation: {
+            "mean": statistics.fmean(values),
+            "std": statistics.pstdev(values),
+            "n": len(values),
+        }
+        for relation, values in by_relation.items()
+    }
+
+
+def relation_wise_task_evolution(records: list[dict[str, Any]]) -> dict[str, dict[int, float]]:
+    """{relation: {task: mean_cosine_that_task}} -- only tasks where that
+    relation has at least one observation that task."""
+    by_relation_task: dict[str, dict[int, list[float]]] = {}
+    for record in records:
+        by_relation_task.setdefault(record["relation"], {}).setdefault(
+            record["task"], []
+        ).append(record["cosine"])
+    return {
+        relation: {task: statistics.fmean(values) for task, values in task_map.items()}
+        for relation, task_map in by_relation_task.items()
+    }
+
+
+def rank_relations(summary: dict[str, dict[str, float | int]]) -> list[dict[str, Any]]:
+    """[{relation, mean, std, n}, ...] sorted by mean descending."""
+    return sorted(
+        (
+            {"relation": relation, "mean": stats["mean"], "std": stats["std"], "n": stats["n"]}
+            for relation, stats in summary.items()
+        ),
+        key=lambda row: row["mean"],
+        reverse=True,
+    )
