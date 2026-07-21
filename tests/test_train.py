@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 from torch_geometric.data import HeteroData
+from torch_geometric.loader import DataLoader
 
 from trench_ids.cl.ewc import FLOW_RELATIONS, OnlineEWCManager
 from trench_ids.cl.importance import ImportanceMLP
@@ -84,6 +85,77 @@ def test_split_warmup_and_full_loss_epochs_matches_config() -> None:
 def test_split_warmup_and_full_loss_epochs_rejects_warmup_exceeding_total() -> None:
     with pytest.raises(ValueError, match="warmup_epochs"):
         split_warmup_and_full_loss_epochs(epochs_per_task=3, warmup_epochs=5)
+
+
+def test_train_one_task_runs_end_to_end_on_cpu_with_nonempty_bank() -> None:
+    """CPU-visible integration test for the full warm-up -> temp-prototypes
+    -> S_r -> w_r -> combined-loss -> optimizer-step pipeline.
+
+    The only other test that runs train_one_task end-to-end
+    (test_train_one_task_moves_s_r_onto_device_before_importance_mlp, above)
+    is skipped whenever torch.cuda.is_available() is False, which leaves this
+    entire pipeline untested on any CPU-only machine (this repo's dev box was
+    CPU-only until 2026-07-19, and CI/other contributors' machines may still
+    be). This test uses a non-empty bank (one class's per-relation Flow
+    means) so at least one OnlineEWCState is initialized=True and the
+    weighted EWC term is genuinely non-zero, not trivially skipped, and
+    asserts importance_mlp actually received gradients during the call.
+    """
+    device = torch.device("cpu")
+    g = _tiny_graph()
+    model = RelationSpecificHeteroGNN.from_graph(
+        g, hidden_dim=8, protocol_vocab_size=2, service_vocab_size=2, num_layers=1,
+    )
+    from trench_ids.model.rhgnn import NodeFeatureEncoders
+
+    model.encoders = NodeFeatureEncoders(
+        8, protocol_vocab_size=2, service_vocab_size=2,
+        flow_feature_dim=FLOW_DIM, host_feature_dim=HOST_DIM,
+    )
+    model = model.to(device)
+    classifier = torch.nn.Linear(8, 2).to(device)
+    importance_mlp = ImportanceMLP().to(device)
+    ewc_manager = OnlineEWCManager(
+        model, classifier, FLOW_RELATIONS, gamma=0.9, lambda_r=1.0, lambda_s=1.0, lambda_u=1.0,
+    )
+    # Prime the EWC manager with a Fisher/theta* estimate so its shared and
+    # per-relation states are initialized (loss() would otherwise be zero).
+    loader = DataLoader([g, g], batch_size=2)
+    ewc_manager.update_all(model, classifier, loader, device)
+
+    trainable_params = (
+        list(model.parameters())
+        + list(classifier.parameters())
+        + list(importance_mlp.parameters())
+    )
+    optimizer = torch.optim.Adam(trainable_params, lr=1e-3)
+
+    # Non-empty bank: one class's per-relation Flow means, matching the shape
+    # produced by RelationMeanAccumulator.means() in memory_bank.py.
+    bank = {
+        "attack_a": {relation: torch.randn(8) for relation in FLOW_RELATIONS},
+    }
+
+    train_one_task(
+        model,
+        classifier,
+        [g, g],
+        device,
+        batch_size=2,
+        warmup_epochs=1,
+        full_loss_epochs=2,
+        optimizer=optimizer,
+        ewc_manager=ewc_manager,
+        importance_mlp=importance_mlp,
+        label_names=["a", "b"],
+        bank=bank,
+    )
+
+    # The full-loss epochs' combined loss (L_cls + weighted EWC term) must
+    # have backpropagated into importance_mlp at some point -- optimizer.step()
+    # doesn't clear .grad, so it's still readable here after the call returns.
+    assert importance_mlp.net[0].weight.grad is not None
+    assert torch.any(importance_mlp.net[0].weight.grad != 0.0)
 
 
 @pytest.mark.skipif(
