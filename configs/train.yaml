@@ -32,6 +32,19 @@ ewc:
   lambda_s: 1.0
   lambda_u: 1.0
   gamma: 0.9
+  # Plain-Online-EWC baseline switch (lambda sweep, 2026-07-21): when true,
+  # w_r is fixed at 1.0 for every Flow relation instead of learned via
+  # importance_mlp, so lambda_r=lambda_s=lambda_u applies the same uniform,
+  # unweighted penalty to all 12 EWC groups -- lambda_r=0 alone is NOT
+  # equivalent, since it would zero out Flow's 5 relations entirely rather
+  # than regularizing them like every other group.
+  disable_learned_weighting: false
+  # Diagnostic instrumentation (2026-07-21 lambda-sweep follow-up): when
+  # true, writes runs/<out_dir>/loss_components_task_{t}.jsonl -- one line
+  # per full-loss epoch with L_cls and the raw/weighted EWC breakdown, so
+  # lambda*L_EWC's actual magnitude relative to L_cls can be checked
+  # directly instead of inferred from forgetting/accuracy alone.
+  log_loss_components: false
 
 paths:
   graphs_dir: data/graphs

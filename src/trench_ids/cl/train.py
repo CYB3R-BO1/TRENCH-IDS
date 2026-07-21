@@ -24,6 +24,7 @@ Run:  trench-train
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -88,6 +89,34 @@ def forgetting_row(accuracy_fn: Callable[[int], float], up_to_task: int) -> dict
     }
 
 
+def average_forgetting(forgetting_matrix: dict[int, dict[int, float]]) -> float:
+    """Mean, over every task before the final one, of that task's peak
+    accuracy (across all evaluations from its own training through the
+    final task) minus its accuracy after the final task -- the standard
+    forgetting-matrix definition (Lopez-Paz & Ranzato, GEM). 0.0 when only
+    one task has been trained (nothing earlier to have forgotten)."""
+    final_task = max(forgetting_matrix)
+    if final_task == 1:
+        return 0.0
+    per_task_forgetting = []
+    for evaluated_task in range(1, final_task):
+        peak = max(
+            forgetting_matrix[trained_up_to][evaluated_task]
+            for trained_up_to in range(evaluated_task, final_task)
+        )
+        final_accuracy = forgetting_matrix[final_task][evaluated_task]
+        per_task_forgetting.append(peak - final_accuracy)
+    return sum(per_task_forgetting) / len(per_task_forgetting)
+
+
+def final_average_accuracy(forgetting_matrix: dict[int, dict[int, float]]) -> float:
+    """Mean test accuracy, over every task, as measured right after the
+    final task finishes training -- the forgetting matrix's last row."""
+    final_task = max(forgetting_matrix)
+    accuracies = forgetting_matrix[final_task].values()
+    return sum(accuracies) / len(accuracies)
+
+
 def split_warmup_and_full_loss_epochs(epochs_per_task: int, warmup_epochs: int) -> tuple[int, int]:
     """``(warmup_epochs, full_loss_epochs)`` -- every task runs this same
     split (design §5's uniform per-task flow: no ``if task == 1`` special
@@ -112,6 +141,8 @@ def train_one_task(
     importance_mlp: ImportanceMLP,
     label_names: list[str],
     bank: dict[str, dict[str, torch.Tensor]],
+    disable_learned_weighting: bool = False,
+    epoch_log_path: Path | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Runs one task's full warm-up + full-loss training (design §5, steps
     1-5). Returns ``(final_epoch_mean_loss, final_w_r)`` -- ``final_w_r`` is
@@ -139,32 +170,55 @@ def train_one_task(
     s_r = aggregate_transferability_scores(transferability, FLOW_RELATIONS)
     s_r = {relation: value.to(device) for relation, value in s_r.items()}
 
+    def _compute_w_r() -> dict[str, torch.Tensor]:
+        # The plain-Online-EWC baseline (disable_learned_weighting=True):
+        # w_r fixed at 1.0, never routed through importance_mlp, so
+        # lambda_r=lambda_s=lambda_u applies the same uniform, unweighted
+        # penalty to all 12 EWC groups instead of scaling Flow's 5 relations
+        # by a learned weight.
+        if disable_learned_weighting:
+            return {relation: torch.ones((), device=device) for relation in s_r}
+        return importance_mlp(s_r)
+
     # Step 5: full-loss epochs. w_r is recomputed fresh from the cached S_r
     # every batch (not cached itself) so the MLP trains via backprop without
     # retaining a graph across batches (design §3, revised after user review).
     model.train()
     classifier.train()
     last_epoch_loss = 0.0
-    for _epoch in range(full_loss_epochs):
+    for epoch in range(full_loss_epochs):
         total_loss = 0.0
         total_flows = 0
+        component_sums = {
+            "l_cls": 0.0, "shared_raw": 0.0, "flow_raw": 0.0,
+            "other_raw": 0.0, "total_weighted": 0.0,
+        }
         for batch in loader:
             batch = batch.to(device)
             optimizer.zero_grad()
             output = model(batch)
             logits = classifier(output.fused["flow"])
-            w_r = importance_mlp(s_r)
-            loss = F.cross_entropy(logits, batch["flow"].y) + ewc_manager.loss(
-                model, classifier, w_r
-            )
+            w_r = _compute_w_r()
+            cls_loss = F.cross_entropy(logits, batch["flow"].y)
+            breakdown = ewc_manager.loss_breakdown(model, classifier, w_r)
+            loss = cls_loss + breakdown["total_weighted"]
             loss.backward()
             optimizer.step()
             n = batch["flow"].y.numel()
             total_loss += loss.item() * n
             total_flows += n
+            if epoch_log_path is not None:
+                component_sums["l_cls"] += cls_loss.item() * n
+                for key in ("shared_raw", "flow_raw", "other_raw", "total_weighted"):
+                    component_sums[key] += breakdown[key].item() * n
         last_epoch_loss = total_loss / total_flows if total_flows else 0.0
+        if epoch_log_path is not None and total_flows:
+            record = {"epoch": epoch, **{k: v / total_flows for k, v in component_sums.items()}}
+            record["loss_total"] = last_epoch_loss
+            with epoch_log_path.open("a") as f:
+                f.write(json.dumps(record) + "\n")
 
-    final_w_r = {relation: value.item() for relation, value in importance_mlp(s_r).items()}
+    final_w_r = {relation: value.item() for relation, value in _compute_w_r().items()}
     return last_epoch_loss, final_w_r
 
 
@@ -230,6 +284,7 @@ def main(cfg: DictConfig) -> None:
 
     memory_bank: dict[str, dict[str, torch.Tensor]] = {}
     forgetting_matrix: dict[int, dict[int, float]] = {}
+    run_start = time.monotonic()
 
     for task in range(1, NUM_TASKS + 1):
         train_graphs = sample_graphs if task == 1 else load_split(graphs_dir, task, "train")
@@ -237,6 +292,11 @@ def main(cfg: DictConfig) -> None:
             cfg.train.epochs_per_task, cfg.train.warmup_epochs
         )
 
+        epoch_log_path = (
+            out_dir / f"loss_components_task_{task}.jsonl"
+            if cfg.ewc.log_loss_components
+            else None
+        )
         final_loss, final_w_r = train_one_task(
             model,
             classifier,
@@ -250,6 +310,8 @@ def main(cfg: DictConfig) -> None:
             importance_mlp,
             label_names,
             memory_bank,
+            disable_learned_weighting=cfg.ewc.disable_learned_weighting,
+            epoch_log_path=epoch_log_path,
         )
         print(f"[train] task {task}: final epoch mean loss = {final_loss:.4f}")
         (out_dir / f"importance_weights_task_{task}.json").write_text(
@@ -282,7 +344,20 @@ def main(cfg: DictConfig) -> None:
 
     save_memory_bank(memory_bank, out_dir / "memory_bank.pt")
     (out_dir / "forgetting_matrix.json").write_text(json.dumps(forgetting_matrix, indent=2))
-    print(f"[done] wrote memory_bank.pt and forgetting_matrix.json to {out_dir}")
+
+    summary = {
+        "average_forgetting": average_forgetting(forgetting_matrix),
+        "final_average_accuracy": final_average_accuracy(forgetting_matrix),
+        "runtime_seconds": time.monotonic() - run_start,
+        "lambda_r": cfg.ewc.lambda_r,
+        "lambda_s": cfg.ewc.lambda_s,
+        "lambda_u": cfg.ewc.lambda_u,
+        "gamma": cfg.ewc.gamma,
+        "disable_learned_weighting": cfg.ewc.disable_learned_weighting,
+        "seed": cfg.train.seed,
+    }
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+    print(f"[done] wrote memory_bank.pt, forgetting_matrix.json, and summary.json to {out_dir}")
 
 
 if __name__ == "__main__":

@@ -7,7 +7,13 @@ from torch_geometric.loader import DataLoader
 
 from trench_ids.cl.ewc import FLOW_RELATIONS, OnlineEWCManager
 from trench_ids.cl.importance import ImportanceMLP
-from trench_ids.cl.train import forgetting_row, split_warmup_and_full_loss_epochs, train_one_task
+from trench_ids.cl.train import (
+    average_forgetting,
+    final_average_accuracy,
+    forgetting_row,
+    split_warmup_and_full_loss_epochs,
+    train_one_task,
+)
 from trench_ids.model.rhgnn import RelationSpecificHeteroGNN
 
 FLOW_DIM = 3
@@ -211,3 +217,157 @@ def test_train_one_task_moves_s_r_onto_device_before_importance_mlp() -> None:
         label_names=["a", "b"],
         bank={},
     )
+
+
+def test_train_one_task_disabled_weighting_fixes_w_r_and_skips_importance_mlp_grad() -> None:
+    """When disable_learned_weighting=True (the plain-Online-EWC baseline),
+    w_r must be fixed at 1.0 for every Flow relation rather than routed
+    through importance_mlp, so lambda_r=lambda_s=lambda_u gives every one of
+    the 12 EWC groups the same uniform, unweighted penalty. Verified two
+    ways: importance_mlp's parameters receive no gradient (it's never called
+    on the forward path), and final_w_r in the returned tuple is exactly 1.0
+    for every relation."""
+    device = torch.device("cpu")
+    g = _tiny_graph()
+    model = RelationSpecificHeteroGNN.from_graph(
+        g, hidden_dim=8, protocol_vocab_size=2, service_vocab_size=2, num_layers=1,
+    )
+    from trench_ids.model.rhgnn import NodeFeatureEncoders
+
+    model.encoders = NodeFeatureEncoders(
+        8, protocol_vocab_size=2, service_vocab_size=2,
+        flow_feature_dim=FLOW_DIM, host_feature_dim=HOST_DIM,
+    )
+    model = model.to(device)
+    classifier = torch.nn.Linear(8, 2).to(device)
+    importance_mlp = ImportanceMLP().to(device)
+    ewc_manager = OnlineEWCManager(
+        model, classifier, FLOW_RELATIONS, gamma=0.9, lambda_r=1.0, lambda_s=1.0, lambda_u=1.0,
+    )
+    loader = DataLoader([g, g], batch_size=2)
+    ewc_manager.update_all(model, classifier, loader, device)
+
+    trainable_params = (
+        list(model.parameters())
+        + list(classifier.parameters())
+        + list(importance_mlp.parameters())
+    )
+    optimizer = torch.optim.Adam(trainable_params, lr=1e-3)
+    bank = {
+        "attack_a": {relation: torch.randn(8) for relation in FLOW_RELATIONS},
+    }
+
+    _, final_w_r = train_one_task(
+        model,
+        classifier,
+        [g, g],
+        device,
+        batch_size=2,
+        warmup_epochs=1,
+        full_loss_epochs=2,
+        optimizer=optimizer,
+        ewc_manager=ewc_manager,
+        importance_mlp=importance_mlp,
+        label_names=["a", "b"],
+        bank=bank,
+        disable_learned_weighting=True,
+    )
+
+    assert final_w_r == {relation: 1.0 for relation in FLOW_RELATIONS}
+    assert importance_mlp.net[0].weight.grad is None or torch.all(
+        importance_mlp.net[0].weight.grad == 0.0
+    )
+
+
+def test_train_one_task_writes_loss_components_log_when_path_given(tmp_path) -> None:
+    """Diagnostic instrumentation (2026-07-21 lambda-sweep follow-up): with
+    epoch_log_path given, train_one_task must append one JSON line per
+    full-loss epoch recording L_cls and the raw/weighted EWC breakdown, so
+    a run's log can show whether lambda*L_EWC is actually large enough to
+    influence optimization rather than just re-running more lambda values."""
+    device = torch.device("cpu")
+    g = _tiny_graph()
+    model = RelationSpecificHeteroGNN.from_graph(
+        g, hidden_dim=8, protocol_vocab_size=2, service_vocab_size=2, num_layers=1,
+    )
+    from trench_ids.model.rhgnn import NodeFeatureEncoders
+
+    model.encoders = NodeFeatureEncoders(
+        8, protocol_vocab_size=2, service_vocab_size=2,
+        flow_feature_dim=FLOW_DIM, host_feature_dim=HOST_DIM,
+    )
+    model = model.to(device)
+    classifier = torch.nn.Linear(8, 2).to(device)
+    importance_mlp = ImportanceMLP().to(device)
+    ewc_manager = OnlineEWCManager(
+        model, classifier, FLOW_RELATIONS,
+        gamma=0.9, lambda_r=1000.0, lambda_s=1000.0, lambda_u=1000.0,
+    )
+    loader = DataLoader([g, g], batch_size=2)
+    ewc_manager.update_all(model, classifier, loader, device)
+
+    trainable_params = (
+        list(model.parameters())
+        + list(classifier.parameters())
+        + list(importance_mlp.parameters())
+    )
+    optimizer = torch.optim.Adam(trainable_params, lr=1e-3)
+    bank = {
+        "attack_a": {relation: torch.randn(8) for relation in FLOW_RELATIONS},
+    }
+    log_path = tmp_path / "loss_components.jsonl"
+
+    train_one_task(
+        model,
+        classifier,
+        [g, g],
+        device,
+        batch_size=2,
+        warmup_epochs=1,
+        full_loss_epochs=2,
+        optimizer=optimizer,
+        ewc_manager=ewc_manager,
+        importance_mlp=importance_mlp,
+        label_names=["a", "b"],
+        bank=bank,
+        epoch_log_path=log_path,
+    )
+
+    import json
+
+    lines = log_path.read_text().strip().splitlines()
+    assert len(lines) == 2
+    for i, line in enumerate(lines):
+        record = json.loads(line)
+        assert record["epoch"] == i
+        assert set(record.keys()) == {
+            "epoch", "l_cls", "shared_raw", "flow_raw", "other_raw",
+            "total_weighted", "loss_total",
+        }
+
+
+def test_average_forgetting_returns_zero_for_single_task() -> None:
+    assert average_forgetting({1: {1: 0.9}}) == 0.0
+
+
+def test_average_forgetting_is_peak_minus_final_averaged_over_earlier_tasks() -> None:
+    forgetting_matrix = {
+        1: {1: 0.9},
+        2: {1: 0.8, 2: 0.85},
+        3: {1: 0.6, 2: 0.7, 3: 0.95},
+    }
+
+    # Task 1's peak accuracy across evaluations 1..2 (its own eval + task 2's
+    # re-eval) is 0.9, final (task 3's re-eval) is 0.6 -> forgetting 0.3.
+    # Task 2's peak across evaluations 2..2 is 0.85, final is 0.7 -> 0.15.
+    # Average of [0.3, 0.15] = 0.225.
+    assert average_forgetting(forgetting_matrix) == pytest.approx(0.225)
+
+
+def test_final_average_accuracy_averages_last_row() -> None:
+    forgetting_matrix = {
+        1: {1: 0.9},
+        2: {1: 0.8, 2: 0.85},
+    }
+
+    assert final_average_accuracy(forgetting_matrix) == pytest.approx((0.8 + 0.85) / 2)

@@ -246,3 +246,78 @@ def test_online_ewc_manager_weights_flow_relations_by_w_r() -> None:
 
     assert loss_zero.item() == pytest.approx(0.0)
     assert loss_one.item() > 0.0
+
+
+def test_loss_breakdown_has_expected_keys() -> None:
+    _, model, classifier = _tiny_model_and_classifier()
+    manager = OnlineEWCManager(
+        model, classifier, FLOW_RELATIONS, gamma=0.9, lambda_r=1.0, lambda_s=1.0, lambda_u=1.0,
+    )
+    w_r = {relation: torch.tensor(1.0) for relation in FLOW_RELATIONS}
+
+    breakdown = manager.loss_breakdown(model, classifier, w_r)
+
+    assert set(breakdown.keys()) == {"shared_raw", "flow_raw", "other_raw", "total_weighted"}
+
+
+def test_loss_breakdown_is_zero_before_any_update() -> None:
+    _, model, classifier = _tiny_model_and_classifier()
+    manager = OnlineEWCManager(
+        model, classifier, FLOW_RELATIONS, gamma=0.9, lambda_r=1.0, lambda_s=1.0, lambda_u=1.0,
+    )
+    w_r = {relation: torch.tensor(1.0) for relation in FLOW_RELATIONS}
+
+    breakdown = manager.loss_breakdown(model, classifier, w_r)
+
+    assert breakdown["shared_raw"].item() == pytest.approx(0.0)
+    assert breakdown["flow_raw"].item() == pytest.approx(0.0)
+    assert breakdown["other_raw"].item() == pytest.approx(0.0)
+    assert breakdown["total_weighted"].item() == pytest.approx(0.0)
+
+
+def test_loss_breakdown_total_weighted_matches_loss() -> None:
+    g, model, classifier = _tiny_model_and_classifier()
+    loader = DataLoader([g, g], batch_size=1)
+    device = torch.device("cpu")
+    manager = OnlineEWCManager(
+        model, classifier, FLOW_RELATIONS, gamma=0.9, lambda_r=2.0, lambda_s=3.0, lambda_u=5.0,
+    )
+    manager.update_all(model, classifier, loader, device)
+    with torch.no_grad():
+        for p in model.parameters():
+            p += 1.0
+
+    w_r = {relation: torch.tensor(0.7) for relation in FLOW_RELATIONS}
+
+    breakdown = manager.loss_breakdown(model, classifier, w_r)
+    loss = manager.loss(model, classifier, w_r)
+
+    assert breakdown["total_weighted"].item() == pytest.approx(loss.item())
+
+
+def test_loss_breakdown_flow_raw_is_independent_of_w_r() -> None:
+    """flow_raw must report the *unweighted* Flow-relation penalty sum, so
+    it can be compared against lambda*flow_raw*w_r to judge whether the
+    penalty is large enough to matter -- unlike total_weighted, it must not
+    change when w_r changes."""
+    g, model, classifier = _tiny_model_and_classifier()
+    loader = DataLoader([g, g], batch_size=1)
+    device = torch.device("cpu")
+    manager = OnlineEWCManager(
+        model, classifier, FLOW_RELATIONS, gamma=0.9, lambda_r=1.0, lambda_s=0.0, lambda_u=0.0,
+    )
+    manager.update_all(model, classifier, loader, device)
+    with torch.no_grad():
+        for p in model.parameters():
+            p += 1.0
+
+    w_zero = {relation: torch.tensor(0.0) for relation in FLOW_RELATIONS}
+    w_one = {relation: torch.tensor(1.0) for relation in FLOW_RELATIONS}
+
+    breakdown_zero = manager.loss_breakdown(model, classifier, w_zero)
+    breakdown_one = manager.loss_breakdown(model, classifier, w_one)
+
+    assert breakdown_zero["flow_raw"].item() == pytest.approx(breakdown_one["flow_raw"].item())
+    assert breakdown_zero["flow_raw"].item() > 0.0
+    assert breakdown_zero["total_weighted"].item() == pytest.approx(0.0)
+    assert breakdown_one["total_weighted"].item() > 0.0

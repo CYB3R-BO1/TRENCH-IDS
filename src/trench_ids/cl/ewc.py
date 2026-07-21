@@ -173,16 +173,42 @@ class OnlineEWCManager:
     def loss(
         self, model: nn.Module, classifier: nn.Module, w_r: dict[str, torch.Tensor]
     ) -> torch.Tensor:
+        return self.loss_breakdown(model, classifier, w_r)["total_weighted"]
+
+    def loss_breakdown(
+        self, model: nn.Module, classifier: nn.Module, w_r: dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        """Diagnostic breakdown of ``loss()``'s components -- lets a caller
+        compare raw (unweighted) per-category penalty magnitudes against
+        ``L_cls`` to judge whether lambda is actually large enough to
+        influence optimization, not just whether it changes the final
+        number (2026-07-21 lambda-sweep instrumentation). ``*_raw`` values
+        are unweighted (no lambda, and for Flow, no w_r) sums of that
+        category's penalty; ``total_weighted`` is identical to ``loss()``'s
+        return value."""
         params = all_named_parameters(model, classifier)
-        total = self.lambda_s * self.states["shared"].penalty(params)
+        shared_raw = self.states["shared"].penalty(params)
+        flow_raw = torch.zeros_like(shared_raw)
+        flow_weighted = torch.zeros_like(shared_raw)
+        other_raw = torch.zeros_like(shared_raw)
         for group_name, state in self.states.items():
             if group_name == "shared":
                 continue
+            penalty = state.penalty(params)
             if group_name in self.flow_relations:
-                total = total + self.lambda_r * w_r[group_name] * state.penalty(params)
+                flow_raw = flow_raw + penalty
+                flow_weighted = flow_weighted + w_r[group_name] * penalty
             else:
-                total = total + self.lambda_u * state.penalty(params)
-        return total
+                other_raw = other_raw + penalty
+        total_weighted = (
+            self.lambda_s * shared_raw + self.lambda_r * flow_weighted + self.lambda_u * other_raw
+        )
+        return {
+            "shared_raw": shared_raw,
+            "flow_raw": flow_raw,
+            "other_raw": other_raw,
+            "total_weighted": total_weighted,
+        }
 
     def update_all(
         self, model: nn.Module, classifier: nn.Module, dataloader: DataLoader, device: torch.device
