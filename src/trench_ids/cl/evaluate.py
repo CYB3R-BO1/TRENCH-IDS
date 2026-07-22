@@ -1,0 +1,92 @@
+"""Evaluation -- full metrics suite (accuracy/precision/recall/F1/confusion
+matrix/per-class) over held-out test splits, using checkpoints saved by
+trench_ids.cl.train (Part 1) and predictions from trench_ids.cl.inference
+(Part 2). This module never touches model internals directly -- it consumes
+inference.predict()'s raw predictions and computes metrics from them.
+
+Run: python -m trench_ids.cl.evaluate --run-dir runs/step4 --graphs-dir data/graphs
+     --out-dir runs/step4/eval
+  or: trench-evaluate ...
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_fscore_support
+
+
+def compute_metrics(y_true: list[int], y_pred: list[int], label_names: list[str]) -> dict[str, Any]:
+    """Full metrics suite for one set of predictions -- accuracy, macro and
+    weighted precision/recall/F1, per-class precision/recall/F1/support, and
+    a confusion matrix sized len(label_names) x len(label_names).
+    zero_division=0 so a class absent from a task's test split, or never
+    predicted, doesn't raise/warn -- the realistic case here, since the
+    classifier always outputs over the full label space regardless of which
+    classes a given task's test split actually contains."""
+    labels_idx = list(range(len(label_names)))
+    accuracy = accuracy_score(y_true, y_pred) if y_true else 0.0
+    precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(
+        y_true, y_pred, labels=labels_idx, average="macro", zero_division=0
+    )
+    precision_weighted, recall_weighted, f1_weighted, _ = precision_recall_fscore_support(
+        y_true, y_pred, labels=labels_idx, average="weighted", zero_division=0
+    )
+    precision_pc, recall_pc, f1_pc, support_pc = precision_recall_fscore_support(
+        y_true, y_pred, labels=labels_idx, average=None, zero_division=0
+    )
+    per_class = {
+        label_names[i]: {
+            "precision": float(precision_pc[i]),
+            "recall": float(recall_pc[i]),
+            "f1": float(f1_pc[i]),
+            "support": int(support_pc[i]),
+        }
+        for i in labels_idx
+    }
+    cm = confusion_matrix(y_true, y_pred, labels=labels_idx).tolist()
+    return {
+        "accuracy": float(accuracy),
+        "precision_macro": float(precision_macro),
+        "recall_macro": float(recall_macro),
+        "f1_macro": float(f1_macro),
+        "precision_weighted": float(precision_weighted),
+        "recall_weighted": float(recall_weighted),
+        "f1_weighted": float(f1_weighted),
+        "per_class": per_class,
+        "confusion_matrix": cm,
+        "label_names": label_names,
+    }
+
+
+def pool_predictions(predictions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Concatenates y_true/y_pred across multiple inference.predict()
+    outputs without reweighting -- a micro-level pool over every sample, not
+    a per-task average. Every entry must share the same label_names."""
+    label_names = predictions[0]["label_names"]
+    for p in predictions:
+        if p["label_names"] != label_names:
+            raise ValueError("All predictions must share the same label_names to pool.")
+    y_true = [t for p in predictions for t in p["y_true"]]
+    y_pred = [t for p in predictions for t in p["y_pred"]]
+    return {"y_true": y_true, "y_pred": y_pred, "label_names": label_names}
+
+
+def forgetting_metrics_table(
+    eval_matrix: dict[int, dict[int, dict[str, Any]]],
+) -> list[dict[str, float]]:
+    """Long-format rows -- {trained_up_to, evaluated_task, accuracy,
+    f1_macro} -- one per matrix cell, sorted by evaluated_task then
+    trained_up_to so a plot/groupby can read it directly (extends
+    train.py's accuracy-only forgetting concept to also cover F1-macro)."""
+    rows = [
+        {
+            "trained_up_to": trained_up_to,
+            "evaluated_task": evaluated_task,
+            "accuracy": cell["accuracy"],
+            "f1_macro": cell["f1_macro"],
+        }
+        for trained_up_to, row in eval_matrix.items()
+        for evaluated_task, cell in row.items()
+    ]
+    return sorted(rows, key=lambda r: (r["evaluated_task"], r["trained_up_to"]))
