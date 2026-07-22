@@ -24,8 +24,10 @@ Run:  trench-train
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 import hydra
@@ -48,6 +50,48 @@ def resolve_device(device_cfg: str) -> torch.device:
     if device_cfg == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device_cfg)
+
+
+def _git_commit() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, check=True,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return None
+
+
+def save_checkpoint(
+    path: Path,
+    task_id: int,
+    epochs_per_task: int,
+    warmup_epochs: int,
+    seed: int,
+    model: RelationSpecificHeteroGNN,
+    classifier: torch.nn.Linear,
+    config: dict,
+) -> None:
+    """Saves an evaluation-only checkpoint -- no optimizer state, since
+    these are inference/evaluation artifacts, not resumable training
+    snapshots (design doc: "Optimizer state is intentionally omitted")."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "checkpoint_version": 1,
+            "task_id": task_id,
+            "epochs_per_task": epochs_per_task,
+            "warmup_epochs": warmup_epochs,
+            "random_seed": seed,
+            "git_commit": _git_commit(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "model_state_dict": model.state_dict(),
+            "classifier_state_dict": classifier.state_dict(),
+            "config": config,
+        },
+        path,
+    )
 
 
 def load_split(graphs_dir: Path, task: int, split: str) -> list[HeteroData]:
@@ -341,6 +385,25 @@ def main(cfg: DictConfig) -> None:
         forgetting_matrix[task] = forgetting_row(_accuracy_for, task)
         for evaluated_task, acc in forgetting_matrix[task].items():
             print(f"[eval] after task {task}, task {evaluated_task} test accuracy = {acc:.4f}")
+
+        save_checkpoint(
+            out_dir / f"checkpoint_task_{task}.pt",
+            task_id=task,
+            epochs_per_task=cfg.train.epochs_per_task,
+            warmup_epochs=cfg.train.warmup_epochs,
+            seed=cfg.train.seed,
+            model=model,
+            classifier=classifier,
+            config={
+                "hidden_dim": cfg.model.hidden_dim,
+                "num_layers": cfg.model.num_layers,
+                "attn_dim": cfg.model.attn_dim,
+                "port_buckets": cfg.model.port_buckets,
+                "protocol_vocab_size": protocol_vocab_size,
+                "service_vocab_size": service_vocab_size,
+                "label_names": label_names,
+            },
+        )
 
     save_memory_bank(memory_bank, out_dir / "memory_bank.pt")
     (out_dir / "forgetting_matrix.json").write_text(json.dumps(forgetting_matrix, indent=2))

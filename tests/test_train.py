@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
 from torch_geometric.data import HeteroData
@@ -11,6 +13,7 @@ from trench_ids.cl.train import (
     average_forgetting,
     final_average_accuracy,
     forgetting_row,
+    save_checkpoint,
     split_warmup_and_full_loss_epochs,
     train_one_task,
 )
@@ -371,3 +374,51 @@ def test_final_average_accuracy_averages_last_row() -> None:
     }
 
     assert final_average_accuracy(forgetting_matrix) == pytest.approx((0.8 + 0.85) / 2)
+
+
+def test_save_checkpoint_writes_loadable_state(tmp_path: Path) -> None:
+    device = torch.device("cpu")
+    g = _tiny_graph()
+    model = RelationSpecificHeteroGNN.from_graph(
+        g, hidden_dim=8, protocol_vocab_size=2, service_vocab_size=2, num_layers=1,
+    )
+    from trench_ids.model.rhgnn import NodeFeatureEncoders
+
+    model.encoders = NodeFeatureEncoders(
+        8, protocol_vocab_size=2, service_vocab_size=2,
+        flow_feature_dim=FLOW_DIM, host_feature_dim=HOST_DIM,
+    )
+    model = model.to(device)
+    classifier = torch.nn.Linear(8, 2).to(device)
+    config = {
+        "hidden_dim": 8, "num_layers": 1, "attn_dim": 128, "port_buckets": 32,
+        "protocol_vocab_size": 2, "service_vocab_size": 2, "label_names": ["a", "b"],
+    }
+    path = tmp_path / "checkpoint_task_1.pt"
+
+    save_checkpoint(
+        path, task_id=1, epochs_per_task=5, warmup_epochs=2, seed=42,
+        model=model, classifier=classifier, config=config,
+    )
+
+    checkpoint = torch.load(path, weights_only=False)
+    assert checkpoint["checkpoint_version"] == 1
+    assert checkpoint["task_id"] == 1
+    assert checkpoint["epochs_per_task"] == 5
+    assert checkpoint["warmup_epochs"] == 2
+    assert checkpoint["random_seed"] == 42
+    assert checkpoint["config"] == config
+    assert "timestamp" in checkpoint
+    assert "git_commit" in checkpoint
+
+    fresh_model = RelationSpecificHeteroGNN.from_graph(
+        g, hidden_dim=8, protocol_vocab_size=2, service_vocab_size=2, num_layers=1,
+    )
+    fresh_model.encoders = NodeFeatureEncoders(
+        8, protocol_vocab_size=2, service_vocab_size=2,
+        flow_feature_dim=FLOW_DIM, host_feature_dim=HOST_DIM,
+    )
+    fresh_model.load_state_dict(checkpoint["model_state_dict"])  # no error
+
+    fresh_classifier = torch.nn.Linear(8, 2)
+    fresh_classifier.load_state_dict(checkpoint["classifier_state_dict"])  # no error
