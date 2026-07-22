@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import matplotlib
+
+matplotlib.use("Agg")
+
 import json
 import math
 from pathlib import Path
@@ -190,3 +194,33 @@ def test_compare_to_raw_feature_similarity_skips_unmatched_classes():
     assert result["n_matched_pairs"] == 0
     assert math.isnan(result["pearson_r"])
     assert math.isnan(result["spearman_r"])
+
+
+from trench_ids.cl.transferability_report import (  # noqa: E402
+    plot_class_pair_heatmap,
+    plot_relation_ranking,
+)
+
+
+def test_plot_relation_ranking_creates_nonempty_file(tmp_path):
+    ranking = [{"relation": "originates", "mean": 0.3, "std": 0.1, "n": 5}]
+    out_path = tmp_path / "relation_ranking.png"
+
+    plot_relation_ranking(ranking, out_path)
+
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0
+
+
+def test_plot_class_pair_heatmap_creates_nonempty_file(tmp_path):
+    pair_ranking = [
+        {"class_a": "A", "class_b": "B", "mean": 0.5,
+         "per_relation": {"originates": 0.5, "terminated_by": 0.1},
+         "best_relation": "originates", "worst_relation": "terminated_by"},
+    ]
+    out_path = tmp_path / "heatmap.png"
+
+    plot_class_pair_heatmap(pair_ranking, out_path)
+
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0

@@ -14,6 +14,11 @@ Run: python -m trench_ids.cl.transferability_report
 
 from __future__ import annotations
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402, I001
+
 import json
 import statistics
 from pathlib import Path
@@ -196,3 +201,50 @@ def compare_to_raw_feature_similarity(
         "top_agreements": top_agreements,
         "top_disagreements": top_disagreements,
     }
+
+
+def plot_relation_ranking(ranking: list[dict[str, Any]], out_path: Path) -> None:
+    """Bar chart, relations in the order given (rank_relations already
+    sorts descending by mean), error bars = std."""
+    relations = [row["relation"] for row in ranking]
+    means = [row["mean"] for row in ranking]
+    stds = [row["std"] for row in ranking]
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.bar(relations, means, yerr=stds, capsize=4)
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.set_ylabel("Mean transferability (cosine similarity)")
+    ax.set_title("Relation-wise transferability")
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
+def plot_class_pair_heatmap(pair_ranking: list[dict[str, Any]], out_path: Path) -> None:
+    """Rows = class pairs, in the order given (rank_class_pairs already
+    sorts descending by mean -- most-transferable pair at the top).
+    Columns = relations, derived from whatever's present in pair_ranking,
+    never hardcoded. A pair missing a relation renders NaN (blank cell),
+    matching class_pair_summary's "omit, don't zero-fill" rule."""
+    relations = sorted({relation for row in pair_ranking for relation in row["per_relation"]})
+    row_labels = [f"{row['class_a']} vs {row['class_b']}" for row in pair_ranking]
+    data = [
+        [row["per_relation"].get(relation, float("nan")) for relation in relations]
+        for row in pair_ranking
+    ]
+
+    fig, ax = plt.subplots(figsize=(1.6 * len(relations) + 2, 0.4 * len(row_labels) + 2))
+    im = ax.imshow(data, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
+    ax.set_xticks(range(len(relations)))
+    ax.set_xticklabels(relations, rotation=45, ha="right")
+    ax.set_yticks(range(len(row_labels)))
+    ax.set_yticklabels(row_labels)
+    for i, row in enumerate(data):
+        for j, value in enumerate(row):
+            if value == value:  # not NaN
+                ax.text(j, i, f"{value:.2f}", ha="center", va="center", fontsize=7)
+    fig.colorbar(im, ax=ax, label="Cosine similarity")
+    ax.set_title("Class-pair transferability by relation")
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
