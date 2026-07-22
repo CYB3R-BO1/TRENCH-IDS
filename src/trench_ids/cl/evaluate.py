@@ -11,9 +11,15 @@ Run: python -m trench_ids.cl.evaluate --run-dir runs/step4 --graphs-dir data/gra
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
+import torch
 from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_fscore_support
+
+from trench_ids.cl.inference import load_checkpoint, predict
+from trench_ids.cl.train import load_split
+from trench_ids.labels import NUM_TASKS
 
 
 def compute_metrics(y_true: list[int], y_pred: list[int], label_names: list[str]) -> dict[str, Any]:
@@ -90,3 +96,62 @@ def forgetting_metrics_table(
         for evaluated_task, cell in row.items()
     ]
     return sorted(rows, key=lambda r: (r["evaluated_task"], r["trained_up_to"]))
+
+
+def build_eval_matrix(
+    run_dir: Path,
+    graphs_dir: Path,
+    device: torch.device,
+    batch_size: int,
+    num_tasks: int = NUM_TASKS,
+) -> tuple[dict[int, dict[int, dict[str, Any]]], dict[int, dict[int, dict[str, Any]]]]:
+    """Evaluates every checkpoint_task_{t}.pt against every task 1..t's test
+    split. Returns (eval_matrix, predictions_by_trained_up_to) --
+    predictions_by_trained_up_to[num_tasks] is reused by
+    pooled_final_metrics so the final checkpoint's per-task predictions
+    aren't recomputed."""
+    eval_matrix: dict[int, dict[int, dict[str, Any]]] = {}
+    predictions_by_trained_up_to: dict[int, dict[int, dict[str, Any]]] = {}
+    for trained_up_to in range(1, num_tasks + 1):
+        checkpoint_path = run_dir / f"checkpoint_task_{trained_up_to}.pt"
+        model, classifier, checkpoint = load_checkpoint(checkpoint_path, graphs_dir, device)
+        label_names = checkpoint["config"]["label_names"]
+        row: dict[int, dict[str, Any]] = {}
+        task_predictions: dict[int, dict[str, Any]] = {}
+        for evaluated_task in range(1, trained_up_to + 1):
+            graphs = load_split(graphs_dir, evaluated_task, "test")
+            result = predict(model, classifier, graphs, device, batch_size, label_names)
+            row[evaluated_task] = compute_metrics(result["y_true"], result["y_pred"], label_names)
+            task_predictions[evaluated_task] = result
+        eval_matrix[trained_up_to] = row
+        predictions_by_trained_up_to[trained_up_to] = task_predictions
+    return eval_matrix, predictions_by_trained_up_to
+
+
+def pooled_final_metrics(
+    predictions_by_trained_up_to: dict[int, dict[int, dict[str, Any]]],
+    num_tasks: int = NUM_TASKS,
+) -> dict[str, Any]:
+    """The final checkpoint's per-task predictions, pooled without
+    reweighting into one micro-level report -- the headline 'final
+    metrics' deliverable."""
+    final_predictions = list(predictions_by_trained_up_to[num_tasks].values())
+    pooled = pool_predictions(final_predictions)
+    return compute_metrics(pooled["y_true"], pooled["y_pred"], pooled["label_names"])
+
+
+def run(
+    run_dir: Path,
+    graphs_dir: Path,
+    device: torch.device,
+    batch_size: int,
+    num_tasks: int = NUM_TASKS,
+) -> dict[str, Any]:
+    eval_matrix, predictions_by_trained_up_to = build_eval_matrix(
+        run_dir, graphs_dir, device, batch_size, num_tasks
+    )
+    return {
+        "eval_matrix": eval_matrix,
+        "pooled_final_metrics": pooled_final_metrics(predictions_by_trained_up_to, num_tasks),
+        "forgetting_metrics": forgetting_metrics_table(eval_matrix),
+    }
