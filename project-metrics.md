@@ -19,7 +19,7 @@ This file is the single place to find every hard number about the project - data
 | Total mini-graphs, `benign_ratio=4.0` set | 65,378 |
 | `benign_ratio` sweep candidates produced | 2.0 / 3.0 / 4.0 |
 | Step 3 model parameters (default config: `hidden_dim=64`, 1 layer, 11 relations) | 197,842 |
-| Test suite | 146 tests passing, `ruff check` clean |
+| Test suite | 157 tests passing, `ruff check` clean |
 
 ### Pipeline overview
 
@@ -838,3 +838,71 @@ Source: same `src/trench_ids/cl/transferability_report.py` as §19, run a second
 - `num_layers=2` gradient-reachability ablation (§18): `runs/step4_num_layers2/` (gitignored, reproduce via `python -m trench_ids.cl.train model.num_layers=2 ewc.lambda_s=1.0 ewc.lambda_u=1.0 ewc.lambda_r=1.0 ewc.log_loss_components=true paths.out_dir=runs/step4_num_layers2`)
 - Step 10a transferability analysis (§19): `src/trench_ids/cl/transferability_report.py` (gitignored `runs/step4/transferability_report/`, reproduce via `python -m trench_ids.cl.transferability_report`)
 - `num_layers=1` vs. `num_layers=2` transferability comparison (§20): same `src/trench_ids/cl/transferability_report.py`, run against `runs/step4_num_layers2/` (gitignored `runs/step4_num_layers2/transferability_report/`, reproduce via `python -m trench_ids.cl.transferability_report --run-dir runs/step4_num_layers2 --raw-similarity data/similarity/similarity_matrix.csv --out-dir runs/step4_num_layers2/transferability_report`)
+- Inference pipeline + full evaluation metrics (§22): `src/trench_ids/cl/inference.py`, `src/trench_ids/cl/evaluate.py`, `src/trench_ids/cl/train.py` (`save_checkpoint`) (gitignored `runs/step4/checkpoint_task_{1..6}.pt` and `runs/step4/eval/`, reproduce via `python -m trench_ids.cl.train` then `python -m trench_ids.cl.evaluate`)
+
+---
+
+## 22. Inference pipeline + full evaluation metrics (real run, 2026-07-23)
+
+Professor's direct instruction: "Complete the implementation, add the inference pipeline, find F1, accuracy and other metrics, then we can work on fine-tuning the model." Design: `docs/superpowers/specs/2026-07-22-inference-evaluation-pipeline-design.md`; plan: `docs/superpowers/plans/2026-07-22-inference-evaluation-pipeline.md`. Three new pieces, all decoupled: `src/trench_ids/cl/train.py` gained `save_checkpoint` (checkpoints after every task, no optimizer state, versioned); `src/trench_ids/cl/inference.py` (`load_checkpoint`/`predict`, metric-agnostic — returns `y_true`/`y_pred`/`y_prob`); `src/trench_ids/cl/evaluate.py` (`compute_metrics` via scikit-learn — accuracy/precision/recall/F1 macro+weighted/per-class/confusion matrix, `zero_division=0`, full 11-class label space). "Unseen traffic" here means held-out `task_{t}_test.pt` splits, not raw-CSV inference — that remains explicitly deferred (Step 10's third bullet).
+
+Real run: `python -m trench_ids.cl.train` (the `trench-train` console-script entry point has a Hydra config-resolution bug on this Windows install — `Primary config module 'configs' not found` — the module invocation works correctly; not yet root-caused, tracked as a follow-up, not fixed as part of this round since it's outside this round's scope) regenerated `runs/step4/` under the exact same config as the frozen `num_layers=1` relation-aware-EWC baseline (`lambda_r=lambda_s=lambda_u=1.0`, `disable_learned_weighting=false`, seed 42, GPU) — `average_forgetting = 0.7054` reproduced **exactly** against §16.1/§17.4's documented value, confirming this is the existing baseline with checkpoints added, not a new experiment. Then `python -m trench_ids.cl.evaluate` built the full 21-cell `(trained_up_to, evaluated_task)` metrics matrix from the 6 new checkpoints against every task's test split.
+
+### 22.1 Pooled final metrics (`runs/step4/eval/pooled_final_metrics.json`)
+
+The final checkpoint (`checkpoint_task_6`) evaluated on all 6 tasks' test splits pooled together, without reweighting (micro-level over every sample) — the headline "final metrics" result:
+
+| Metric | Value |
+|---|---:|
+| Accuracy | 0.3599 |
+| Precision (macro) | 0.2168 |
+| Recall (macro) | 0.2678 |
+| F1 (macro) | 0.1655 |
+| Precision (weighted) | 0.3317 |
+| Recall (weighted) | 0.3599 |
+| F1 (weighted) | 0.2082 |
+
+Pooled accuracy (0.3599) sits close to, but is not identical to, `summary.json`'s `final_average_accuracy` (0.3622, §16/§17.4) — expected and by design (§ design doc's explicit distinction): the pooled metric is micro-averaged over every sample regardless of which task it came from, while `final_average_accuracy` is a simple mean of 6 per-task accuracies: tasks with larger test splits contribute proportionally more to the pooled number, smaller tasks are diluted. Both describe the same final model; neither is wrong.
+
+### 22.2 Per-class breakdown (pooled, final model)
+
+| Class | Precision | Recall | F1 | Support |
+|---|---:|---:|---:|---:|
+| Benign | 0.4768 | 0.9475 | 0.6344 | 784,427 |
+| Scanning (T1) | 1.0000 | 0.0000 | 0.0000 | 567,213 |
+| Reconnaissance (T2) | 0.0000 | 0.0000 | 0.0000 | 393,149 |
+| DDoS (T3) | 0.0000 | 0.0000 | 0.0000 | 512,468 |
+| Infiltration (T3) | 0.0000 | 0.0000 | 0.0000 | 17,370 |
+| DoS (T4) | 0.0000 | 0.0000 | 0.0000 | 179,491 |
+| Injection (T4) | 0.0000 | 0.0000 | 0.0000 | 102,734 |
+| Password (T5) | 0.0000 | 0.0000 | 0.0000 | 172,999 |
+| Bot (T5) | 0.0000 | 0.0000 | 0.0000 | 21,464 |
+| XSS (T6) | 0.2371 | 0.9989 | 0.3832 | 368,253 |
+| BruteForce (T6) | 0.6711 | 0.9998 | 0.8031 | 18,137 |
+
+This is the class-level face of catastrophic forgetting already known from the forgetting matrix (§16.1), now visible per-class rather than as an aggregate accuracy number: the final model retains only Benign and the two classes from the task it trained on last (T6: XSS, BruteForce — both recall ≈ 1.0), plus a residual ability to recognize Benign. Every class from T1-T5 (Scanning, Reconnaissance, DDoS, Infiltration, DoS, Injection, Password, Bot) has recall = 0.0000 — the model essentially never predicts them anymore. The pooled confusion matrix (`runs/step4/eval/pooled_final_metrics.json`, `runs/step4/eval/confusion_matrix_final.png`) shows where those true instances actually land: overwhelmingly into Benign or XSS (e.g. of 512,468 true DDoS flows, 460,332 are predicted XSS and 51,857 Benign; of 393,149 true Reconnaissance flows, 226,541 are predicted Benign and 166,581 XSS) — the model isn't guessing randomly across all 11 classes, it collapses everything forgotten into whichever of {Benign, XSS} the input more resembles under the drifted encoder.
+
+### 22.3 F1-macro forgetting curve vs. the existing accuracy-only forgetting matrix
+
+`forgetting_metrics_table` (`runs/step4/eval/forgetting_metrics.csv`, plotted in `runs/step4/eval/forgetting_curves.png`) extends the same peak-minus-final forgetting definition already used for accuracy (§14.1's `average_forgetting`) to F1-macro, computed from the same 21-cell matrix:
+
+| Evaluated task | Peak accuracy | Final accuracy | Accuracy forgetting | Peak F1 (macro) | Final F1 (macro) | F1 forgetting |
+|---|---:|---:|---:|---:|---:|---:|
+| T1 | 0.9240 | 0.2348 | 0.6892 | 0.1627 | 0.0396 | 0.1231 |
+| T2 | 0.9436 | 0.2208 | 0.7228 | 0.1672 | 0.0445 | 0.1228 |
+| T3 | 0.9541 | 0.2403 | 0.7138 | 0.1824 | 0.0743 | 0.1081 |
+| T4 | 0.8913 | 0.2403 | 0.6509 | 0.2422 | 0.0750 | 0.1672 |
+| T5 | 0.9903 | 0.2403 | 0.7501 | 0.2702 | 0.0697 | 0.2005 |
+| **Average** | | | **0.7054** | | | **0.1443** |
+
+The accuracy-forgetting average (0.7054) reproduces §16.1/§17.4 exactly, an independent cross-check that `evaluate.py`'s checkpoint-based re-evaluation matches `train.py`'s live in-loop evaluation bit-for-bit. **The two metrics tell the same qualitative story (severe, near-total forgetting of every earlier task) but are not on the same numeric scale, and the raw magnitudes should not be compared directly.** The reason is mechanical, not a difference in how much is actually forgotten: F1-macro is computed over the full 11-class label space every time (per the design's "same label_names ordering... consistently" requirement), so even a task's own *peak* F1-macro (measured right after training on it) is diluted by the other 9 classes that have zero true examples in that task's test split and therefore contribute a 0.0 per-class F1 apiece under `zero_division=0` — e.g. T5's own peak F1-macro is only 0.2702 despite 0.9903 own-task accuracy, because 9 of 11 per-class F1 scores are mechanically 0 for a test split that only contains Benign + Password + Bot. Accuracy has no equivalent dilution (a task's test split is mostly-correctly-classified-by-construction at its own peak). The F1-macro curve is still informative — it confirms forgetting is severe by an independent metric family, using the same 21-cell data — but "F1-macro forgetting is 0.144, five times smaller than accuracy forgetting's 0.705" would be a mismeasurement of relative severity, not a real finding.
+
+### 22.4 Full 21-cell matrix and reproduction
+
+`runs/step4/eval/eval_matrix.json` (full nested per-cell accuracy/precision/recall/F1×2/per-class/confusion-matrix data, 21 `(trained_up_to, evaluated_task)` cells) and `runs/step4/eval/eval_summary.csv` (flattened, headline metrics only) are the complete source data behind §22.1-22.3; `runs/step4/eval/per_class_f1_final.png` plots §22.2's per-class F1 bar chart directly. All gitignored — reproduce via `python -m trench_ids.cl.train` (regenerates `runs/step4/checkpoint_task_{1..6}.pt`, ~65 minutes on this machine's GPU) then `python -m trench_ids.cl.evaluate` (the 21-cell inference pass, a few minutes).
+
+### 22.5 Test suite
+
+**157 tests passing** (`.venv/Scripts/python.exe -m pytest -q`, 0 failures) — up from 146 (§19.5) with `tests/test_inference.py` (3 tests: well-formed `predict()` output, real checkpoint save/load/predict round trip, `checkpoint_version` rejection) and `tests/test_evaluate.py` (7 tests: `compute_metrics` including a never-predicted/never-true-class edge case with hand-verified precision/recall/F1 arithmetic, `pool_predictions` including a label-name-mismatch rejection, `forgetting_metrics_table` flattening/sorting, `build_eval_matrix`/`run()` end-to-end against synthetic checkpoints, and writer/plot smoke tests). One new test in `tests/test_train.py` (`save_checkpoint` round-trip: dict shape, then loads its `model_state_dict`/`classifier_state_dict` into fresh modules with no error). `ruff check src tests` passes clean.
+
+Source: `src/trench_ids/cl/inference.py`, `src/trench_ids/cl/evaluate.py`, `src/trench_ids/cl/train.py` (`save_checkpoint`, wired into `main()`), `pyproject.toml` (scikit-learn dependency, `trench-infer`/`trench-evaluate` entry points — the latter has the Hydra-resolution issue noted above under real-run reproduction, use `python -m trench_ids.cl.evaluate` instead). Implemented via subagent-driven-development, 7 tasks, 7 commits, all task reviews clean on first pass with no fix rounds required.
