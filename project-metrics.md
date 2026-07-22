@@ -14,12 +14,12 @@ This file is the single place to find every hard number about the project - data
 | Total attack rows (post corrupted-row filter) | 15,689,086 |
 | Total rows incl. benign (Step 1 output) | 15,736,524 |
 | Node types | 5 (Flow, Host, Protocol, Service, Port) |
-| Relation types | 6 |
+| Relation types | 11 (6 original + 5 individually-named reverse relations, added 2026-07-19, §13) |
 | Graph size (max flows/mini-graph) | 300 |
 | Total mini-graphs, `benign_ratio=4.0` set | 65,378 |
 | `benign_ratio` sweep candidates produced | 2.0 / 3.0 / 4.0 |
-| Step 3 model parameters (default config: `hidden_dim=64`, 1 layer) | 86,226 |
-| Step 3 relations used (one-directional, no reverse edges) | 6 |
+| Step 3 model parameters (default config: `hidden_dim=64`, 1 layer, 11 relations) | 197,842 |
+| Test suite | 146 tests passing, `ruff check` clean |
 
 ### Pipeline overview
 
@@ -42,16 +42,40 @@ Step 2: heterogeneous graph construction +  graphs.py -> data/graphs*/task_*_*.p
   benign_ratio sampling + mini-graph chunking
         |
         v
-Mini-graphs (list[HeteroData] per task/split, node/relation schema in S6)
+Mini-graphs (list[HeteroData] per task/split, 11-relation schema, S6/§13)
         |
         v
 Step 3: relation-specific encoding + attention   src/trench_ids/model/*.py       (S7, see §13)
-  fusion (implemented) -> per-relation + fused
-  node embeddings
+  fusion -> per-relation + fused node embeddings
         |
         v
-Step 4 (not yet started): classifier + relation-specific memory bank,
-  transferability estimation, relation-aware EWC continual-learning loop
+Step 4: sequential fine-tuning T1->T6 +          src/trench_ids/cl/train.py,     (see §14)
+  relation-specific memory bank                    memory_bank.py
+        |
+        v
+Step 5: transferability estimation (per-task,    transferability.py              (see §15)
+  per-relation cosine sim. vs. memory bank)
+        |
+        v
+Steps 6-8: relation importance weights           importance.py, ewc.py           (see §16-18)
+  (ImportanceMLP) + relation-aware Online EWC -
+  implemented; SETTLED as not reducing forgetting
+  on this benchmark (5 orders of magnitude of
+  lambda tested, num_layers=1 and =2 both checked)
+        |
+        v
+Step 9: memory bank refresh - folded into the
+  Step 4/6-8 training loop (see §14, §16)
+        |
+        v
+Step 10a: transferability analysis - relation    transferability_report.py       (see §19-20)
+  ranking, class-pair ranking, raw-feature
+  comparison, run against the frozen num_layers=1
+  baseline (and, for comparison, num_layers=2)
+        |
+        v
+Step 10 (remaining bullet, explicitly deferred): prediction/inference pipeline
+  for genuinely unseen traffic - not yet started
 ```
 
 ---
@@ -699,7 +723,107 @@ Source: `runs/step4_num_layers2/` (gitignored: `summary.json`, `forgetting_matri
 
 ---
 
-## 19. Where these numbers come from
+## 19. Step 10a — Transferability analysis (real run, 2026-07-22)
+
+Consolidates `runs/step4/transferability_task_{1..6}.json` (the frozen `num_layers=1` relation-aware EWC baseline, §16) via `src/trench_ids/cl/transferability_report.py` — no new training run, pure analysis of already-collected data. Compared against the 10-class raw-feature similarity matrix (`attack-similarity-matrix.md`, `data/similarity/similarity_matrix.csv`, regenerated this round via `python -m trench_ids.similarity --config configs/similarity.yaml` to match the current 10-class pool — it had gone stale after the 6-class-to-10-class respec). 205 transferability records across 41 class pairs and 5 relations (task 1 contributes nothing, empty bank).
+
+### 19.1 Relation-wise transferability ranking
+
+| Relation | Mean cosine | Std | n |
+|---|---:|---:|---:|
+| `protocol_of` | 0.1974 | 0.3698 | 41 |
+| `terminated_by` | 0.0039 | 0.4197 | 41 |
+| `originates` | -0.0205 | 0.3259 | 41 |
+| `service_of` | -0.0414 | 0.3083 | 41 |
+| `targeted_by` | -0.0607 | 0.3574 | 41 |
+
+`protocol_of` is the standout most-transferable relation by a wide margin (mean 0.197 vs. the next-best's 0.004); the other four cluster near zero, with `targeted_by` the least transferable. Task-evolution for the top relation (`relation_task_evolution["protocol_of"]`): task 2 = -0.356, task 3 = -0.121, task 4 = 0.081, task 5 = 0.318, task 6 = 0.279. **Yes, relation embeddings become progressively more transferable as the encoder matures** — `protocol_of` rises essentially monotonically from strongly negative at task 2 to strongly positive by task 5, with only a small give-back at task 6 (0.318 → 0.279) that still leaves it far above where it started. None of the other four relations shows a comparably clean trend (`originates` and `targeted_by` both swing negative again at task 4; `service_of` and `terminated_by` drift down after task 4) — the maturing-transferability effect is concentrated in `protocol_of`, not general across all five relations.
+
+### 19.2 Class-pair transferability ranking
+
+Top 10 of 41 pairs by mean cosine across relations:
+
+| Rank | Class A | Class B | Mean | Best relation | Worst relation |
+|---:|---|---|---:|---|---|
+| 1 | BruteForce | Scanning | 0.390 | terminated_by | targeted_by |
+| 2 | Password | XSS | 0.330 | terminated_by | service_of |
+| 3 | DoS | Reconnaissance | 0.314 | targeted_by | service_of |
+| 4 | Bot | XSS | 0.306 | terminated_by | service_of |
+| 5 | DDoS | XSS | 0.259 | protocol_of | terminated_by |
+| 6 | Injection | Reconnaissance | 0.258 | service_of | protocol_of |
+| 7 | BruteForce | Infiltration | 0.231 | terminated_by | targeted_by |
+| 8 | BruteForce | DDoS | 0.228 | protocol_of | targeted_by |
+| 9 | DDoS | Scanning | 0.190 | terminated_by | service_of |
+| 10 | Infiltration | Reconnaissance | 0.182 | service_of | terminated_by |
+
+The two pairs flagged from the raw-feature matrix (`attack-similarity-matrix.md`, and previously checked against a partial/task-6 view in §15): **XSS↔Infiltration lands at rank 12 of 41** (mean 0.156 — moderate positive, in the top third, partially confirming the raw-feature signal), while **Scanning↔Reconnaissance lands at rank 37 of 41** (mean -0.221 — near the bottom, contradicting the raw-feature signal). This matches §15's original finding under the final, complete 6-task data: the two originally-flagged high-raw-similarity pairs behave very differently once actually learned — one transfers moderately, the other doesn't transfer at all despite a high raw-feature similarity (0.500, the raw matrix's second-highest pair).
+
+### 19.3 Comparison against raw-feature similarity (descriptive)
+
+Pearson r = -0.2189, Spearman rho = -0.2213, across 41 matched class pairs. Only partial agreement with raw-feature similarity was expected going in (the learned representation is relation-specific and shaped by continual learning, not a direct reflection of raw input feature statistics) — neither coefficient is a pass/fail metric. The actual result is more striking than "partial agreement": both coefficients are **weakly negative**, i.e. learned transferability and raw-feature cosine similarity are, if anything, mildly *anti*-correlated across the full 41-pair set, not merely decoupled.
+
+**Top agreements** (high raw-feature similarity, high learned transferability, by descending learned mean): BruteForce↔DDoS (raw 0.037, learned 0.228), Infiltration↔Reconnaissance (raw 0.100, learned 0.182), Infiltration↔XSS (raw 0.823, learned 0.156), DDoS↔Password (raw 0.041, learned 0.119), BruteForce↔Password (raw 0.037, learned 0.105).
+
+**Top disagreements** (the more scientifically interesting cases, by |raw - learned|): BruteForce↔Scanning (raw -0.544, learned 0.390, `low_raw_high_learned`), BruteForce↔Infiltration (raw -0.507, learned 0.231, `low_raw_high_learned`), Reconnaissance↔Scanning (raw 0.500, learned -0.221, `high_raw_low_learned` — the same pair flagged as non-transferring in §19.2), Infiltration↔XSS (raw 0.823, learned 0.156, `high_raw_low_learned` — the single highest raw-feature pair, but its learned transferability is only moderate), DDoS↔XSS (raw -0.380, learned 0.259, `low_raw_high_learned`).
+
+### 19.4 Figures
+
+`runs/step4/transferability_report/relation_ranking.png` (bar chart, `protocol_of` clearly ahead of the pack, error bars = std), `runs/step4/transferability_report/class_pair_heatmap.png` (41 pairs × 5 relations, diverging colormap centered at 0, NaN cells for any missing relation) — both gitignored, regenerate via the command in §19.5.
+
+### 19.5 Test suite
+
+**146 tests passing** (`.venv/Scripts/python.exe -m pytest -q`, 0 failures) — up from 130 (§18.1) with 16 new tests in `tests/test_transferability_report.py` covering record loading, relation-wise summary/evolution/ranking, class-pair summary/ranking (including order-independent keys and missing-relation omission), the raw-feature comparison (Pearson/Spearman, agreement/disagreement tagging, unmatched-class handling), both plots (smoke-tested), `run()`'s determinism, and the two report writers. `ruff check src tests` passes clean.
+
+Source: `src/trench_ids/cl/transferability_report.py` — gitignored `runs/step4/transferability_report/` output, reproduce via `python -m trench_ids.cl.transferability_report` (after regenerating `data/similarity/similarity_matrix.csv` via `python -m trench_ids.similarity --config configs/similarity.yaml` if it's gone stale again).
+
+---
+
+## 20. Does depth make the transferability signals more useful? (`num_layers=1` vs. `num_layers=2`, real comparison, 2026-07-22)
+
+No new training run — `runs/step4_num_layers2/` (the §18 gradient-reachability ablation, run 2026-07-21) already contains `transferability_task_{1..6}.json`, since transferability estimation runs as part of the training loop regardless of `model.num_layers`; that data simply predates the analysis tooling (§19) that could consume it. Ran `python -m trench_ids.cl.transferability_report --run-dir runs/step4_num_layers2 --raw-similarity data/similarity/similarity_matrix.csv --out-dir runs/step4_num_layers2/transferability_report` and compared against the `num_layers=1` report (§19) directly — same 205 records / 41 class pairs / 5 relations shape in both.
+
+**Motivation**: §18 showed `num_layers=2` restores real gradients to the 6 previously-dead relations but doesn't reduce catastrophic forgetting. That leaves an open question specific to the 5 relations that *were* already gradient-reachable at `num_layers=1` and are the ones §19's transferability analysis actually tracks (`originates`, `protocol_of`, `service_of`, `targeted_by`, `terminated_by`, the Flow-incoming relations): does multi-hop message passing make the already-measurable transferability signal itself stronger or more consistent, even though it doesn't fix forgetting?
+
+### 20.1 Relation-wise ranking inverts
+
+| Relation | `num_layers=1` mean | `num_layers=2` mean | Change |
+|---|---:|---:|---:|
+| `protocol_of` | **0.197** (best) | -0.034 (worst) | -0.231 |
+| `terminated_by` | 0.004 | 0.099 | +0.095 |
+| `originates` | -0.020 | 0.213 | +0.234 |
+| `service_of` | -0.041 | **0.283** (best) | +0.325 |
+| `targeted_by` | -0.061 | 0.035 | +0.096 |
+
+`protocol_of`, the clear standout at `num_layers=1`, becomes both the worst-performing *and* the noisiest relation at `num_layers=2` (std 0.502, roughly 1.4-1.7x every other relation's spread) — a near-total inversion, not just a reshuffle. Mean transferability averaged across all 5 relations rose from 0.016 (`num_layers=1`) to 0.119 (`num_layers=2`), roughly 7x higher. **Conclusion: depth does not uniformly boost transferability — it redistributes it.** A relation being "the transferable one" is an architecture-dependent property here, not a fixed property of what that relation represents (e.g. "protocol identity transfers well") — a caution against over-interpreting any single-architecture relation ranking as a general claim about the network schema.
+
+### 20.2 The two originally-flagged pairs both move toward "more transferable"
+
+| Pair | `num_layers=1` rank (of 41) | `num_layers=1` mean | `num_layers=2` rank (of 41) | `num_layers=2` mean |
+|---|---:|---:|---:|---:|
+| XSS ↔ Infiltration | 12 | 0.156 | **4** | **0.351** |
+| Scanning ↔ Reconnaissance | 37 | -0.221 | 32 | -0.001 |
+
+XSS↔Infiltration — already the raw-feature matrix's single highest-similarity pair (0.823) — climbs from a moderate positive to a top-5 learned-transferability pair. Scanning↔Reconnaissance — the raw matrix's second-highest pair (0.500), but the one that never transferred at `num_layers=1` (§15, §19.2) — moves from clearly negative to essentially neutral, though it still doesn't rank as genuinely transferable.
+
+### 20.3 Raw-feature agreement: point estimates barely move, rank agreement gets worse
+
+| Metric | `num_layers=1` | `num_layers=2` |
+|---|---:|---:|
+| Pearson r | -0.219 | -0.212 |
+| Spearman rho | -0.221 | **-0.375** |
+| n matched pairs | 41 | 41 |
+
+Pearson r is essentially unchanged, but Spearman rho drops substantially further into negative territory — the *ordering* of which pairs transfer well diverges more from raw-feature similarity at `num_layers=2`, even as the absolute learned-transferability values rise. Depth doesn't bring the learned representation's pairwise structure any closer to the raw-feature-similarity structure; if anything, it pulls the rank ordering further away.
+
+### 20.4 Synthesis, combined with §18
+
+§18 already established: `num_layers=2` restores real gradients to the 6 previously-dead relations, but forgetting (0.7423 avg.) is statistically indistinguishable from every `num_layers=1` variant, and the relation-aware EWC's `w_r` collapse persists with near-identical dynamics regardless of depth. This section adds a sharper, complementary finding: **deeper message passing does change the quality and distribution of transferability among the relations that were already gradient-reachable at `num_layers=1`** — overall transferability rises, and both originally-flagged high-raw-similarity pairs transfer better — **but none of that improvement propagates into reduced forgetting**, because the mechanism meant to exploit it (`w_r`, §16.2) drives its own weighting toward zero from task 2 onward independent of architecture depth. This narrows the diagnosis further than §18 alone could: the bottleneck is not "the encoder can't produce useful transferable representations" (§20.1-20.2 show it can, and depth measurably improves them) — it's specifically that **the relation-importance-weighting objective has no incentive to keep `w_r` large enough to act on that improvement**. `num_layers=2` remains not adopted (per the standing `num_layers=1`-frozen-baseline decision, §18); this is a targeted follow-on analysis of already-collected data, not a new training run or an architecture change.
+
+Source: same `src/trench_ids/cl/transferability_report.py` as §19, run a second time against the existing `runs/step4_num_layers2/` directory (gitignored `runs/step4_num_layers2/transferability_report/`), no code or test changes. Reproduce via `python -m trench_ids.cl.transferability_report --run-dir runs/step4_num_layers2 --raw-similarity data/similarity/similarity_matrix.csv --out-dir runs/step4_num_layers2/transferability_report`.
+
+---
+
+## 21. Where these numbers come from
 
 - Dataset/class/task design: `docs/dataset-plan.md`, `docs/attack-class-counts.md`, `docs/attack-similarity-matrix.md`, `src/trench_ids/labels.py`, `src/trench_ids/task_design.py`
 - Step 1 output: `data/processed/manifest.json` (gitignored, regenerate via `trench_ids.preprocess`)
@@ -712,3 +836,5 @@ Source: `runs/step4_num_layers2/` (gitignored: `summary.json`, `forgetting_matri
 - Steps 6-8 relation-aware EWC (§16): `src/trench_ids/cl/ewc.py`, `src/trench_ids/cl/importance.py`, `docs/superpowers/specs/2026-07-21-relation-aware-ewc-design.md` (gitignored `runs/step4/importance_weights_task_*.json` and `runs/step4_baseline/forgetting_matrix.json` output, produced by the same `trench-train` run)
 - Coarse lambda sweep + gradient-reachability root cause (§17): `src/trench_ids/cl/ewc.py` (`loss_breakdown`), `src/trench_ids/cl/train.py` (`disable_learned_weighting`, `log_loss_components`, `average_forgetting`, `final_average_accuracy`) (gitignored `runs/lambda_*/summary.json` and `runs/lambda_1000_instrumented/loss_components_task_*.jsonl`, reproduce via `python -m trench_ids.cl.train ewc.disable_learned_weighting=true ewc.lambda_s=<L> ewc.lambda_u=<L> ewc.lambda_r=<L> paths.out_dir=runs/lambda_<L>`)
 - `num_layers=2` gradient-reachability ablation (§18): `runs/step4_num_layers2/` (gitignored, reproduce via `python -m trench_ids.cl.train model.num_layers=2 ewc.lambda_s=1.0 ewc.lambda_u=1.0 ewc.lambda_r=1.0 ewc.log_loss_components=true paths.out_dir=runs/step4_num_layers2`)
+- Step 10a transferability analysis (§19): `src/trench_ids/cl/transferability_report.py` (gitignored `runs/step4/transferability_report/`, reproduce via `python -m trench_ids.cl.transferability_report`)
+- `num_layers=1` vs. `num_layers=2` transferability comparison (§20): same `src/trench_ids/cl/transferability_report.py`, run against `runs/step4_num_layers2/` (gitignored `runs/step4_num_layers2/transferability_report/`, reproduce via `python -m trench_ids.cl.transferability_report --run-dir runs/step4_num_layers2 --raw-similarity data/similarity/similarity_matrix.csv --out-dir runs/step4_num_layers2/transferability_report`)
