@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import matplotlib
+
+matplotlib.use("Agg")
+
 import pytest
 import torch
 from torch_geometric.data import HeteroData
@@ -8,8 +12,15 @@ from trench_ids.cl.evaluate import (
     build_eval_matrix,
     compute_metrics,
     forgetting_metrics_table,
+    plot_confusion_matrix,
+    plot_forgetting_curves,
+    plot_per_class_f1,
     pool_predictions,
     run,
+    write_eval_matrix_json,
+    write_eval_summary_csv,
+    write_forgetting_metrics_csv,
+    write_pooled_final_metrics,
 )
 from trench_ids.cl.train import save_checkpoint
 from trench_ids.model.rhgnn import FLOW_FEATURE_DIM, HOST_FEATURE_DIM, RelationSpecificHeteroGNN
@@ -167,3 +178,24 @@ def test_build_eval_matrix_and_run_end_to_end(tmp_path) -> None:
     assert "pooled_final_metrics" in report
     assert "forgetting_metrics" in report
     assert len(report["forgetting_metrics"]) == 3  # 1 (trained_up_to=1) + 2 (trained_up_to=2) cells
+
+
+def test_writers_and_plots_produce_expected_files(tmp_path) -> None:
+    eval_matrix = {1: {1: compute_metrics([0, 1], [0, 1], ["Benign", "A"])}}
+    pooled = compute_metrics([0, 1, 1], [0, 1, 0], ["Benign", "A"])
+    rows = forgetting_metrics_table(eval_matrix)
+
+    write_eval_matrix_json(eval_matrix, tmp_path / "eval_matrix.json")
+    write_eval_summary_csv(eval_matrix, tmp_path / "eval_summary.csv")
+    write_pooled_final_metrics(pooled, tmp_path)
+    write_forgetting_metrics_csv(rows, tmp_path / "forgetting_metrics.csv")
+    plot_confusion_matrix(pooled, tmp_path / "confusion_matrix_final.png")
+    plot_per_class_f1(pooled, tmp_path / "per_class_f1_final.png")
+    plot_forgetting_curves(rows, tmp_path / "forgetting_curves.png", num_tasks=1)
+
+    for name in (
+        "eval_matrix.json", "eval_summary.csv", "pooled_final_metrics.json",
+        "pooled_final_metrics.csv", "forgetting_metrics.csv",
+        "confusion_matrix_final.png", "per_class_f1_final.png", "forgetting_curves.png",
+    ):
+        assert (tmp_path / name).exists(), f"{name} was not written"

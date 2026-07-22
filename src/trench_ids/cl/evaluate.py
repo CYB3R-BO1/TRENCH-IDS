@@ -11,6 +11,14 @@ Run: python -m trench_ids.cl.evaluate --run-dir runs/step4 --graphs-dir data/gra
 
 from __future__ import annotations
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402, I001
+
+import argparse
+import csv
+import json
 from pathlib import Path
 from typing import Any
 
@@ -155,3 +163,151 @@ def run(
         "pooled_final_metrics": pooled_final_metrics(predictions_by_trained_up_to, num_tasks),
         "forgetting_metrics": forgetting_metrics_table(eval_matrix),
     }
+
+
+def write_eval_matrix_json(
+    eval_matrix: dict[int, dict[int, dict[str, Any]]], out_path: Path
+) -> None:
+    out_path.write_text(json.dumps(eval_matrix, indent=2))
+
+
+def write_eval_summary_csv(
+    eval_matrix: dict[int, dict[int, dict[str, Any]]], out_path: Path
+) -> None:
+    metric_fields = [
+        "accuracy", "precision_macro", "recall_macro", "f1_macro",
+        "precision_weighted", "recall_weighted", "f1_weighted",
+    ]
+    fieldnames = ["trained_up_to", "evaluated_task", *metric_fields]
+    with out_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for trained_up_to, row in sorted(eval_matrix.items()):
+            for evaluated_task, cell in sorted(row.items()):
+                writer.writerow({
+                    "trained_up_to": trained_up_to,
+                    "evaluated_task": evaluated_task,
+                    **{field: cell[field] for field in metric_fields},
+                })
+
+
+def write_pooled_final_metrics(pooled: dict[str, Any], out_dir: Path) -> None:
+    (out_dir / "pooled_final_metrics.json").write_text(json.dumps(pooled, indent=2))
+    with (out_dir / "pooled_final_metrics.csv").open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["metric", "value"])
+        for key in (
+            "accuracy", "precision_macro", "recall_macro", "f1_macro",
+            "precision_weighted", "recall_weighted", "f1_weighted",
+        ):
+            writer.writerow([key, pooled[key]])
+        for class_name, stats in pooled["per_class"].items():
+            for stat_name, value in stats.items():
+                writer.writerow([f"per_class.{class_name}.{stat_name}", value])
+
+
+def write_forgetting_metrics_csv(rows: list[dict[str, float]], out_path: Path) -> None:
+    with out_path.open("w", newline="") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=["evaluated_task", "trained_up_to", "accuracy", "f1_macro"]
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def plot_confusion_matrix(pooled: dict[str, Any], out_path: Path) -> None:
+    label_names = pooled["label_names"]
+    cm = pooled["confusion_matrix"]
+    fig, ax = plt.subplots(figsize=(1.1 * len(label_names) + 2, 1.1 * len(label_names) + 2))
+    im = ax.imshow(cm, cmap="Blues")
+    ax.set_xticks(range(len(label_names)))
+    ax.set_xticklabels(label_names, rotation=45, ha="right")
+    ax.set_yticks(range(len(label_names)))
+    ax.set_yticklabels(label_names)
+    for i, row in enumerate(cm):
+        for j, value in enumerate(row):
+            ax.text(j, i, str(value), ha="center", va="center", fontsize=7)
+    fig.colorbar(im, ax=ax, label="Count")
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("True")
+    ax.set_title("Pooled final confusion matrix")
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
+def plot_per_class_f1(pooled: dict[str, Any], out_path: Path) -> None:
+    per_class = pooled["per_class"]
+    classes = list(per_class.keys())
+    f1_scores = [per_class[c]["f1"] for c in classes]
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.bar(classes, f1_scores)
+    ax.set_xticks(range(len(classes)))
+    ax.set_xticklabels(classes, rotation=45, ha="right")
+    ax.set_ylabel("F1 score")
+    ax.set_ylim(0, 1)
+    ax.set_title("Pooled final per-class F1")
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
+def plot_forgetting_curves(
+    rows: list[dict[str, float]], out_path: Path, num_tasks: int = NUM_TASKS
+) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    by_task: dict[int, list[dict[str, float]]] = {}
+    for row in rows:
+        by_task.setdefault(int(row["evaluated_task"]), []).append(row)
+    for evaluated_task, task_rows in sorted(by_task.items()):
+        task_rows = sorted(task_rows, key=lambda r: r["trained_up_to"])
+        x = [r["trained_up_to"] for r in task_rows]
+        label = f"task {evaluated_task}"
+        axes[0].plot(x, [r["accuracy"] for r in task_rows], marker="o", label=label)
+        axes[1].plot(x, [r["f1_macro"] for r in task_rows], marker="o", label=label)
+    axes[0].set_title("Accuracy")
+    axes[1].set_title("F1 (macro)")
+    for ax in axes:
+        ax.set_xlabel("Trained up to task")
+        ax.set_ylim(0, 1)
+        ax.legend(fontsize=7)
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Evaluation: full metrics suite over held-out test splits."
+    )
+    parser.add_argument("--run-dir", default="runs/step4")
+    parser.add_argument("--graphs-dir", default="data/graphs")
+    parser.add_argument("--out-dir", default="runs/step4/eval")
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--device", default="auto")
+    args = parser.parse_args()
+
+    device = (
+        torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if args.device == "auto"
+        else torch.device(args.device)
+    )
+    run_dir = Path(args.run_dir)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    report = run(run_dir, Path(args.graphs_dir), device, args.batch_size)
+
+    write_eval_matrix_json(report["eval_matrix"], out_dir / "eval_matrix.json")
+    write_eval_summary_csv(report["eval_matrix"], out_dir / "eval_summary.csv")
+    write_pooled_final_metrics(report["pooled_final_metrics"], out_dir)
+    write_forgetting_metrics_csv(report["forgetting_metrics"], out_dir / "forgetting_metrics.csv")
+    plot_confusion_matrix(report["pooled_final_metrics"], out_dir / "confusion_matrix_final.png")
+    plot_per_class_f1(report["pooled_final_metrics"], out_dir / "per_class_f1_final.png")
+    plot_forgetting_curves(report["forgetting_metrics"], out_dir / "forgetting_curves.png")
+
+    print(f"[evaluate] wrote {out_dir}")
+
+
+if __name__ == "__main__":
+    main()
