@@ -264,3 +264,31 @@ def test_run_is_deterministic_and_returns_expected_structure(tmp_path):
     assert report_a["metadata"]["git_commit"] is None
     assert len(report_a["class_pair_ranking"]) == 1
     assert report_a["raw_feature_comparison"]["n_matched_pairs"] == 1
+
+
+from trench_ids.cl.transferability_report import write_plots, write_report_json  # noqa: E402
+
+
+def test_write_report_json_writes_file(tmp_path):
+    report = {"metadata": {"num_records": 0}}
+    out_path = tmp_path / "report.json"
+
+    write_report_json(report, out_path)
+
+    assert json.loads(out_path.read_text()) == report
+
+
+def test_write_plots_creates_both_png_files(tmp_path):
+    report = {
+        "relation_ranking": [{"relation": "originates", "mean": 0.2, "std": 0.1, "n": 3}],
+        "class_pair_ranking": [
+            {"class_a": "A", "class_b": "B", "mean": 0.2,
+             "per_relation": {"originates": 0.2}, "best_relation": "originates",
+             "worst_relation": "originates"},
+        ],
+    }
+
+    write_plots(report, tmp_path)
+
+    assert (tmp_path / "relation_ranking.png").exists()
+    assert (tmp_path / "class_pair_heatmap.png").exists()

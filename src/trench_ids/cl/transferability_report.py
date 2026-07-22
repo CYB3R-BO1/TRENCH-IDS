@@ -19,8 +19,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402, I001
 
+import argparse
 import json
 import statistics
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -287,3 +290,46 @@ def run(
         "class_pair_ranking": pair_ranking,
         "raw_feature_comparison": raw_comparison,
     }
+
+
+def write_report_json(report: dict[str, Any], out_path: Path) -> None:
+    Path(out_path).write_text(json.dumps(report, indent=2))
+
+
+def write_plots(report: dict[str, Any], out_dir: Path) -> None:
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    plot_relation_ranking(report["relation_ranking"], out_dir / "relation_ranking.png")
+    plot_class_pair_heatmap(report["class_pair_ranking"], out_dir / "class_pair_heatmap.png")
+
+
+def _git_commit() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, check=True,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return None
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Transferability analysis report (Step 10a).")
+    parser.add_argument("--run-dir", default="runs/step4")
+    parser.add_argument("--raw-similarity", default="data/similarity/similarity_matrix.csv")
+    parser.add_argument("--out-dir", default="runs/step4/transferability_report")
+    args = parser.parse_args()
+
+    report = run(Path(args.run_dir), Path(args.raw_similarity))
+    report["metadata"]["generated_at"] = datetime.now(timezone.utc).isoformat()
+    report["metadata"]["git_commit"] = _git_commit()
+
+    out_dir = Path(args.out_dir)
+    write_report_json(report, out_dir / "transferability_report.json")
+    write_plots(report, out_dir)
+    print(f"[transferability_report] wrote {out_dir}")
+
+
+if __name__ == "__main__":
+    main()
