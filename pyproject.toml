@@ -30,6 +30,8 @@ trench-graphs = "trench_ids.graphs:main"
 trench-graph-composition = "trench_ids.graph_composition:main"
 trench-train = "trench_ids.cl.train:main"
 trench-transferability-report = "trench_ids.cl.transferability_report:main"
+trench-infer = "trench_ids.cl.inference:main"
+trench-evaluate = "trench_ids.cl.evaluate:main"
 
 [build-system]
 requires = ["hatchling"]
