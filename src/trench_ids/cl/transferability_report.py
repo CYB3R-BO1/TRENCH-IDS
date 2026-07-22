@@ -326,6 +326,7 @@ def main() -> None:
     report["metadata"]["git_commit"] = _git_commit()
 
     out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     write_report_json(report, out_dir / "transferability_report.json")
     write_plots(report, out_dir)
     print(f"[transferability_report] wrote {out_dir}")
