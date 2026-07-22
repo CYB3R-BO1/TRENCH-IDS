@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from trench_ids.cl.transferability_report import (
     class_pair_summary,
+    compare_to_raw_feature_similarity,
     load_transferability_records,
     rank_class_pairs,
     rank_relations,
@@ -133,3 +136,57 @@ def test_rank_class_pairs_sorts_descending_by_mean_and_includes_per_relation():
 
     assert [row["mean"] for row in ranking] == pytest.approx([0.9, 0.1])
     assert ranking[0]["per_relation"] == {"originates": 0.9}
+
+
+def test_compare_to_raw_feature_similarity_computes_pearson_and_spearman():
+    pair_summary = {
+        ("A", "B"): {"new_class": "A", "bank_class": "B", "mean_across_relations": 0.8,
+                     "per_relation": {}, "best_relation": "r", "worst_relation": "r"},
+        ("C", "D"): {"new_class": "C", "bank_class": "D", "mean_across_relations": 0.1,
+                     "per_relation": {}, "best_relation": "r", "worst_relation": "r"},
+        ("E", "F"): {"new_class": "E", "bank_class": "F", "mean_across_relations": -0.5,
+                     "per_relation": {}, "best_relation": "r", "worst_relation": "r"},
+    }
+    classes = ["A", "B", "C", "D", "E", "F"]
+    raw_matrix = pd.DataFrame(
+        [[1.0 if i == j else 0.0 for j in range(6)] for i in range(6)],
+        index=classes, columns=classes,
+    )
+    raw_matrix.loc["A", "B"] = raw_matrix.loc["B", "A"] = 0.9
+    raw_matrix.loc["C", "D"] = raw_matrix.loc["D", "C"] = 0.05
+    raw_matrix.loc["E", "F"] = raw_matrix.loc["F", "E"] = -0.4
+
+    result = compare_to_raw_feature_similarity(pair_summary, raw_matrix)
+
+    assert result["n_matched_pairs"] == 3
+    # raw = [0.9, 0.05, -0.4], learned = [0.8, 0.1, -0.5] -- both strictly
+    # increasing together -> perfect rank agreement.
+    assert result["spearman_r"] == pytest.approx(1.0)
+    assert result["pearson_r"] > 0.9
+    assert result["top_agreements"][0]["class_a"] == "A"
+
+
+def test_compare_to_raw_feature_similarity_flags_top_disagreement():
+    pair_summary = {
+        ("A", "B"): {"new_class": "A", "bank_class": "B", "mean_across_relations": -0.9,
+                     "per_relation": {}, "best_relation": "r", "worst_relation": "r"},
+    }
+    raw_matrix = pd.DataFrame([[1.0, 0.9], [0.9, 1.0]], index=["A", "B"], columns=["A", "B"])
+
+    result = compare_to_raw_feature_similarity(pair_summary, raw_matrix)
+
+    assert result["top_disagreements"][0]["tag"] == "high_raw_low_learned"
+
+
+def test_compare_to_raw_feature_similarity_skips_unmatched_classes():
+    pair_summary = {
+        ("A", "Z"): {"new_class": "A", "bank_class": "Z", "mean_across_relations": 0.5,
+                     "per_relation": {}, "best_relation": "r", "worst_relation": "r"},
+    }
+    raw_matrix = pd.DataFrame([[1.0]], index=["A"], columns=["A"])  # "Z" absent
+
+    result = compare_to_raw_feature_similarity(pair_summary, raw_matrix)
+
+    assert result["n_matched_pairs"] == 0
+    assert math.isnan(result["pearson_r"])
+    assert math.isnan(result["spearman_r"])

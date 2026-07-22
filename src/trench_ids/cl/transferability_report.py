@@ -17,7 +17,12 @@ from __future__ import annotations
 import json
 import statistics
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from scipy.stats import pearsonr, spearmanr
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 from trench_ids.labels import NUM_TASKS
 
@@ -134,3 +139,60 @@ def rank_class_pairs(summary: dict[tuple[str, str], dict[str, Any]]) -> list[dic
         key=lambda row: row["mean"],
         reverse=True,
     )
+
+
+def compare_to_raw_feature_similarity(
+    pair_summary: dict[tuple[str, str], dict[str, Any]],
+    raw_matrix: pd.DataFrame,
+) -> dict[str, Any]:
+    """Joins every class_pair_summary pair against the raw-feature matrix
+    (raw_matrix is symmetric, so a plain .loc lookup on either class order
+    is safe). Pearson r and Spearman rho are reported as descriptive
+    statistics, not a pass/fail metric -- only partial agreement with raw
+    input feature similarity is expected, since the learned representation
+    is relation-specific and shaped by continual learning."""
+    matched: list[dict[str, Any]] = []
+    for (class_a, class_b), value in pair_summary.items():
+        if class_a not in raw_matrix.index or class_b not in raw_matrix.columns:
+            continue
+        matched.append({
+            "class_a": class_a,
+            "class_b": class_b,
+            "raw_cosine": float(raw_matrix.loc[class_a, class_b]),
+            "learned_mean": value["mean_across_relations"],
+        })
+
+    if len(matched) >= 2:
+        raw_values = [m["raw_cosine"] for m in matched]
+        learned_values = [m["learned_mean"] for m in matched]
+        pearson_r = float(pearsonr(raw_values, learned_values)[0])
+        spearman_r = float(spearmanr(raw_values, learned_values)[0])
+    else:
+        pearson_r = float("nan")
+        spearman_r = float("nan")
+
+    top_agreements = sorted(
+        (m for m in matched if m["raw_cosine"] > 0),
+        key=lambda m: m["learned_mean"],
+        reverse=True,
+    )[:5]
+
+    def _tag(m: dict[str, Any]) -> str:
+        if m["raw_cosine"] > m["learned_mean"]:
+            return "high_raw_low_learned"
+        return "low_raw_high_learned"
+
+    top_disagreements = [
+        {**m, "tag": _tag(m)}
+        for m in sorted(
+            matched, key=lambda m: abs(m["raw_cosine"] - m["learned_mean"]), reverse=True
+        )[:5]
+    ]
+
+    return {
+        "pearson_r": pearson_r,
+        "spearman_r": spearman_r,
+        "n_matched_pairs": len(matched),
+        "top_agreements": top_agreements,
+        "top_disagreements": top_disagreements,
+    }
