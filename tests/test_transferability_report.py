@@ -224,3 +224,43 @@ def test_plot_class_pair_heatmap_creates_nonempty_file(tmp_path):
 
     assert out_path.exists()
     assert out_path.stat().st_size > 0
+
+
+from trench_ids.cl.transferability_report import run  # noqa: E402
+
+
+def test_run_is_deterministic_and_returns_expected_structure(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_task_file(run_dir, 1, {"Scanning": {}})
+    _write_task_file(run_dir, 2, {
+        "Reconnaissance": {"Scanning": {"originates": 0.6, "terminated_by": -0.1}},
+    })
+
+    raw_path = tmp_path / "raw_similarity.csv"
+    pd.DataFrame(
+        [[1.0, 0.6], [0.6, 1.0]],
+        index=["Reconnaissance", "Scanning"], columns=["Reconnaissance", "Scanning"],
+    ).to_csv(raw_path)
+
+    report_a = run(run_dir, raw_path, num_tasks=2)
+    report_b = run(run_dir, raw_path, num_tasks=2)
+
+    # Plain `==` would spuriously fail here: this fixture's raw-similarity
+    # matrix has exactly 2 classes -> 1 matched pair -> pearson_r/spearman_r
+    # are both float("nan") (n_matched_pairs < 2, see
+    # compare_to_raw_feature_similarity), and nan != nan even when every
+    # other field is identical. Compare via JSON round-trip instead, which
+    # serializes nan as the literal token `NaN` for both sides.
+    assert json.dumps(report_a, sort_keys=True, default=str) == json.dumps(
+        report_b, sort_keys=True, default=str
+    )
+    assert report_a["metadata"]["num_records"] == 2
+    assert report_a["metadata"]["num_class_pairs"] == 1
+    assert report_a["metadata"]["num_tasks_analyzed"] == 2
+    assert report_a["metadata"]["relations"] == ["originates", "terminated_by"]
+    assert report_a["metadata"]["num_relations"] == 2
+    assert report_a["metadata"]["generated_at"] is None
+    assert report_a["metadata"]["git_commit"] is None
+    assert len(report_a["class_pair_ranking"]) == 1
+    assert report_a["raw_feature_comparison"]["n_matched_pairs"] == 1

@@ -22,12 +22,10 @@ import matplotlib.pyplot as plt  # noqa: E402, I001
 import json
 import statistics
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+import pandas as pd
 from scipy.stats import pearsonr, spearmanr
-
-if TYPE_CHECKING:
-    import pandas as pd
 
 from trench_ids.labels import NUM_TASKS
 
@@ -248,3 +246,44 @@ def plot_class_pair_heatmap(pair_ranking: list[dict[str, Any]], out_path: Path) 
     fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
+
+
+def run(
+    run_dir: Path, raw_similarity_path: Path, num_tasks: int = NUM_TASKS
+) -> dict[str, Any]:
+    """Loads records, computes every summary/ranking/comparison, and
+    returns the report dict with metadata populated except for
+    "generated_at" and "git_commit" (left None -- see main()). Does not
+    write anything; deterministic for identical inputs."""
+    run_dir = Path(run_dir)
+    records = load_transferability_records(run_dir, num_tasks=num_tasks)
+
+    relation_summary = relation_wise_summary(records)
+    relation_ranking = rank_relations(relation_summary)
+    relation_evolution = relation_wise_task_evolution(records)
+
+    pair_summary = class_pair_summary(records)
+    pair_ranking = rank_class_pairs(pair_summary)
+
+    raw_matrix = pd.read_csv(raw_similarity_path, index_col=0)
+    raw_comparison = compare_to_raw_feature_similarity(pair_summary, raw_matrix)
+
+    relations = sorted({record["relation"] for record in records})
+
+    return {
+        "metadata": {
+            "source_run": str(run_dir),
+            "generated_at": None,
+            "git_commit": None,
+            "similarity_matrix_path": str(raw_similarity_path),
+            "num_tasks_analyzed": num_tasks,
+            "num_records": len(records),
+            "num_class_pairs": len(pair_summary),
+            "num_relations": len(relations),
+            "relations": relations,
+        },
+        "relation_ranking": relation_ranking,
+        "relation_task_evolution": relation_evolution,
+        "class_pair_ranking": pair_ranking,
+        "raw_feature_comparison": raw_comparison,
+    }
