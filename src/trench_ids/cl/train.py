@@ -24,6 +24,7 @@ Run:  trench-train
 from __future__ import annotations
 
 import json
+import random
 import subprocess
 import time
 from collections.abc import Callable
@@ -172,6 +173,24 @@ def split_warmup_and_full_loss_epochs(epochs_per_task: int, warmup_epochs: int) 
     return warmup_epochs, epochs_per_task - warmup_epochs
 
 
+def build_replay_augmented_set(
+    current_task_graphs: list[HeteroData],
+    replay_buffer: list[HeteroData],
+    replay_fraction: float,
+) -> list[HeteroData]:
+    """Combined training set for a task, mixing in the accumulated replay
+    buffer (design doc §Mechanism/Mixing into training). ``replay_buffer``
+    graphs are upsampled with replacement so they make up ``replay_fraction``
+    of the returned list; ``current_task_graphs`` appear once each, unchanged
+    (no replay for an empty buffer, e.g. task 1)."""
+    if not replay_buffer:
+        return current_task_graphs
+    n_current = len(current_task_graphs)
+    n_replay = round(n_current * replay_fraction / (1 - replay_fraction))
+    upsampled = random.choices(replay_buffer, k=n_replay)
+    return current_task_graphs + upsampled
+
+
 def train_one_task(
     model: RelationSpecificHeteroGNN,
     classifier: torch.nn.Linear,
@@ -307,7 +326,7 @@ def main(cfg: DictConfig) -> None:
         service_vocab_size=service_vocab_size,
         num_layers=cfg.model.num_layers,
         attn_dim=cfg.model.attn_dim,
-        port_buckets=cfg.model.port_buckets,
+        port_tail_buckets=cfg.model.port_tail_buckets,
     ).to(device)
     classifier = torch.nn.Linear(cfg.model.hidden_dim, len(label_names)).to(device)
 
@@ -328,12 +347,19 @@ def main(cfg: DictConfig) -> None:
 
     memory_bank: dict[str, dict[str, torch.Tensor]] = {}
     forgetting_matrix: dict[int, dict[int, float]] = {}
+    replay_buffer: list[HeteroData] = []
     run_start = time.monotonic()
 
     for task in range(1, NUM_TASKS + 1):
         train_graphs = sample_graphs if task == 1 else load_split(graphs_dir, task, "train")
         warmup_epochs, full_loss_epochs = split_warmup_and_full_loss_epochs(
             cfg.train.epochs_per_task, cfg.train.warmup_epochs
+        )
+
+        training_set = (
+            build_replay_augmented_set(train_graphs, replay_buffer, cfg.replay.replay_fraction)
+            if cfg.replay.enabled
+            else train_graphs
         )
 
         epoch_log_path = (
@@ -344,7 +370,7 @@ def main(cfg: DictConfig) -> None:
         final_loss, final_w_r = train_one_task(
             model,
             classifier,
-            train_graphs,
+            training_set,
             device,
             cfg.train.batch_size,
             warmup_epochs,
@@ -368,6 +394,9 @@ def main(cfg: DictConfig) -> None:
         final_means = compute_task_memory_means(
             model, train_graphs, device, cfg.train.batch_size, label_names
         )
+        if cfg.replay.enabled:
+            n_sample = min(cfg.replay.buffer_size_per_task, len(train_graphs))
+            replay_buffer.extend(random.sample(train_graphs, k=n_sample))
         transferability = estimate_transferability(final_means, memory_bank)
         (out_dir / f"transferability_task_{task}.json").write_text(
             json.dumps(transferability, indent=2)
@@ -398,10 +427,13 @@ def main(cfg: DictConfig) -> None:
                 "hidden_dim": cfg.model.hidden_dim,
                 "num_layers": cfg.model.num_layers,
                 "attn_dim": cfg.model.attn_dim,
-                "port_buckets": cfg.model.port_buckets,
+                "port_tail_buckets": cfg.model.port_tail_buckets,
                 "protocol_vocab_size": protocol_vocab_size,
                 "service_vocab_size": service_vocab_size,
                 "label_names": label_names,
+                "replay_enabled": cfg.replay.enabled,
+                "replay_buffer_size_per_task": cfg.replay.buffer_size_per_task,
+                "replay_fraction": cfg.replay.replay_fraction,
             },
         )
 
@@ -417,6 +449,9 @@ def main(cfg: DictConfig) -> None:
         "lambda_u": cfg.ewc.lambda_u,
         "gamma": cfg.ewc.gamma,
         "disable_learned_weighting": cfg.ewc.disable_learned_weighting,
+        "replay_enabled": cfg.replay.enabled,
+        "replay_buffer_size_per_task": cfg.replay.buffer_size_per_task,
+        "replay_fraction": cfg.replay.replay_fraction,
         "seed": cfg.train.seed,
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))

@@ -10,7 +10,8 @@ from trench_ids.model.rhgnn import (
     NodeFeatureEncoders,
     RelationSpecificHeteroGNN,
     RelationSpecificLayer,
-    port_bucket,
+    port_embedding_index,
+    port_embedding_size,
 )
 
 FLOW_DIM = 5
@@ -85,29 +86,50 @@ def _synthetic_graph() -> HeteroData:
 
 
 # ---------------------------------------------------------------------------
-# port_bucket
+# port_embedding_index / port_embedding_size (port-representation fix,
+# 2026-07-24 -- replaces the single log-bucket scheme, which collapsed
+# well-known services like FTP/SSH/Telnet into the same embedding row)
 # ---------------------------------------------------------------------------
 
 
-def test_port_bucket_stays_in_range() -> None:
-    ports = torch.tensor([0, 22, 80, 1023, 8080, 65535])
-    buckets = port_bucket(ports, num_buckets=32)
-    assert buckets.min() >= 0
-    assert buckets.max() < 32
+def test_port_embedding_index_gives_well_known_ports_exact_distinct_rows() -> None:
+    """The original bug this fix addresses: ports 20/21/22/23
+    (FTP data/FTP control/SSH/Telnet) must land in different rows now."""
+    ports = torch.tensor([20, 21, 22, 23])
+    idx = port_embedding_index(ports, tail_buckets=32)
+    assert idx.tolist() == [20, 21, 22, 23]
+    assert len(set(idx.tolist())) == 4
 
 
-def test_port_bucket_is_monotonic_nondecreasing() -> None:
-    ports = torch.tensor([0, 10, 100, 1000, 10000, 65535])
-    buckets = port_bucket(ports, num_buckets=16)
-    diffs = buckets[1:] - buckets[:-1]
+def test_port_embedding_index_well_known_range_is_identity() -> None:
+    ports = torch.tensor([0, 80, 443, 1023])
+    idx = port_embedding_index(ports, tail_buckets=32)
+    assert idx.tolist() == [0, 80, 443, 1023]
+
+
+def test_port_embedding_index_tail_stays_in_range_above_well_known() -> None:
+    ports = torch.tensor([1024, 8080, 49152, 65535])
+    idx = port_embedding_index(ports, tail_buckets=32)
+    assert (idx >= 1024).all()
+    assert (idx < port_embedding_size(tail_buckets=32)).all()
+
+
+def test_port_embedding_index_tail_is_monotonic_nondecreasing() -> None:
+    ports = torch.tensor([1024, 2000, 10000, 30000, 65535])
+    idx = port_embedding_index(ports, tail_buckets=16)
+    diffs = idx[1:] - idx[:-1]
     assert (diffs >= 0).all()
 
 
-def test_port_bucket_clamps_out_of_range_values() -> None:
+def test_port_embedding_index_clamps_out_of_range_values() -> None:
     ports = torch.tensor([-5, 70000])
-    buckets = port_bucket(ports, num_buckets=8)
-    assert buckets[0] == port_bucket(torch.tensor([0]), num_buckets=8)[0]
-    assert buckets[1] == port_bucket(torch.tensor([65535]), num_buckets=8)[0]
+    idx = port_embedding_index(ports, tail_buckets=8)
+    assert idx[0] == port_embedding_index(torch.tensor([0]), tail_buckets=8)[0]
+    assert idx[1] == port_embedding_index(torch.tensor([65535]), tail_buckets=8)[0]
+
+
+def test_port_embedding_size_is_well_known_rows_plus_tail_buckets() -> None:
+    assert port_embedding_size(tail_buckets=32) == 1024 + 32
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +145,7 @@ def test_node_feature_encoders_produce_hidden_dim_for_every_node_type() -> None:
         service_vocab_size=10,
         flow_feature_dim=FLOW_DIM,
         host_feature_dim=HOST_DIM,
-        port_buckets=32,
+        port_tail_buckets=32,
     )
     x_dict = encoders(g)
     assert x_dict["flow"].shape == (6, 16)

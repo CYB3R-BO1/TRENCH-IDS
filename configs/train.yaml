@@ -9,7 +9,7 @@ model:
   hidden_dim: 64
   attn_dim: 128
   num_layers: 1
-  port_buckets: 32
+  port_tail_buckets: 32
 
 optim:
   name: adam
@@ -45,6 +45,14 @@ ewc:
   # lambda*L_EWC's actual magnitude relative to L_cls can be checked
   # directly instead of inferred from forgetting/accuracy alone.
   log_loss_components: false
+
+# Experience replay baseline (2026-07-23 design,
+# docs/superpowers/specs/2026-07-23-replay-baseline-design.md). Disabled by
+# default so existing EWC runs are unaffected.
+replay:
+  enabled: false
+  buffer_size_per_task: 200 # ~2.5% of one task's ~8135 train graphs
+  replay_fraction: 0.3 # target share of each task's combined training pool
 
 paths:
   graphs_dir: data/graphs

@@ -54,7 +54,7 @@ def load_checkpoint(
         service_vocab_size=config["service_vocab_size"],
         num_layers=config["num_layers"],
         attn_dim=config["attn_dim"],
-        port_buckets=config["port_buckets"],
+        port_tail_buckets=config["port_tail_buckets"],
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()

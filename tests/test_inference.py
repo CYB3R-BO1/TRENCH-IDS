@@ -73,7 +73,7 @@ def test_load_checkpoint_rebuilds_model_and_predicts(tmp_path) -> None:
     ).to(device)
     classifier = torch.nn.Linear(8, 2).to(device)
     config = {
-        "hidden_dim": 8, "num_layers": 1, "attn_dim": 128, "port_buckets": 32,
+        "hidden_dim": 8, "num_layers": 1, "attn_dim": 128, "port_tail_buckets": 32,
         "protocol_vocab_size": 2, "service_vocab_size": 2, "label_names": ["a", "b"],
     }
 

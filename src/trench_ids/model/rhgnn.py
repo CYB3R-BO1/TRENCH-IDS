@@ -63,22 +63,44 @@ from trench_ids.model.relation_conv import RelationSpecificConv
 FLOW_FEATURE_DIM = 37  # len(configs/graph.yaml: features)
 HOST_FEATURE_DIM = 4  # total_flows, avg_bytes_as_src, avg_bytes_as_dst, unique_ports_contacted
 
+WELL_KNOWN_PORT_MAX = 1023  # inclusive upper bound of the IANA well-known port range
 
-def port_bucket(port_number: torch.Tensor, num_buckets: int) -> torch.Tensor:
-    """Log1p-scaled bucket index in ``[0, num_buckets)`` for a raw destination port.
 
-    Port node identity is chunk-local (``graphs.py``) and spans the full
-    0-65535 range, so an ``nn.Embedding`` keyed directly on the raw port
-    number would need a 65536-row table whose rows mostly never repeat
-    across mini-graphs -- no generalization benefit, all parameter cost.
-    Log-spaced bucketing keeps well-known ports (0-1023) relatively finely
-    separated while coarsely grouping the sparse high end, and bounds the
-    embedding table to ``num_buckets`` rows regardless of port range.
+def port_embedding_index(port_number: torch.Tensor, tail_buckets: int) -> torch.Tensor:
+    """Combined port index: exact per-port identity for 0-1023, log1p-bucketed
+    for 1024-65535 (docs/port-representation-proposal.md, 2026-07-24 --
+    replaces the original single log-bucket scheme for every well-known
+    port, per the professor's explicit instruction).
+
+    The original ``port_bucket`` log-scaled the *entire* 0-65535 range into
+    ``num_buckets`` rows, which collapsed unrelated well-known services into
+    the same embedding row (FTP/SSH/Telnet, ports 20/21/22/23, all landed in
+    bucket 9 at 32 buckets) -- a real information loss, since port number is
+    the *only* channel port identity reaches the model through (`L4_DST_PORT`
+    is excluded from the 37 Flow features, see `configs/graph.yaml`). Ports
+    0-1023 are a globally standardized, stable service namespace (SSH is 22
+    on every host/dataset/OS), so port number *is* service identity there --
+    each gets its own embedding row (indices 0-1023). Ports 1024-65535 are a
+    much larger, sparser namespace of registered/ephemeral ports without that
+    stability guarantee, so they stay log-bucketed into ``tail_buckets`` rows
+    (indices 1024..1024+tail_buckets-1), scaled within the tail's own range
+    (not the full 0-65535 range) so every tail bucket is actually reachable.
     """
-    clipped = port_number.clamp(min=0, max=65535).float()
-    scaled = torch.log1p(clipped) / math.log1p(65535)
-    idx = (scaled * (num_buckets - 1)).round().long()
-    return idx.clamp(0, num_buckets - 1)
+    port = port_number.clamp(min=0, max=65535).long()
+    well_known = port <= WELL_KNOWN_PORT_MAX
+
+    tail_min = WELL_KNOWN_PORT_MAX + 1
+    tail_span = 65535 - tail_min
+    tail_scaled = torch.log1p((port.float() - tail_min).clamp(min=0)) / math.log1p(tail_span)
+    tail_bucket = (tail_scaled * (tail_buckets - 1)).round().long().clamp(0, tail_buckets - 1)
+
+    return torch.where(well_known, port, tail_min + tail_bucket)
+
+
+def port_embedding_size(tail_buckets: int) -> int:
+    """Total ``nn.Embedding`` row count for ``port_embedding_index``: 1024
+    exact well-known-port rows plus ``tail_buckets`` tail-bucket rows."""
+    return WELL_KNOWN_PORT_MAX + 1 + tail_buckets
 
 
 class NodeFeatureEncoders(nn.Module):
@@ -96,9 +118,13 @@ class NodeFeatureEncoders(nn.Module):
     (``trench_ids.vocab``, stable across every task/graph_size/benign_ratio
     set) so the same raw value gets the same embedding row everywhere --
     required for any later cross-task comparison of these node types'
-    embeddings. Port has no such global vocabulary (chunk-local, no cross-
-    task comparability requirement per ``vocab.py``'s docstring), so it goes
-    through ``port_bucket`` instead of a vocab lookup.
+    embeddings. Port has no such global vocabulary for its log-bucketed tail
+    (chunk-local, no cross-task comparability requirement there); the
+    well-known 0-1023 range *is* now globally stable/comparable across tasks
+    (port-representation fix, matching Protocol/Service's status), so it
+    goes through ``port_embedding_index`` instead of a vocab lookup: an
+    exact row per well-known port (0-1023) plus a log-bucketed tail
+    (1024-65535, see that function's docstring).
     """
 
     def __init__(
@@ -108,7 +134,7 @@ class NodeFeatureEncoders(nn.Module):
         service_vocab_size: int,
         flow_feature_dim: int = FLOW_FEATURE_DIM,
         host_feature_dim: int = HOST_FEATURE_DIM,
-        port_buckets: int = 32,
+        port_tail_buckets: int = 32,
     ) -> None:
         super().__init__()
         self.flow_norm = nn.LayerNorm(flow_feature_dim)
@@ -117,8 +143,8 @@ class NodeFeatureEncoders(nn.Module):
         self.host = nn.Linear(host_feature_dim, hidden_dim)
         self.protocol = nn.Embedding(protocol_vocab_size, hidden_dim)
         self.service = nn.Embedding(service_vocab_size, hidden_dim)
-        self.port = nn.Embedding(port_buckets, hidden_dim)
-        self.port_buckets = port_buckets
+        self.port = nn.Embedding(port_embedding_size(port_tail_buckets), hidden_dim)
+        self.port_tail_buckets = port_tail_buckets
 
     def forward(self, graph: HeteroData) -> dict[str, torch.Tensor]:
         return {
@@ -126,7 +152,9 @@ class NodeFeatureEncoders(nn.Module):
             "host": self.host(self.host_norm(graph["host"].x)),
             "protocol": self.protocol(graph["protocol"].vocab_id),
             "service": self.service(graph["service"].vocab_id),
-            "port": self.port(port_bucket(graph["port"].port_number, self.port_buckets)),
+            "port": self.port(
+                port_embedding_index(graph["port"].port_number, self.port_tail_buckets)
+            ),
         }
 
 
@@ -208,11 +236,11 @@ class RelationSpecificHeteroGNN(nn.Module):
         service_vocab_size: int,
         num_layers: int = 1,
         attn_dim: int = 128,
-        port_buckets: int = 32,
+        port_tail_buckets: int = 32,
     ) -> None:
         super().__init__()
         self.encoders = NodeFeatureEncoders(
-            hidden_dim, protocol_vocab_size, service_vocab_size, port_buckets=port_buckets
+            hidden_dim, protocol_vocab_size, service_vocab_size, port_tail_buckets=port_tail_buckets
         )
         self.layers = nn.ModuleList(
             [
@@ -230,7 +258,7 @@ class RelationSpecificHeteroGNN(nn.Module):
         service_vocab_size: int,
         num_layers: int = 1,
         attn_dim: int = 128,
-        port_buckets: int = 32,
+        port_tail_buckets: int = 32,
     ) -> RelationSpecificHeteroGNN:
         """Build a model whose relation-specific weights match `sample_graph`'s
         metadata exactly -- metadata is fixed at construction time since
@@ -245,7 +273,7 @@ class RelationSpecificHeteroGNN(nn.Module):
             service_vocab_size,
             num_layers,
             attn_dim,
-            port_buckets,
+            port_tail_buckets,
         )
 
     def forward(self, graph: HeteroData) -> RelationSpecificOutput:

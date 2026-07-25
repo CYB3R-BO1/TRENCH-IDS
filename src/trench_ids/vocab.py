@@ -6,8 +6,11 @@ graph), so a given PROTOCOL/L7_PROTO value maps to the same node identity
 regardless of which task it appears in. This is required for relation-
 specific memory (Step 4) to compare per-relation embeddings across tasks
 (docs/dataset-plan.md §3.1). Host and Port identity are deliberately *not*
-globalized here — Host never persists across tasks by design, and Port has
-no cross-task comparability requirement in the current spec.
+globalized here — Host never persists across tasks by design. Port's
+log-bucketed tail (1024-65535, see rhgnn.port_embedding_index) has no
+cross-task comparability requirement either; its well-known range (0-1023)
+is a special case, comparable across tasks by construction (fixed
+IANA-standard indices) without needing a vocab.py-style scan.
 """
 
 from __future__ import annotations

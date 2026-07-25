@@ -153,7 +153,7 @@ def test_build_eval_matrix_and_run_end_to_end(tmp_path) -> None:
 
     run_dir = tmp_path / "run"
     config = {
-        "hidden_dim": 8, "num_layers": 1, "attn_dim": 128, "port_buckets": 32,
+        "hidden_dim": 8, "num_layers": 1, "attn_dim": 128, "port_tail_buckets": 32,
         "protocol_vocab_size": 2, "service_vocab_size": 2, "label_names": label_names,
     }
     for task in (1, 2):

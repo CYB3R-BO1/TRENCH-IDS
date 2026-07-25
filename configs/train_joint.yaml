@@ -1,0 +1,38 @@
+# Joint-training upper bound (2026-07-23) -- all 6 tasks' train graphs
+# pooled into one dataset and trained on simultaneously, no continual
+# learning (no sequential task order, no EWC, no memory bank). Answers
+# "is the architecture capable of solving all 10 classes at once, ignoring
+# forgetting" -- separates architecture/representation capacity from the
+# continual-learning-specific bottleneck documented in runs/step4.
+#
+# Same model/optim hyperparameters as configs/train.yaml (Step 4) so the
+# comparison isolates the CL-vs-joint variable rather than confounding it
+# with a hyperparameter change. epochs matches Step 4's epochs_per_task
+# (5) -- each epoch here already covers all 6 tasks' data in one pass, so
+# 5 epochs is a comparable amount of gradient exposure to one task's 5
+# sequential epochs, not 6x more.
+model:
+  hidden_dim: 64
+  attn_dim: 128
+  num_layers: 1
+  port_tail_buckets: 32
+
+optim:
+  name: adam
+  learning_rate: 0.001
+
+train:
+  epochs: 5
+  batch_size: 8
+  seed: 42
+  device: auto
+
+paths:
+  graphs_dir: data/graphs
+  out_dir: runs/joint_upper_bound
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.out_dir}/hydra

@@ -11,6 +11,7 @@ from trench_ids.cl.ewc import FLOW_RELATIONS, OnlineEWCManager
 from trench_ids.cl.importance import ImportanceMLP
 from trench_ids.cl.train import (
     average_forgetting,
+    build_replay_augmented_set,
     final_average_accuracy,
     forgetting_row,
     save_checkpoint,
@@ -349,6 +350,30 @@ def test_train_one_task_writes_loss_components_log_when_path_given(tmp_path) -> 
         }
 
 
+def test_build_replay_augmented_set_returns_current_graphs_unchanged_for_empty_buffer() -> None:
+    """Task 1 (no buffer yet) must be byte-identical to plain training --
+    regression guard so replay is provably a no-op until a buffer exists."""
+    current = [object(), object(), object()]
+
+    result = build_replay_augmented_set(current, replay_buffer=[], replay_fraction=0.3)
+
+    assert result is current
+
+
+def test_build_replay_augmented_set_hits_target_replay_fraction() -> None:
+    current = [object() for _ in range(100)]
+    buffer = [object() for _ in range(10)]
+
+    result = build_replay_augmented_set(current, buffer, replay_fraction=0.3)
+
+    n_replay = len(result) - len(current)
+    assert all(g in current for g in result[: len(current)])
+    assert all(g in buffer for g in result[len(current) :])
+    # replay_fraction of the *combined* pool, not of current alone:
+    # n_replay / (len(current) + n_replay) ~= 0.3
+    assert n_replay / len(result) == pytest.approx(0.3, abs=0.01)
+
+
 def test_average_forgetting_returns_zero_for_single_task() -> None:
     assert average_forgetting({1: {1: 0.9}}) == 0.0
 
@@ -391,7 +416,7 @@ def test_save_checkpoint_writes_loadable_state(tmp_path: Path) -> None:
     model = model.to(device)
     classifier = torch.nn.Linear(8, 2).to(device)
     config = {
-        "hidden_dim": 8, "num_layers": 1, "attn_dim": 128, "port_buckets": 32,
+        "hidden_dim": 8, "num_layers": 1, "attn_dim": 128, "port_tail_buckets": 32,
         "protocol_vocab_size": 2, "service_vocab_size": 2, "label_names": ["a", "b"],
     }
     path = tmp_path / "checkpoint_task_1.pt"

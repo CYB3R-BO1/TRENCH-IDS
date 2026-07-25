@@ -12,7 +12,8 @@ from trench_ids.model.rhgnn import (
     RelationSpecificHeteroGNN,
     RelationSpecificLayer,
     RelationSpecificOutput,
-    port_bucket,
+    port_embedding_index,
+    port_embedding_size,
 )
 
 __all__ = [
@@ -22,5 +23,6 @@ __all__ = [
     "RelationSpecificHeteroGNN",
     "RelationSpecificLayer",
     "RelationSpecificOutput",
-    "port_bucket",
+    "port_embedding_index",
+    "port_embedding_size",
 ]
