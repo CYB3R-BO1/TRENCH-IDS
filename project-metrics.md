@@ -18,8 +18,10 @@ This file is the single place to find every hard number about the project - data
 | Graph size (max flows/mini-graph) | 300 |
 | Total mini-graphs, `benign_ratio=4.0` set | 65,378 |
 | `benign_ratio` sweep candidates produced | 2.0 / 3.0 / 4.0 |
-| Step 3 model parameters (default config: `hidden_dim=64`, 1 layer, 11 relations) | 197,842 |
-| Test suite | 157 tests passing, `ruff check` clean |
+| Step 3 model parameters (default config: `hidden_dim=64`, 1 layer, 11 relations, exact well-known-port embedding) | 263,378 |
+| Test suite | 162 tests passing, `ruff check` clean |
+| **Best CL method found: experience replay** (3 seeds) | 0.861 ± 0.014 final acc., 0.094 ± 0.015 avg. forgetting (§23) |
+| Joint-training upper bound (non-continual reference) | 0.876 acc., 0.842 F1-macro (§24) |
 
 ### Pipeline overview
 
@@ -76,6 +78,14 @@ Step 10a: transferability analysis - relation    transferability_report.py      
         v
 Step 10 (remaining bullet, explicitly deferred): prediction/inference pipeline
   for genuinely unseen traffic - not yet started
+        |
+        v
+Professor direction after §16-18/22 (EWC ineffective): try HP tuning and    train.py (replay), (see §23-25)
+  replay-based forgetting mitigation. Experience replay (literature-        train_joint.py
+  standard, graph-level buffer) closes almost all of the forgetting gap;
+  a joint-training run gives the non-CL upper bound; a same-seed port-
+  representation fix (well-known ports 0-1023, exact embeddings) was
+  folded into `rhgnn.py` on master with a mixed, not-yet-multi-seed result
 ```
 
 ---
@@ -243,7 +253,7 @@ Flows/graph mean is ~300 (capped by `graph_size`) for every task/split/set excep
 | Host | 4 features: total_flows, avg_bytes_as_src, avg_bytes_as_dst, unique_ports_contacted |
 | Protocol | none - categorical ID only (vocab size 5) |
 | Service | none - categorical ID only (vocab size 216) |
-| Port | none - categorical ID only (32 buckets) |
+| Port | none - categorical ID only (exact row per well-known port 0-1023 + 32 log-buckets for the 1024-65535 tail, §24) |
 
 **Relations:**
 
@@ -447,9 +457,12 @@ Global vocab sizes actually used (`data/graphs/vocab.json`): **Protocol = 5**, *
 
 | Config | Total params | Node-feature encoders | Relation-conv (per layer) | Attention fusion (per layer) |
 |---|---:|---:|---:|---:|
-| `hidden_dim=64`, 1 layer (**current `configs/model.yaml` default**) | **197,842** | 19,026 | 136,576 | 42,240 |
+| `hidden_dim=64`, 1 layer, original 32-bucket-only port scheme (as measured 2026-07-19) | 197,842 | 19,026 | 136,576 | 42,240 |
+| `hidden_dim=64`, 1 layer, **exact well-known-port scheme (§24, current `master`/default)** | **263,378** | 84,562 | 136,576 | 42,240 |
 
-Relation-conv parameters scale as **O(R × 3H²)** now, where R is the number of relations (11, up from 6) and H is `hidden_dim` - each relation now has *two* full-rank matrices, `rel_lins[r]` (`H×H`, transforms neighbor messages) and the new `combine_lins[r]` (`2H×H`, folds the destination's own embedding + aggregated neighbor message back down to `H`), vs. one `H×H` matrix per relation before. Relation-conv params rose from 24,960 (6 relations, one `H×H` each) to 136,576 (11 relations, one `H×H` + one `2H×H` each) - both the relation count and the per-relation cost increased.
+The +65,536 delta is entirely in the Port node-feature encoder: `port_embedding_size(32)` grew from 32 rows (pure log-bucketing) to 1,056 rows (1,024 exact well-known-port rows + 32 tail buckets), each row `hidden_dim=64` wide (`(1056-32) * 64 = 65,536`). Relation-conv and attention-fusion parameter counts are unaffected — the port scheme only changes how the Port node's own embedding table is built, not how relations are aggregated. Verified by direct instantiation: `RelationSpecificHeteroGNN.from_graph(data, hidden_dim=64, num_layers=1, protocol_vocab_size=5, service_vocab_size=216)` against a real loaded `data/graphs/task_1_train.pt` graph.
+
+Relation-conv parameters scale as **O(R × 3H²)**, where R is the number of relations (11, up from 6) and H is `hidden_dim` - each relation now has *two* full-rank matrices, `rel_lins[r]` (`H×H`, transforms neighbor messages) and the new `combine_lins[r]` (`2H×H`, folds the destination's own embedding + aggregated neighbor message back down to `H`), vs. one `H×H` matrix per relation before. Relation-conv params rose from 24,960 (6 relations, one `H×H` each) to 136,576 (11 relations, one `H×H` + one `2H×H` each) - both the relation count and the per-relation cost increased.
 
 ### 13.3 Real-data forward/backward integration check
 
@@ -490,7 +503,7 @@ Each node type's weights sum to 1.000 (softmax-guaranteed, also asserted directl
 - **Per-relation self-concatenation** (new 2026-07-19): `RelationSpecificConv` concatenates each destination node's own current embedding into every relation's neighbor-aggregated message before a per-relation combine layer projects back to `hidden_dim` (GraphSAGE-style, Hamilton et al. NeurIPS 2017). Fixes the prior 0%-self-signal gap in every relation-specific and fused embedding (worst for Flow). `SemanticAttention` fusion needed no change - it never had a self-term to begin with.
 - ~~**No reverse edges** (2026-07-17, superseded above): relations stay exactly as Step 2 stores them, one-way.~~
 - **HAN-style semantic attention** (Wang et al., WWW 2019) over GAT-style node-conditioned attention: produces one importance weight per relation (not per node), directly reusable for the later transferability-estimation/relation-aware-EWC steps.
-- **Port bucketing** (log1p-scaled, 32 buckets) instead of a raw 65536-row `nn.Embedding`: Port has no global vocabulary (chunk-local by Step 2 design), so a raw-port embedding would never generalize across mini-graphs.
+- **Port representation** (as of §24, superseding the original log1p-scaled 32-bucket-only scheme): an exact `nn.Embedding` row for each well-known port (0-1023) plus 32 log-buckets for the sparse 1024-65535 tail, instead of a raw 65536-row `nn.Embedding` (Port has no global vocabulary otherwise - chunk-local by Step 2 design, so a pure raw-port embedding would never generalize across mini-graphs) or the original pure-log-bucket scheme (which collapsed distinct well-known services, e.g. FTP/SSH/Telnet on ports 20-23, into the same row).
 - **LayerNorm on raw Flow/Host features** before the linear projection: required because raw NetFlow byte/packet counters span huge dynamic ranges (§13.3).
 
 Source: `src/trench_ids/model/relation_conv.py`, `src/trench_ids/model/attention_fusion.py`, `src/trench_ids/model/rhgnn.py`, `configs/model.yaml`, `tests/test_model.py`; parameter counts and integration-check numbers measured directly against the regenerated `data/graphs/task_4_train.pt` and `data/graphs/vocab.json` (not estimated).
@@ -906,3 +919,119 @@ The accuracy-forgetting average (0.7054) reproduces §16.1/§17.4 exactly, an in
 **157 tests passing** (`.venv/Scripts/python.exe -m pytest -q`, 0 failures) — up from 146 (§19.5) with `tests/test_inference.py` (3 tests: well-formed `predict()` output, real checkpoint save/load/predict round trip, `checkpoint_version` rejection) and `tests/test_evaluate.py` (7 tests: `compute_metrics` including a never-predicted/never-true-class edge case with hand-verified precision/recall/F1 arithmetic, `pool_predictions` including a label-name-mismatch rejection, `forgetting_metrics_table` flattening/sorting, `build_eval_matrix`/`run()` end-to-end against synthetic checkpoints, and writer/plot smoke tests). One new test in `tests/test_train.py` (`save_checkpoint` round-trip: dict shape, then loads its `model_state_dict`/`classifier_state_dict` into fresh modules with no error). `ruff check src tests` passes clean.
 
 Source: `src/trench_ids/cl/inference.py`, `src/trench_ids/cl/evaluate.py`, `src/trench_ids/cl/train.py` (`save_checkpoint`, wired into `main()`), `pyproject.toml` (scikit-learn dependency, `trench-infer`/`trench-evaluate` entry points — the latter has the Hydra-resolution issue noted above under real-run reproduction, use `python -m trench_ids.cl.evaluate` instead). Implemented via subagent-driven-development, 7 tasks, 7 commits, all task reviews clean on first pass with no fix rounds required.
+
+---
+
+## 23. Hyperparameter sweep + experience replay baseline (real runs, 2026-07-23/24)
+
+Professor's direct instruction after seeing §22's result: "Try tweaking the hyperparameters. You can also try other methods like replay based to mitigate catastrophic forgetting." Two independent efforts followed, both on the frozen `num_layers=1` architecture, `data/graphs` (`benign_ratio=3.0`), seed 42 unless noted.
+
+### 23.1 Hyperparameter sweep (`runs/hp_sweep/`) — negative result, same conclusion as §17
+
+Four configs, each varying one knob off the `lambda=1.0` relation-aware-EWC baseline (§16/§22): `epochs_per_task ∈ {10, 20}`, `optim.learning_rate ∈ {3e-3, 3e-4}` (default is 5, 1e-3). `epochs20` was left incomplete (only tasks 1-2 trained, no `summary.json`/eval — abandoned once the other three showed no improvement, not a bug). The three completed configs:
+
+| Config | Avg. forgetting | Final avg. accuracy | Pooled accuracy | F1 (macro) |
+|---|---:|---:|---:|---:|
+| `epochs_per_task=10` | 0.7432 | 0.3316 | 0.3206 | 0.1652 |
+| `learning_rate=3e-3` | 0.7981 | 0.2410 | 0.2365 | 0.1028 |
+| `learning_rate=3e-4` | 0.7104 | 0.3473 | 0.3392 | 0.1542 |
+
+All three sit inside the same ~0.71-0.80 forgetting band as every §16-18 lambda/architecture variant — more epochs and both learning-rate directions tested, no configuration escapes the noise band. This is what motivated moving to a fundamentally different mitigation (replay) rather than continuing to tune EWC's hyperparameters.
+
+### 23.2 Experience replay baseline — real forgetting mitigation (`runs/replay_baseline/`, `runs/replay_seed1/`, `runs/replay_seed2/`)
+
+Design: `docs/superpowers/specs/2026-07-23-replay-baseline-design.md`. Literature-standard graph-level experience replay (Rolnick et al. NeurIPS 2019; Chaudhry et al. 2019; Zhou & Cao's ER-GNN 2021 as the closest GNN-specific analog) — after each task, `buffer_size_per_task=200` whole mini-graphs are sampled without replacement from that task's train split and stored by reference; when training task *t>1*, the current task's graphs are combined with buffer graphs upsampled (with replacement) to `replay_fraction=0.3` of the combined pool, fed through the existing unmodified `DataLoader(shuffle=True)` — no change to the model, the loss, or `train_one_task`'s inner loop. All EWC lambdas set to 0 (`lambda_r=lambda_s=lambda_u=0`) so the comparison isolates replay's effect from EWC, leaving `L = L_cls` plus replay-augmented data only.
+
+Three seeds run (42, 1, 2), each with full `trench-evaluate` pooled metrics:
+
+| Seed | Avg. forgetting | Final avg. accuracy | Pooled accuracy | F1 (macro, pooled) | F1 (weighted, pooled) | Runtime |
+|---|---:|---:|---:|---:|---:|---:|
+| 42 (`replay_baseline`) | 0.0950 | 0.8571 | 0.8454 | 0.7941 | 0.8375 | 2897s (~48 min) |
+| 1 (`replay_seed1`) | 0.1084 | 0.8498 | 0.8427 | 0.8133 | 0.8352 | 4189s (~70 min) |
+| 2 (`replay_seed2`) | 0.0783 | 0.8760 | 0.8735 | 0.8064 | 0.8681 | 5719s (~95 min) |
+| **Mean ± sample std** | **0.0939 ± 0.0151** | **0.8610 ± 0.0135** | 0.8539 ± 0.0171 | 0.8046 ± 0.0097 | 0.8470 ± 0.0184 | 48-95 min |
+
+(`final_average_accuracy`, the simple mean of 6 per-task diagonal accuracies, is what's reported as "final accuracy" here and in the project summary PDF, consistent with §22.1's distinction; pooled accuracy is the separate micro-averaged figure.) Every task's own-task accuracy stays between 0.70 and 0.99 all the way through training under replay (`runs/replay_baseline/forgetting_matrix.json`), versus 0.08-0.24 under EWC (§16.1/§22) — replay closes nearly all of the forgetting gap that 5 orders of magnitude of EWC tuning (§17, §23.1) could not touch, using an established technique with no change to the architecture or the EWC machinery itself.
+
+**Per-class picture (seed 42, `runs/replay_baseline/eval/pooled_final_metrics.json`):** every class reaches F1 ≥ 0.66 except Infiltration (F1 0.242, precision 0.170, recall 0.422) — by far the smallest class (17,370 rows, 0.1% of pooled traffic), confused mostly with DDoS (7,258 of its rows) and BruteForce (1,783). Benign's recall (0.528) trails its precision (0.910) — the model over-predicts attack classes on ambiguous traffic more often than it misses real attacks, the safer failure direction for an IDS. This pattern (Infiltration weakest, Benign recall < precision) holds across all three seeds.
+
+### 23.3 Joint-training upper bound (`runs/joint_upper_bound/`, `src/trench_ids/cl/train_joint.py`)
+
+Non-continual reference: all 6 tasks' train graphs pooled and trained together for 5 epochs (no task boundaries, no EWC, no replay), same architecture/seed 42/GPU. Establishes the ceiling replay is closing toward, and confirms the architecture itself is capable — the bottleneck really is the continual-learning setting, not model capacity.
+
+| Metric | Value |
+|---|---:|
+| Pooled accuracy | 0.8762 |
+| Pooled F1 (macro) | 0.8415 |
+| Pooled F1 (weighted) | 0.8750 |
+| Per-task accuracy | T1 0.847, T2 0.908, T3 0.896, T4 0.698, T5 0.956, T6 0.949 |
+| Runtime | 3015s (~50 min) |
+
+Replay's final average accuracy (0.861) sits about 1.5 points below this upper bound (0.876) — most of the achievable performance is recovered without any task-boundary-specific mechanism beyond the replay buffer itself.
+
+### 23.4 Full method comparison
+
+| Method | Final avg. accuracy | F1 (macro, pooled) | Avg. forgetting |
+|---|---:|---:|---:|
+| Plain fine-tuning, no EWC (§16.1) | 0.356 | — (not evaluated) | 0.7108 |
+| Online EWC, uniform λ=1 (§17.4) | 0.359 | — (not evaluated) | 0.7103 |
+| Online EWC, relation-aware λ=1 (§16/§22) | 0.362 | 0.166 | 0.7054 |
+| Online EWC, hp/λ sweep (§17, §23.1) | 0.241-0.347 | 0.103-0.165 | 0.710-0.798 |
+| **Experience replay, 3 seeds (§23.2)** | **0.861 ± 0.014** | **0.805 ± 0.010** | **0.094 ± 0.015** |
+| Joint training (non-CL upper bound, §23.3) | 0.876 | 0.842 | — |
+
+The plain-fine-tuning and uniform-EWC rows only ever had accuracy/forgetting logged (no `trench-evaluate` pass was run against those older checkpoints) — blank, not zero. Every EWC row is single-seed; §2 of the open items below tracks multi-seeding them. This table, plus §23.1-23.3's detail, resolves the "scope call" from `CLAUDE.md`'s Step 7/8 discussion: the paper reports the relation-aware EWC mechanism's ineffectiveness as a precisely-scoped negative result (§16-18, §23.1 confirm it under both lambda and hyperparameter variation) alongside experience replay as the mitigation that actually works — not a claim that the transferability-weighted mechanism itself reduces forgetting.
+
+### 23.5 Test suite
+
+**162 tests passing** (`.venv/Scripts/python.exe -m pytest -q`, 0 failures) — up from 157 (§22.5). Net +5, split across two files: `tests/test_train.py` gained 2 (`test_build_replay_augmented_set_returns_current_graphs_unchanged_for_empty_buffer` — the task-1/no-buffer-yet regression guard, asserts the returned list *is* the input list unchanged; `test_build_replay_augmented_set_hits_target_replay_fraction` — asserts the upsampled combined pool's replay share matches `replay_fraction` within rounding). `tests/test_model.py`'s port-representation tests were renamed and extended alongside the `port_bucket` → `port_embedding_index`/`port_embedding_size` rename (§24): net +3 (6 tests total now, up from 3), covering well-known ports 20-23 landing in distinct rows (the bug this fix targets), the 0-1023 range being an identity mapping, the 1024+ tail staying in range and monotonic, out-of-range clamping, and `port_embedding_size`'s row-count formula. `ruff check src tests` passes clean.
+
+---
+
+## 24. Port-representation fix, now on `master` (real comparison, 2026-07-24)
+
+The well-known-port bucket-collision fix originally prototyped on `experiment/port-embedding-fixed-wellknown` (`CLAUDE.md`'s 2026-07-17 open item — FTP/SSH/Telnet, ports 20-23, were colliding into one log-bucket embedding row) has been reimplemented directly on `master`: `src/trench_ids/model/rhgnn.py`'s `port_embedding_index`/`port_embedding_size` give ports 0-1023 an exact `nn.Embedding` row each, with the sparse 1024-65535 tail still log-bucketed (`configs/model.yaml: port_tail_buckets: 32`, unchanged). This is now the only port-embedding scheme in the codebase — there is no config flag to fall back to pure log-bucketing.
+
+### 24.1 Same-seed, same-hydra-config comparison (`runs/replay_seed2` vs. `runs/replay_seed2_newport`)
+
+**Caveat on what's actually verified**: the port embedding scheme (`port_embedding_index`/`port_embedding_size` in `rhgnn.py`) is hardcoded, not a Hydra config field — both runs' `hydra/.hydra/config.yaml`/`overrides.yaml` are identical (`train.seed=2`, `replay.enabled=true`, all `ewc.lambda_*=0`; `paths.out_dir` differs only in the label, and `replay_seed2_newport`'s own recorded `out_dir` is actually `runs/replay_seed3`, a stale label from before the directory was renamed). Both runs finished on 2026-07-24, about 75 minutes apart, one day before the well-known-port fix's own commit landed on `master` (`30ce5a0`, 2026-07-25) — meaning at the time these ran, the port scheme in `rhgnn.py` was uncommitted working-tree state, not something git history can confirm per-run. **This comparison rests on the directory names and run order being accurate, not on a verified code diff between the two runs.**
+
+Taking that at face value, final (after-T6) per-task accuracy:
+
+| Task | Old scheme (log-bucket only) | New scheme (exact 0-1023) | Δ (new - old) |
+|---|---:|---:|---:|
+| T1 Scanning | 0.807 | 0.813 | +0.006 |
+| T2 Reconnaissance | 0.872 | 0.875 | +0.003 |
+| T3 DDoS+Infiltration | 0.919 | 0.757 | **-0.162** |
+| T4 DoS+Injection | 0.704 | 0.676 | -0.028 |
+| T5 Password+Bot | 0.967 | 0.979 | +0.012 |
+| T6 XSS+BruteForce | 0.986 | 0.989 | +0.003 |
+| **Mean Δ** | | | **-0.028** |
+
+**On this comparison, the metrics favor the old scheme** (mean Δ = -0.028, driven almost entirely by T3's -0.162; T4 also regresses, -0.028). T1/T2/T5/T6 are flat-to-slightly-better under the new scheme, but not enough to offset T3.
+
+### 24.2 Open call, not yet decided — flagged back to the user 2026-07-26
+
+The user's stated criterion was "whichever port-embedding method has the best metrics and has a legit justification." On the one comparison that exists, the metrics point at the *old* scheme, not the new one — this section was drafted assuming the new scheme would win on both counts and needs to be corrected: **it does not currently win on metrics.**
+
+The case for keeping the new scheme anyway is structural, not metric-based: the old scheme has a real information-loss bug (ports 20/21/22/23 — FTP/SSH/Telnet, semantically distinct services — collapse into the same embedding row purely from numeric proximity, and port identity reaches the model through no other feature). Whether T3's -0.162 is a genuine cost of fixing that bug, or a replay/seed-specific interaction (T3 and T4 are the two most class-imbalanced tasks — DDoS:Infiltration ~30:1, DoS:Injection ~1.75:1, §8.3 — where exact-port information could plausibly shift which minority-class flows a small replay buffer retains), is not distinguishable from one seed pair.
+
+**This is an open decision for the user, not a settled one**: keep the new scheme on structural grounds despite worse single-seed-pair metrics, revert to the old scheme since it measures better on the only evidence available, or run a multi-seed (3+) comparison under replay (matching §23.2's protocol) before deciding either way. `master` currently has the new scheme with no config path back to the old one — reverting would require restoring the old `port_embedding_index`/`port_embedding_size` (or the config flag was never built to switch between them).
+
+### 24.3 Test suite
+
+Covered by the same 162-test count as §23.5 (this section documents an experiment result on top of already-merged code, not a separate change): `tests/test_model.py`'s 6 `port_embedding_index`/`port_embedding_size` tests (§23.5) exercise the well-known/tail-bucket boundary behavior directly. Nothing in the test suite exercises the replay-vs-EWC-vs-port-scheme *comparison* itself (§24.1) — that's a real-data experiment, not something the unit tests assert on.
+
+Source: `src/trench_ids/model/rhgnn.py`, `runs/replay_seed2/`, `runs/replay_seed2_newport/` (gitignored, reproduce via `python -m trench_ids.cl.train train.seed=2 replay.enabled=true ewc.lambda_r=0 ewc.lambda_s=0 ewc.lambda_u=0 paths.out_dir=runs/<name>` before/after the `rhgnn.py` port-embedding change), `scripts/make_port_figures.py`, `runs/figures/port_collision_before_after.png`, `runs/figures/port_scheme_per_task_comparison.png`.
+
+---
+
+## 25. Open items after the replay/joint/port round
+
+Precisely what remains, so this doesn't get re-litigated from scratch next round:
+
+1. **Multi-seed the plain-fine-tuning and EWC conditions** (§23.4's blank/single-seed rows) — currently only replay has 3-seed statistics; the "0.7054 ≈ 0.7103 ≈ 0.7108, indistinguishable" claim (§17.4) would benefit from the same seed coverage before being stated as settled fact in a paper, though §17's 5-order-of-magnitude lambda sweep and §23.1's hyperparameter sweep already give it strong indirect support.
+2. **Step 10's third bullet** — prediction on genuinely unseen (out-of-benchmark) traffic — remains explicitly deferred; §19-20 (Step 10a) cover only the transferability-analysis pieces of Step 10, not a standalone prediction deliverable.
+3. **Port-scheme decision** (§24.2) — currently open, not settled: the one comparison that exists favors the *old* scheme on metrics (mean Δ -0.028, driven by T3 -0.162), but `master` currently ships the new scheme with no config path back. Needs a user decision (keep on structural grounds / revert to the metric-favored scheme / run a 3-seed replay comparison first) before this can be called resolved either way.
+4. **`benign_ratio` resweep against the replay regime** — the 2.0/3.0/4.0 sweep (§6-7) was produced during Step 2 to check graph construction, but every Step 4+ training run since (EWC, replay, joint, port comparison) has used only `benign_ratio=3.0`. Deciding a winner was always deferred to "once real CL metrics exist" (`CLAUDE.md`) — those now exist, but only for one ratio; revisiting under the replay regime (now the more relevant regime than plain EWC) hasn't been done.
+5. **The manuscript itself** — `TRENCH-IDS_Project_Summary.pdf` (2026-07-24) is a project-summary/status report, built from the real numbers in §23-24 (cross-checked against source JSON files during this reconciliation, all consistent), not a paper draft. No manuscript exists yet.
