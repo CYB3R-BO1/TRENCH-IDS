@@ -96,5 +96,8 @@ def save_memory_bank(bank: dict[str, dict[str, torch.Tensor]], path: Path) -> No
     torch.save(bank, path)
 
 
-def load_memory_bank(path: Path) -> dict[str, dict[str, torch.Tensor]]:
-    return torch.load(path, weights_only=False)  # trusted, first-party output
+def load_memory_bank(
+    path: Path, map_location: torch.device | str | None = None
+) -> dict[str, dict[str, torch.Tensor]]:
+    # trusted, first-party output
+    return torch.load(path, map_location=map_location, weights_only=False)

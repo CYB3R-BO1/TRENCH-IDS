@@ -178,7 +178,7 @@ def run(
                 model, graphs, device, batch_size
             )
 
-    bank = load_memory_bank(Path(memory_bank_path))
+    bank = load_memory_bank(Path(memory_bank_path), map_location=device)
     dataset_b_similarity = similarity_report(dataset_b_means, bank)
 
     (out_dir / "dataset_a_metrics.json").write_text(json.dumps(dataset_a, indent=2))
