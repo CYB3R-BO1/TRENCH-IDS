@@ -6,10 +6,9 @@ import json
 from pathlib import Path
 
 import pandas as pd
-import pytest
 import torch
 
-from trench_ids.unseen_graphs import build_unseen_graphs, check_vocab_coverage, run
+from trench_ids.unseen_graphs import build_unseen_graphs, drop_vocab_gaps, run
 
 FEATURES = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
 
@@ -34,23 +33,37 @@ def _frame(canonical_label: str, n: int) -> pd.DataFrame:
     })
 
 
-def test_check_vocab_coverage_passes_when_all_values_known() -> None:
+def test_drop_vocab_gaps_passes_when_all_values_known() -> None:
     frame = _frame("Benign", 2)
-    check_vocab_coverage(frame, _vocab())  # must not raise
+    filtered, dropped = drop_vocab_gaps(frame, _vocab())
+    assert len(filtered) == 2
+    assert dropped == 0
 
 
-def test_check_vocab_coverage_raises_on_unknown_protocol() -> None:
-    frame = _frame("Benign", 1)
-    frame["PROTOCOL"] = [999]
-    with pytest.raises(ValueError, match="PROTOCOL"):
-        check_vocab_coverage(frame, _vocab())
+def test_drop_vocab_gaps_drops_unknown_protocol() -> None:
+    frame = _frame("Benign", 3)
+    frame.loc[1, "PROTOCOL"] = 999  # unknown protocol
+    filtered, dropped = drop_vocab_gaps(frame, _vocab())
+    assert len(filtered) == 2
+    assert dropped == 1
+
+
+def test_drop_vocab_gaps_drops_unknown_l7_proto() -> None:
+    frame = _frame("Benign", 3)
+    frame.loc[2, "L7_PROTO"] = 999  # unknown L7_PROTO
+    filtered, dropped = drop_vocab_gaps(frame, _vocab())
+    assert len(filtered) == 2
+    assert dropped == 1
 
 
 def test_build_unseen_graphs_known_class_keeps_real_label() -> None:
     frame = _frame("Reconnaissance", 3)
-    graphs_and_counts = build_unseen_graphs(frame, FEATURES, _vocab(), graph_size=300)
+    graphs_and_counts, vocab_gap_dropped = build_unseen_graphs(
+        frame, FEATURES, _vocab(), graph_size=300
+    )
 
     assert len(graphs_and_counts) == 1
+    assert vocab_gap_dropped == 0
     graph, counts = graphs_and_counts[0]
     assert graph["flow"].true_label == ["Reconnaissance"] * 3
     # Reconnaissance is a known class -- y must be its real global index,
@@ -60,8 +73,11 @@ def test_build_unseen_graphs_known_class_keeps_real_label() -> None:
 
 def test_build_unseen_graphs_unknown_class_gets_sentinel_y() -> None:
     frame = _frame("Backdoor", 3)
-    graphs_and_counts = build_unseen_graphs(frame, FEATURES, _vocab(), graph_size=300)
+    graphs_and_counts, vocab_gap_dropped = build_unseen_graphs(
+        frame, FEATURES, _vocab(), graph_size=300
+    )
 
+    assert vocab_gap_dropped == 0
     graph, counts = graphs_and_counts[0]
     assert graph["flow"].true_label == ["Backdoor"] * 3
     assert (graph["flow"].y == -1).all()
@@ -70,8 +86,11 @@ def test_build_unseen_graphs_unknown_class_gets_sentinel_y() -> None:
 
 def test_build_unseen_graphs_chunks_by_graph_size() -> None:
     frame = _frame("Backdoor", 5)
-    graphs_and_counts = build_unseen_graphs(frame, FEATURES, _vocab(), graph_size=2)
+    graphs_and_counts, vocab_gap_dropped = build_unseen_graphs(
+        frame, FEATURES, _vocab(), graph_size=2
+    )
 
+    assert vocab_gap_dropped == 0
     assert len(graphs_and_counts) == 3  # chunks of 2, 2, 1
     total_flows = sum(g["flow"].y.shape[0] for g, _ in graphs_and_counts)
     assert total_flows == 5
