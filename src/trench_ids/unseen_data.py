@@ -46,19 +46,25 @@ def _consolidate_parts(
     original_cols: list[str],
     sample_cap: int,
     rng: np.random.Generator,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, int, bool]:
     """Consolidate and downsample accumulated parts to manage memory during
-    streaming. Returns a single downsampled frame to reset parts."""
+    streaming. Returns (frame, corrupted_rows_dropped, was_sampled)."""
     if not parts:
-        return pd.DataFrame(
-            columns=original_cols + ["flow_id", "source_dataset", "canonical_label"]
+        return (
+            pd.DataFrame(
+                columns=original_cols + ["flow_id", "source_dataset", "canonical_label"]
+            ),
+            0,
+            False,
         )
     frame = pd.concat(parts, ignore_index=True)
-    frame, _ = _drop_corrupted_rows(frame, original_cols)
+    frame, corrupted_dropped = _drop_corrupted_rows(frame, original_cols)
+    was_sampled = False
     if len(frame) > sample_cap:
         seed = int(rng.integers(0, 2**31 - 1))
         frame = frame.sample(n=sample_cap, random_state=seed).reset_index(drop=True)
-    return frame
+        was_sampled = True
+    return frame, corrupted_dropped, was_sampled
 
 
 def extract_unseen_class(
@@ -90,6 +96,8 @@ def extract_unseen_class(
 
     parts: list[pd.DataFrame] = []
     rows_found_total = 0
+    corrupted_dropped_total = 0
+    sampled_total = False
     consolidation_threshold = (
         max(sample_cap * 20, sample_cap) if sample_cap is not None else None
     )
@@ -116,11 +124,12 @@ def extract_unseen_class(
         if consolidation_threshold is not None:
             accumulated_rows = sum(len(p) for p in parts)
             if accumulated_rows > consolidation_threshold:
-                parts = [
-                    _consolidate_parts(
-                        parts, original_cols, sample_cap, rng  # type: ignore
-                    )
-                ]
+                consolidated_frame, corrupted_dropped, was_sampled = _consolidate_parts(
+                    parts, original_cols, sample_cap, rng  # type: ignore
+                )
+                parts = [consolidated_frame]
+                corrupted_dropped_total += corrupted_dropped
+                sampled_total = sampled_total or was_sampled
 
     if parts:
         frame = pd.concat(parts, ignore_index=True)
@@ -131,8 +140,9 @@ def extract_unseen_class(
 
     rows_found = rows_found_total
     frame, corrupted_dropped = _drop_corrupted_rows(frame, original_cols)
+    corrupted_dropped_total += corrupted_dropped
 
-    sampled = False
+    sampled = sampled_total
     if sample_cap is not None and len(frame) > sample_cap:
         seed = int(rng.integers(0, 2**31 - 1))
         frame = frame.sample(n=sample_cap, random_state=seed).reset_index(drop=True)
@@ -143,7 +153,7 @@ def extract_unseen_class(
         "dataset": dataset_dir,
         "dataset_code": dataset_code,
         "rows_found": rows_found,
-        "corrupted_rows_dropped": corrupted_dropped,
+        "corrupted_rows_dropped": corrupted_dropped_total,
         "rows_kept": len(frame),
         "sampled": sampled,
         "sample_cap": sample_cap,

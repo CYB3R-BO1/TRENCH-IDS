@@ -121,32 +121,58 @@ def test_extract_unseen_class_skips_unmapped_labels(tmp_path: Path) -> None:
     assert manifest_entry["rows_kept"] == 3
 
 
-def test_extract_unseen_class_bounds_memory_with_periodic_consolidation(
-    tmp_path: Path,
-) -> None:
-    # Test that periodic consolidation bounds memory usage during streaming.
-    # Creates 600+ rows spread across many chunks with a small sample_cap,
-    # forcing periodic consolidation to keep peak memory bounded.
-    # Without periodic consolidation, all 600 rows would accumulate in memory;
-    # with it, peak is bounded to roughly cap * 20 (500 rows in this case).
+def test_extract_unseen_class_tracks_sampled_cumulatively(tmp_path: Path) -> None:
+    # Catches Finding 1: sampled should be True if ANY downsampling occurred
+    # (periodic consolidation OR final downsample), not just based on final frame size.
+    # With 525 rows, chunk_size=105, sample_cap=25:
+    # - 5 chunks of 105 rows each → consolidation triggers after chunk 5 → downsamples to 25
+    # - Final frame is exactly 25 rows (no additional final downsample)
+    # - Old buggy code: final check sees 25 > 25? No → sampled=False (WRONG!)
+    # - Fixed code: sampled_total=True from consolidation → sampled=True (CORRECT!)
     root = tmp_path / "raw"
-    _write_csv(root, "NF-BoT-IoT-v2", _rows("ddos", 600))
+    _write_csv(root, "NF-BoT-IoT-v2", _rows("ddos", 525))
     rng = np.random.default_rng(42)
 
     frame, manifest_entry = extract_unseen_class(
         root, "NF-BoT-IoT-v2", "BoT", "DDoS",
-        chunk_size=50,  # small chunks to force many iterations
-        sample_cap=25,  # triggers consolidation threshold at 500 rows
+        chunk_size=105,
+        sample_cap=25,
         rng=rng,
     )
 
-    # Final output should be exactly sample_cap rows (even though 600 were found)
     assert len(frame) == 25
-    assert manifest_entry["rows_found"] == 600
+    assert manifest_entry["rows_found"] == 525
     assert manifest_entry["rows_kept"] == 25
+    # This is the key assertion that would fail with the old buggy code
     assert manifest_entry["sampled"] is True
-    # All rows should have the target canonical label
-    assert set(frame["canonical_label"]) == {"DDoS"}
+
+
+def test_extract_unseen_class_tracks_corrupted_cumulatively(tmp_path: Path) -> None:
+    # Catches Finding 2: corrupted_rows_dropped should count ALL corrupted rows
+    # across all consolidation cycles, not just the final frame.
+    # Create 500+ rows with an inf value in an early chunk that gets consolidated,
+    # plus normal rows after. The early inf should be counted in corrupted_rows_dropped.
+    root = tmp_path / "raw"
+    early_rows = _rows("ddos", 100)
+    # Insert one corrupted row
+    early_rows.append({"IN_BYTES": float("inf"), "Attack": "ddos"})
+    # Add enough rows to trigger consolidation (threshold is 500 with sample_cap=25)
+    later_rows = _rows("ddos", 450)
+    _write_csv(root, "NF-BoT-IoT-v2", early_rows + later_rows)
+    rng = np.random.default_rng(42)
+
+    frame, manifest_entry = extract_unseen_class(
+        root, "NF-BoT-IoT-v2", "BoT", "DDoS",
+        chunk_size=150,
+        sample_cap=25,
+        rng=rng,
+    )
+
+    # The corrupted row should be counted even though it was dropped during
+    # periodic consolidation, not the final consolidation
+    assert manifest_entry["rows_found"] == 551
+    assert manifest_entry["corrupted_rows_dropped"] == 1
+    assert manifest_entry["rows_kept"] == 25
 
 
 def test_run_writes_parquet_and_manifest(tmp_path: Path) -> None:
