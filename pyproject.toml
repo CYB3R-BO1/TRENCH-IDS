@@ -32,6 +32,7 @@ trench-train = "trench_ids.cl.train:main"
 trench-transferability-report = "trench_ids.cl.transferability_report:main"
 trench-infer = "trench_ids.cl.inference:main"
 trench-evaluate = "trench_ids.cl.evaluate:main"
+trench-unseen-data = "trench_ids.unseen_data:main"
 
 [build-system]
 requires = ["hatchling"]
