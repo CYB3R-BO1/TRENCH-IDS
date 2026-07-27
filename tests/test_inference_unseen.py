@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import json as _json
+
 import torch
 from torch_geometric.data import HeteroData
 
@@ -13,6 +15,11 @@ from trench_ids.cl.inference_unseen import (
     similarity_report,
     similarity_rows,
 )
+from trench_ids.cl.inference_unseen import (
+    run as run_inference_unseen,
+)
+from trench_ids.cl.memory_bank import save_memory_bank
+from trench_ids.cl.train import save_checkpoint
 from trench_ids.model.rhgnn import FLOW_FEATURE_DIM, HOST_FEATURE_DIM, RelationSpecificHeteroGNN
 
 
@@ -113,3 +120,79 @@ def test_similarity_rows_flattens_nested_report() -> None:
     assert ("Backdoor", "originates", "Bot", 0.87) in rows
     assert ("Backdoor", "originates", "DoS", 0.1) in rows
     assert len(rows) == 2
+
+
+def test_run_writes_dataset_a_and_dataset_b_outputs(tmp_path) -> None:
+    device = torch.device("cpu")
+    g_known = _tiny_graph()
+    g_known["flow"].y = torch.tensor([0, 1, 0, 1])  # Dataset A: real labels
+    g_known["flow"].true_label = ["Benign", "DoS", "Benign", "DoS"]
+
+    g_unknown = _tiny_graph()  # Dataset B: y already -1 from _tiny_graph()
+    g_unknown["flow"].true_label = ["Backdoor"] * 4
+
+    label_names = ["Benign", "DoS"]
+    model = RelationSpecificHeteroGNN.from_graph(
+        g_known, hidden_dim=8, protocol_vocab_size=1, service_vocab_size=1, num_layers=1,
+    ).to(device)
+    classifier = torch.nn.Linear(8, len(label_names)).to(device)
+    config = {
+        "hidden_dim": 8, "num_layers": 1, "attn_dim": 128, "port_tail_buckets": 32,
+        "protocol_vocab_size": 1, "service_vocab_size": 1, "label_names": label_names,
+    }
+
+    graphs_dir = tmp_path / "graphs"
+    graphs_dir.mkdir()
+    torch.save([g_known], graphs_dir / "task_1_train.pt")
+
+    checkpoint_path = tmp_path / "checkpoint_task_6.pt"
+    save_checkpoint(
+        checkpoint_path, task_id=6, epochs_per_task=1, warmup_epochs=0, seed=42,
+        model=model, classifier=classifier, config=config,
+    )
+
+    unseen_graphs_dir = tmp_path / "unseen_graphs"
+    unseen_graphs_dir.mkdir()
+    torch.save([g_known], unseen_graphs_dir / "UNSW_dos.pt")
+    torch.save([g_unknown], unseen_graphs_dir / "ToN_backdoor.pt")
+
+    manifest = {
+        "classes": {
+            "UNSW_dos": {"canonical_label": "DoS", "evaluation_type": "seen_class_unseen_samples"},
+            "ToN_backdoor": {"canonical_label": "Backdoor", "evaluation_type": "unseen_class"},
+        }
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(_json.dumps(manifest))
+
+    bank = {"DoS": {r: torch.randn(8) for r in
+        ["originates", "terminated_by", "targeted_by", "protocol_of", "service_of"]}}
+    bank_path = tmp_path / "memory_bank.pt"
+    save_memory_bank(bank, bank_path)
+
+    out_dir = tmp_path / "unseen_eval"
+
+    result = run_inference_unseen(
+        checkpoint_path=checkpoint_path,
+        graphs_dir_for_schema=graphs_dir,
+        unseen_graphs_dir=unseen_graphs_dir,
+        unseen_manifest_path=manifest_path,
+        memory_bank_path=bank_path,
+        out_dir=out_dir,
+        device=device,
+        batch_size=2,
+    )
+
+    assert (out_dir / "dataset_a_metrics.json").exists()
+    assert (out_dir / "dataset_b_predictions.json").exists()
+    assert (out_dir / "dataset_b_predictions.csv").exists()
+    assert (out_dir / "dataset_b_confidence.json").exists()
+    assert (out_dir / "dataset_b_confidence.csv").exists()
+    assert (out_dir / "dataset_b_similarity.json").exists()
+    assert (out_dir / "dataset_b_similarity.csv").exists()
+
+    assert result["dataset_a"][0]["slug"] == "UNSW_dos"
+    assert "accuracy" in result["dataset_a"][0]["metrics"]
+    assert "ToN_backdoor" in result["dataset_b_predictions"]
+    assert "ToN_backdoor" in result["dataset_b_confidence"]
+    assert "Backdoor" in result["dataset_b_similarity"]

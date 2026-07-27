@@ -140,3 +140,120 @@ def similarity_rows(
         for relation, by_known_class in by_relation.items()
         for known_class, cosine in by_known_class.items()
     ]
+
+
+def run(
+    checkpoint_path: Path,
+    graphs_dir_for_schema: Path,
+    unseen_graphs_dir: Path,
+    unseen_manifest_path: Path,
+    memory_bank_path: Path,
+    out_dir: Path,
+    device: torch.device,
+    batch_size: int,
+) -> dict[str, Any]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest = json.loads(Path(unseen_manifest_path).read_text())
+    model, classifier, checkpoint = load_checkpoint(
+        Path(checkpoint_path), Path(graphs_dir_for_schema), device
+    )
+    label_names = checkpoint["config"]["label_names"]
+
+    dataset_a: list[dict[str, Any]] = []
+    dataset_b_predictions: dict[str, Any] = {}
+    dataset_b_confidence: dict[str, Any] = {}
+    dataset_b_means: dict[str, dict[str, torch.Tensor]] = {}
+
+    for slug, entry in manifest["classes"].items():
+        graphs = torch.load(Path(unseen_graphs_dir) / f"{slug}.pt", weights_only=False)
+        result = predict(model, classifier, graphs, device, batch_size, label_names)
+
+        if entry["evaluation_type"] == "seen_class_unseen_samples":
+            metrics = compute_metrics(result["y_true"], result["y_pred"], label_names)
+            dataset_a.append({"slug": slug, **entry, "metrics": metrics})
+        else:
+            dataset_b_predictions[slug] = prediction_distribution(result["y_pred"], label_names)
+            dataset_b_confidence[slug] = confidence_stats(result["y_prob"])
+            dataset_b_means[entry["canonical_label"]] = compute_class_relation_means(
+                model, graphs, device, batch_size
+            )
+
+    bank = load_memory_bank(Path(memory_bank_path))
+    dataset_b_similarity = similarity_report(dataset_b_means, bank)
+
+    (out_dir / "dataset_a_metrics.json").write_text(json.dumps(dataset_a, indent=2))
+    (out_dir / "dataset_b_predictions.json").write_text(json.dumps(dataset_b_predictions, indent=2))
+    (out_dir / "dataset_b_confidence.json").write_text(json.dumps(dataset_b_confidence, indent=2))
+    (out_dir / "dataset_b_similarity.json").write_text(json.dumps(dataset_b_similarity, indent=2))
+
+    with open(out_dir / "dataset_b_predictions.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["unseen_class", "predicted_class", "percentage"])
+        for slug, rows in dataset_b_predictions.items():
+            for row in rows:
+                writer.writerow([slug, row["predicted_class"], row["percentage"]])
+
+    with open(out_dir / "dataset_b_confidence.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            ["unseen_class", "mean_max_softmax", "median_max_softmax", "std_max_softmax"]
+        )
+        for slug, stats in dataset_b_confidence.items():
+            writer.writerow(
+                [
+                    slug,
+                    stats["mean_max_softmax"],
+                    stats["median_max_softmax"],
+                    stats["std_max_softmax"],
+                ]
+            )
+
+    with open(out_dir / "dataset_b_similarity.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["unseen_class", "relation", "known_class", "cosine_similarity"])
+        for row in similarity_rows(dataset_b_similarity):
+            writer.writerow(row)
+
+    return {
+        "dataset_a": dataset_a,
+        "dataset_b_predictions": dataset_b_predictions,
+        "dataset_b_confidence": dataset_b_confidence,
+        "dataset_b_similarity": dataset_b_similarity,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Step 10 -- unseen-attack inference.")
+    parser.add_argument(
+        "--checkpoint", default="runs/replay_seed42_newport/checkpoint_task_6.pt"
+    )
+    parser.add_argument("--graphs-dir", default="data/graphs")
+    parser.add_argument("--unseen-graphs-dir", default="data/unseen/graphs")
+    parser.add_argument("--unseen-manifest", default="data/unseen/manifest.json")
+    parser.add_argument("--memory-bank", default="runs/replay_seed42_newport/memory_bank.pt")
+    parser.add_argument("--out-dir", default="runs/unseen_eval")
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--device", default="auto")
+    args = parser.parse_args()
+
+    device = (
+        torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if args.device == "auto"
+        else torch.device(args.device)
+    )
+
+    run(
+        checkpoint_path=Path(args.checkpoint),
+        graphs_dir_for_schema=Path(args.graphs_dir),
+        unseen_graphs_dir=Path(args.unseen_graphs_dir),
+        unseen_manifest_path=Path(args.unseen_manifest),
+        memory_bank_path=Path(args.memory_bank),
+        out_dir=Path(args.out_dir),
+        device=device,
+        batch_size=args.batch_size,
+    )
+    print(f"Wrote results to {args.out_dir}")
+
+
+if __name__ == "__main__":
+    main()

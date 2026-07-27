@@ -34,6 +34,7 @@ trench-infer = "trench_ids.cl.inference:main"
 trench-evaluate = "trench_ids.cl.evaluate:main"
 trench-unseen-data = "trench_ids.unseen_data:main"
 trench-unseen-graphs = "trench_ids.unseen_graphs:main"
+trench-infer-unseen = "trench_ids.cl.inference_unseen:main"
 
 [build-system]
 requires = ["hatchling"]
