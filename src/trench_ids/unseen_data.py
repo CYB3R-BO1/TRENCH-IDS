@@ -41,6 +41,26 @@ from trench_ids.labels import RAW_TO_CANONICAL
 from trench_ids.preprocess import _dataset_csv, _drop_corrupted_rows, _map_canonical
 
 
+def _consolidate_parts(
+    parts: list[pd.DataFrame],
+    original_cols: list[str],
+    sample_cap: int,
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    """Consolidate and downsample accumulated parts to manage memory during
+    streaming. Returns a single downsampled frame to reset parts."""
+    if not parts:
+        return pd.DataFrame(
+            columns=original_cols + ["flow_id", "source_dataset", "canonical_label"]
+        )
+    frame = pd.concat(parts, ignore_index=True)
+    frame, _ = _drop_corrupted_rows(frame, original_cols)
+    if len(frame) > sample_cap:
+        seed = int(rng.integers(0, 2**31 - 1))
+        frame = frame.sample(n=sample_cap, random_state=seed).reset_index(drop=True)
+    return frame
+
+
 def extract_unseen_class(
     raw_dir: Path,
     dataset_dir: str,
@@ -61,11 +81,19 @@ def extract_unseen_class(
     "evaluation_type"/"used_in_training"/"output_path" keys yet; run()
     adds those since they're a property of the config entry, not of the
     extraction itself.
+
+    To bound memory during streaming of large CSVs, periodically consolidates
+    and downsamples accumulated rows when sample_cap is set.
     """
     csv_path = _dataset_csv(raw_dir, dataset_dir)
     original_cols = list(pd.read_csv(csv_path, nrows=0).columns)
 
     parts: list[pd.DataFrame] = []
+    rows_found_total = 0
+    consolidation_threshold = (
+        max(sample_cap * 20, sample_cap) if sample_cap is not None else None
+    )
+
     for chunk in pd.read_csv(csv_path, chunksize=chunk_size):
         # Pre-filter to only rows with raw Attack labels in RAW_TO_CANONICAL
         # to avoid UnknownAttackLabel errors on unmapped labels (e.g., UNSW-NB15's
@@ -82,6 +110,17 @@ def extract_unseen_class(
         matched["source_dataset"] = dataset_code
         matched["canonical_label"] = canonical_label
         parts.append(matched)
+        rows_found_total += len(matched)
+
+        # Periodic consolidation to bound memory when sample_cap is set
+        if consolidation_threshold is not None:
+            accumulated_rows = sum(len(p) for p in parts)
+            if accumulated_rows > consolidation_threshold:
+                parts = [
+                    _consolidate_parts(
+                        parts, original_cols, sample_cap, rng  # type: ignore
+                    )
+                ]
 
     if parts:
         frame = pd.concat(parts, ignore_index=True)
@@ -90,7 +129,7 @@ def extract_unseen_class(
             columns=original_cols + ["flow_id", "source_dataset", "canonical_label"]
         )
 
-    rows_found = len(frame)
+    rows_found = rows_found_total
     frame, corrupted_dropped = _drop_corrupted_rows(frame, original_cols)
 
     sampled = False

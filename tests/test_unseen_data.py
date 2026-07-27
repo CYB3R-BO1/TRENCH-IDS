@@ -121,6 +121,34 @@ def test_extract_unseen_class_skips_unmapped_labels(tmp_path: Path) -> None:
     assert manifest_entry["rows_kept"] == 3
 
 
+def test_extract_unseen_class_bounds_memory_with_periodic_consolidation(
+    tmp_path: Path,
+) -> None:
+    # Test that periodic consolidation bounds memory usage during streaming.
+    # Creates 600+ rows spread across many chunks with a small sample_cap,
+    # forcing periodic consolidation to keep peak memory bounded.
+    # Without periodic consolidation, all 600 rows would accumulate in memory;
+    # with it, peak is bounded to roughly cap * 20 (500 rows in this case).
+    root = tmp_path / "raw"
+    _write_csv(root, "NF-BoT-IoT-v2", _rows("ddos", 600))
+    rng = np.random.default_rng(42)
+
+    frame, manifest_entry = extract_unseen_class(
+        root, "NF-BoT-IoT-v2", "BoT", "DDoS",
+        chunk_size=50,  # small chunks to force many iterations
+        sample_cap=25,  # triggers consolidation threshold at 500 rows
+        rng=rng,
+    )
+
+    # Final output should be exactly sample_cap rows (even though 600 were found)
+    assert len(frame) == 25
+    assert manifest_entry["rows_found"] == 600
+    assert manifest_entry["rows_kept"] == 25
+    assert manifest_entry["sampled"] is True
+    # All rows should have the target canonical label
+    assert set(frame["canonical_label"]) == {"DDoS"}
+
+
 def test_run_writes_parquet_and_manifest(tmp_path: Path) -> None:
     root = tmp_path / "raw"
     _write_csv(root, "NF-ToN-IoT-v2", _rows("backdoor", 3) + _rows("Benign", 2))
