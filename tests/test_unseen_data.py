@@ -6,7 +6,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from trench_ids.unseen_data import extract_unseen_class, run
 
@@ -95,6 +94,31 @@ def test_extract_unseen_class_bypasses_class_datasets_restriction(tmp_path: Path
     )
 
     assert len(frame) == 4
+
+
+def test_extract_unseen_class_skips_unmapped_labels(tmp_path: Path) -> None:
+    # Unmapped labels (e.g., UNSW-NB15's Exploits, Fuzzers) should not cause
+    # extract_unseen_class to crash; they should be silently skipped. This
+    # reproduces the critical bug fix: pre-filtering to RAW_TO_CANONICAL.
+    root = tmp_path / "raw"
+    rows = (
+        _rows("Exploits", 2)  # unmapped, not in RAW_TO_CANONICAL
+        + _rows("dos", 3)     # mapped, in RAW_TO_CANONICAL
+        + _rows("Fuzzers", 1)  # unmapped
+    )
+    _write_csv(root, "NF-UNSW-NB15-v2", rows)
+    rng = np.random.default_rng(1)
+
+    frame, manifest_entry = extract_unseen_class(
+        root, "NF-UNSW-NB15-v2", "UNSW", "DoS",
+        chunk_size=10, sample_cap=None, rng=rng,
+    )
+
+    # Should extract only the mapped dos/DoS rows, not crash on Exploits/Fuzzers
+    assert len(frame) == 3
+    assert set(frame["canonical_label"]) == {"DoS"}
+    assert manifest_entry["rows_found"] == 3
+    assert manifest_entry["rows_kept"] == 3
 
 
 def test_run_writes_parquet_and_manifest(tmp_path: Path) -> None:

@@ -37,6 +37,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from trench_ids.labels import RAW_TO_CANONICAL
 from trench_ids.preprocess import _dataset_csv, _drop_corrupted_rows, _map_canonical
 
 
@@ -66,6 +67,12 @@ def extract_unseen_class(
 
     parts: list[pd.DataFrame] = []
     for chunk in pd.read_csv(csv_path, chunksize=chunk_size):
+        # Pre-filter to only rows with raw Attack labels in RAW_TO_CANONICAL
+        # to avoid UnknownAttackLabel errors on unmapped labels (e.g., UNSW-NB15's
+        # Exploits, Fuzzers, etc. which aren't used for training).
+        chunk = chunk[chunk["Attack"].isin(RAW_TO_CANONICAL)]
+        if chunk.empty:
+            continue
         canon = _map_canonical(chunk["Attack"])
         match = (canon == canonical_label).to_numpy()
         if not match.any():
