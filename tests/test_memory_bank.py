@@ -3,7 +3,12 @@ from __future__ import annotations
 import pytest
 import torch
 
-from trench_ids.cl.memory_bank import RelationMeanAccumulator, merge_into_bank
+from trench_ids.cl.memory_bank import (
+    RelationMeanAccumulator,
+    load_memory_bank,
+    merge_into_bank,
+    save_memory_bank,
+)
 
 
 def test_relation_mean_accumulator_matches_hand_computed_means() -> None:
@@ -73,3 +78,15 @@ def test_merge_into_bank_rejects_duplicate_class() -> None:
 
     with pytest.raises(ValueError, match="already in the memory bank"):
         merge_into_bank(bank, new_means)
+
+
+def test_load_memory_bank_accepts_map_location(tmp_path) -> None:
+    bank = {"DDoS": {"originates": torch.tensor([1.0, 2.0])}}
+    path = tmp_path / "memory_bank.pt"
+    save_memory_bank(bank, path)
+
+    loaded = load_memory_bank(path, map_location="cpu")
+
+    assert set(loaded.keys()) == {"DDoS"}
+    assert torch.allclose(loaded["DDoS"]["originates"], torch.tensor([1.0, 2.0]))
+    assert loaded["DDoS"]["originates"].device == torch.device("cpu")

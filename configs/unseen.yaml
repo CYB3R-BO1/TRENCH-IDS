@@ -1,0 +1,47 @@
+seed: 42
+paths:
+  raw_dir: dataset
+  out_dir: data/unseen
+chunk_size: 500000
+sample_cap: 5000
+classes:
+  # Dataset B -- unseen attack classes (no CLASS_DATASETS entry at all)
+  - canonical_label: Backdoor
+    dataset_dir: NF-ToN-IoT-v2
+    dataset_code: ToN
+    evaluation_type: unseen_class
+  - canonical_label: MITM
+    dataset_dir: NF-ToN-IoT-v2
+    dataset_code: ToN
+    evaluation_type: unseen_class
+  - canonical_label: Ransomware
+    dataset_dir: NF-ToN-IoT-v2
+    dataset_code: ToN
+    evaluation_type: unseen_class
+  - canonical_label: Web Attacks
+    dataset_dir: NF-CSE-CIC-IDS2018-v2
+    dataset_code: CSE
+    evaluation_type: unseen_class
+  - canonical_label: Theft
+    dataset_dir: NF-BoT-IoT-v2
+    dataset_code: BoT
+    evaluation_type: unseen_class
+  # Dataset A -- seen classes, unseen samples (CLASS_DATASETS-disallowed
+  # source for a class the model already knows, or a dataset never opened
+  # by trench_ids.preprocess at all)
+  - canonical_label: DDoS
+    dataset_dir: NF-BoT-IoT-v2
+    dataset_code: BoT
+    evaluation_type: seen_class_unseen_samples
+  - canonical_label: DoS
+    dataset_dir: NF-BoT-IoT-v2
+    dataset_code: BoT
+    evaluation_type: seen_class_unseen_samples
+  - canonical_label: Reconnaissance
+    dataset_dir: NF-UNSW-NB15-v2
+    dataset_code: UNSW
+    evaluation_type: seen_class_unseen_samples
+  - canonical_label: DoS
+    dataset_dir: NF-UNSW-NB15-v2
+    dataset_code: UNSW
+    evaluation_type: seen_class_unseen_samples
