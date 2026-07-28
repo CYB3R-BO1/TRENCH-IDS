@@ -906,3 +906,96 @@ The accuracy-forgetting average (0.7054) reproduces §16.1/§17.4 exactly, an in
 **157 tests passing** (`.venv/Scripts/python.exe -m pytest -q`, 0 failures) — up from 146 (§19.5) with `tests/test_inference.py` (3 tests: well-formed `predict()` output, real checkpoint save/load/predict round trip, `checkpoint_version` rejection) and `tests/test_evaluate.py` (7 tests: `compute_metrics` including a never-predicted/never-true-class edge case with hand-verified precision/recall/F1 arithmetic, `pool_predictions` including a label-name-mismatch rejection, `forgetting_metrics_table` flattening/sorting, `build_eval_matrix`/`run()` end-to-end against synthetic checkpoints, and writer/plot smoke tests). One new test in `tests/test_train.py` (`save_checkpoint` round-trip: dict shape, then loads its `model_state_dict`/`classifier_state_dict` into fresh modules with no error). `ruff check src tests` passes clean.
 
 Source: `src/trench_ids/cl/inference.py`, `src/trench_ids/cl/evaluate.py`, `src/trench_ids/cl/train.py` (`save_checkpoint`, wired into `main()`), `pyproject.toml` (scikit-learn dependency, `trench-infer`/`trench-evaluate` entry points — the latter has the Hydra-resolution issue noted above under real-run reproduction, use `python -m trench_ids.cl.evaluate` instead). Implemented via subagent-driven-development, 7 tasks, 7 commits, all task reviews clean on first pass with no fix rounds required.
+
+## 23. Step 10 — genuinely unseen attack traffic (real run, 2026-07-28)
+
+Deferred third bullet from §22's inference-pipeline work: everything in §22 evaluated the model against held-out *splits of the same processed data it was trained from* (`task_{t}_test.pt`). This step instead pulls fresh rows directly from the raw per-dataset CSVs that were never touched by `preprocess.py`, bypassing `CLASS_DATASETS`'s allow-list filtering entirely (`extract_unseen_class` reuses `_map_canonical`/`_drop_corrupted_rows` but not `_class_allowed`). Design: `docs/superpowers/specs/2026-07-27-unseen-attack-inference-design.md`; plan: `docs/superpowers/plans/2026-07-27-unseen-attack-inference.md`. Two deliberately separate evaluations, agreed with the user across several design-review rounds:
+
+- **Dataset A (seen classes, unseen samples)** — accuracy/F1 generalization test. Reconnaissance + DoS pulled from NF-UNSW-NB15-v2 (a dataset excluded from training entirely) and DDoS + DoS pulled from NF-BoT-IoT-v2 itself, but for canonical classes DDoS/DoS that `CLASS_DATASETS` restricts to training only from ToN-IoT/CSE-CIC-IDS2018 (`src/trench_ids/labels.py:119-120`) — so BoT-IoT's own DDoS/DoS rows were never seen in training despite the class being "known." Ground truth is available; `compute_metrics` (§22) is reused directly.
+- **Dataset B (unseen attack classes)** — behavioral/representation analysis, not accuracy, since these classes have no learned decision boundary at all: Backdoor/MITM/Ransomware (ToN-IoT), Web Attacks (CSE-CIC-IDS2018), Theft (BoT-IoT) — none of `EXCLUDED_CLASSES` was ever part of any task. Reports prediction distribution, softmax-confidence statistics, and cosine similarity of each unseen class's per-relation Flow embedding means against every known class's memory-bank entry.
+
+All extraction/graph-building/inference logic runs new, purpose-built code (`src/trench_ids/unseen_data.py`, `src/trench_ids/unseen_graphs.py`, `src/trench_ids/cl/inference_unseen.py`) that reuses but never modifies §1-2's frozen preprocessing/graph-construction and §4's memory-bank internals, per the plan's explicit constraint. Evaluated against `runs/replay_seed42_newport/checkpoint_task_6.pt` + its memory bank — the validated best forgetting-mitigation checkpoint (experience replay, new port-embedding scheme, avg forgetting ≈0.085-0.094, final accuracy ≈0.87; see §16-17 for the EWC comparison this superseded).
+
+### 23.1 Extraction and graph-build notes
+
+`configs/unseen.yaml` pulled up to 5,000 rows per class (seed 42) directly from the raw CSVs (500K-row chunks). Sampling is exactly uniform across every matching row in the source file via single-pass reservoir sampling (Algorithm R) — an earlier version of this extraction used periodic in-loop downsampling to bound memory against multi-million-row source files (BoT-IoT's raw DDoS/DoS alone total >18M rows before sampling), but the whole-branch final review found that approach was tail-biased for the two highest-volume classes (BoT-IoT's DDoS/DoS: the sample ended up drawn almost entirely from the last ~500K-row chunk of an 18M-row file, not uniformly across it). All numbers below are from the reservoir-sampling re-run, uniform across the full source file for every class. A real, dataset-level PROTOCOL/L7_PROTO vocabulary gap was found and confirmed (not a bug): NF-UNSW-NB15-v2 uses a materially wider `PROTOCOL` value range than the training datasets' 5-value vocabulary (`{1,2,6,17,58}`), so rows whose PROTOCOL/L7_PROTO value never appeared during vocabulary construction (`src/trench_ids/vocab.py`) are dropped rather than crashing graph construction. After the human-approved drop policy:
+
+| Class | Dataset | Rows extracted | Vocab-gap rows dropped | Rows in graphs |
+|---|---|---:|---:|---:|
+| Backdoor | ToN-IoT | 5,000 | 0 | 5,000 |
+| MITM | ToN-IoT | 5,000 | 0 | 5,000 |
+| Ransomware | ToN-IoT | 3,425 | 9 (0.26%) | 3,416 |
+| Web Attacks | CSE-CIC-IDS2018 | 3,070 | 0 | 3,070 |
+| Theft | BoT-IoT | 2,431 | 0 | 2,431 |
+| DDoS | BoT-IoT | 5,000 | 0 | 5,000 |
+| DoS | BoT-IoT | 5,000 | 0 | 5,000 |
+| Reconnaissance | UNSW-NB15 | 5,000 | 641 (12.8%) | 4,359 |
+| DoS | UNSW-NB15 | 5,000 | 1,702 (34.0%) | 3,298 |
+
+**Stated limitation (unresolved, human-approved to leave as-is):** unlike training graphs (`graphs.build_split_graphs`, which shuffle rows and mix in benign traffic at a fixed `benign_ratio` before chunking into mini-graphs, §2), these unseen mini-graphs are built 100% single-class, in raw-file order, with no shuffling and no benign mixing. Host-level features (`total_flows`, `avg_bytes_as_src/dst`, `unique_ports_contacted`) and the `communicates_with` aggregation are computed *within* each mini-graph, so every unseen graph presents host-level feature values and connectivity the model never saw during training, independent of any dataset-specific effect. §23.2's accuracy numbers below should be read with this confound in mind — they are not purely a measurement of cross-dataset class generalization in isolation.
+
+### 23.2 Dataset A — accuracy on unseen samples of "known" classes
+
+`runs/unseen_eval/dataset_a_metrics.json` — full per-class precision/recall/F1/confusion matrix over the model's complete 11-class label space (`"per_class"` key), plus a pooled metric over all 4 Dataset A entries combined (`"pooled"` key, micro-averaged over every sample regardless of class — same convention as §22.1):
+
+**Pooled:** accuracy 0.0008, precision (macro) 0.0911, recall (macro) 0.0002, F1 (macro) 0.0003, precision (weighted) 0.4703, recall (weighted) 0.0008, F1 (weighted) 0.0011. (Precision-macro/weighted look non-trivial only because the handful of correct predictions are never false positives for their class — recall is what shows the real picture.)
+
+| Class | Source dataset | Support | Accuracy | F1 (macro) | F1 (weighted) |
+|---|---|---:|---:|---:|---:|
+| DDoS | NF-BoT-IoT-v2 | 5,000 | 0.0000 | 0.0000 | 0.0000 |
+| DoS | NF-BoT-IoT-v2 | 5,000 | 0.0000 | 0.0000 | 0.0000 |
+| Reconnaissance | NF-UNSW-NB15-v2 | 4,359 | 0.0018 | 0.0003 | 0.0037 |
+| DoS | NF-UNSW-NB15-v2 | 3,298 | 0.0018 | 0.0003 | 0.0036 |
+
+All four are near-total misses, and the confusion matrices show this is not random noise but a consistent, confident mis-mapping:
+
+| True class | Source | Predicted-as | Share |
+|---|---|---|---:|
+| DDoS | BoT-IoT | Reconnaissance | 99.3% |
+| DoS | BoT-IoT | Password | 99.2% |
+| Reconnaissance | UNSW-NB15 | Benign | 81.5% |
+| Reconnaissance | UNSW-NB15 | XSS | 14.2% |
+| DoS | UNSW-NB15 | Benign | 46.8% |
+| DoS | UNSW-NB15 | Password | 36.8% |
+
+These numbers are consistent to within sampling noise (≤0.5 percentage points on every share) against the tail-biased pre-fix run — BoT-IoT's DDoS/DoS behavior is not an artifact of the sampling bug, though see the graph-composition limitation above before treating this as a clean measurement.
+
+**Interpretation:** the model does not generalize a canonical class's semantics across datasets. BoT-IoT's own DDoS/DoS rows — despite DDoS/DoS being "known" classes from ToN-IoT/CSE-CIC-IDS2018 training data — are mapped almost entirely into one wrong class apiece (DDoS→Reconnaissance, DoS→Password) rather than being spread across many classes, suggesting the model is keying on dataset-specific feature distributions (a BoT-IoT "flavor") rather than the attack's netflow-level behavior. UNSW-NB15's Reconnaissance/DoS lean mostly toward Benign, consistent with UNSW-NB15's very different value ranges (§23.1) making its attack traffic look statistically closer to the training datasets' benign traffic than to any of their attack classes. This is a genuine negative finding about cross-dataset generalization, not an inference-pipeline defect — `compute_metrics` is the same function validated against real data in §22 — but it is confounded with the graph-composition limitation noted in §23.1 and should not be over-read as an isolated measurement of class-semantics transfer alone.
+
+### 23.3 Dataset B — behavioral analysis of classes never seen in training
+
+`runs/unseen_eval/dataset_b_predictions.{json,csv}` (full distribution) and `dataset_b_confidence.{json,csv}` (softmax-confidence stats) — both keyed on the unseen-class slug, with `canonical_label`/`unseen_class` emitted as sibling fields so all three Dataset B files below can be joined on a common key:
+
+| Unseen class | Source | Top predicted class(es) | Mean confidence | Median confidence |
+|---|---|---|---:|---:|
+| Backdoor | ToN-IoT | Reconnaissance 60.4%, XSS 38.6% | 0.978 | 0.992 |
+| MITM | ToN-IoT | XSS 72.3%, DoS 24.5% | 0.897 | 0.999 |
+| Ransomware | ToN-IoT | Benign 91.6%, Infiltration 7.2% | 0.972 | 0.993 |
+| Web Attacks | CSE-CIC-IDS2018 | Password 96.3% | 0.991 | 1.000 |
+| Theft | BoT-IoT | Scanning 39.0%, Reconnaissance 31.3%, Benign 20.0% | 0.853 | 0.886 |
+
+Every unseen class collapses onto one or two known classes with high confidence (medians ≥0.89, mostly ≥0.99) — the softmax head is never "unsure" in a way that would flag these as novel/out-of-distribution by confidence alone; it just picks the nearest known class and commits. Theft is the one partial exception (lower mean/median confidence, mass split across three classes rather than one or two), suggesting Theft sits genuinely between several known classes rather than resembling one strongly.
+
+`runs/unseen_eval/dataset_b_similarity.{json,csv}` — cosine similarity of each unseen class's per-relation Flow embedding mean against every known class's memory-bank entry (same-relation-only, as in §15's transferability estimation). Nearest known-class match per relation, most informative relations:
+
+| Unseen class | `protocol_of` nearest | `originates` nearest | `terminated_by` nearest |
+|---|---|---|---|
+| Backdoor | BruteForce (0.945) | XSS (0.911) | BruteForce (0.941) |
+| MITM | XSS (0.880) | Reconnaissance (0.353) | XSS (0.469) |
+| Ransomware | BruteForce (0.945) | Scanning (0.186) | DoS (0.523) |
+| Web Attacks | BruteForce (0.978) | BruteForce (0.869) | BruteForce (0.894) |
+| Theft | BruteForce (0.784) | DDoS (0.584) | BruteForce (0.759) |
+
+`protocol_of` similarity is uniformly high and dominated by BruteForce/XSS across nearly every unseen class — since only 5 protocol values exist in the training vocabulary (§23.1), this relation has limited discriminative power and its similarity numbers should be weighted less than `originates`/`terminated_by`, which vary more by class and better echo the prediction-distribution table above (e.g. Backdoor's `originates` match to XSS lines up with its 38.6% XSS prediction share; MITM's XSS match across `protocol_of`/`terminated_by` lines up with its 72.3% XSS prediction share).
+
+### 23.4 Deliverables and reproduction
+
+`runs/unseen_eval/{dataset_a_metrics.json, dataset_b_predictions.{json,csv}, dataset_b_confidence.{json,csv}, dataset_b_similarity.{json,csv}}` (7 files, all gitignored). Reproduce via `trench-unseen-data` (writes `data/unseen/*.parquet` + `manifest.json`) → `trench-unseen-graphs` (writes `data/unseen/graphs/*.pt` + `graph_counts.json`) → `trench-infer-unseen` (defaults already point at the real checkpoint/memory bank/data paths above; `--device auto` picks CPU on this machine — no GPU needed, unlike training). The two BoT-IoT extraction steps for DDoS/DoS take several minutes each even under reservoir sampling, since the full raw CSV (18M+/16M+ rows) must still be streamed once.
+
+### 23.5 Test suite
+
+**188 tests passing, 1 skipped** (`uv run --active pytest -q`, 0 failures) — up from 157 (§22.5) with `tests/test_unseen_data.py`, `tests/test_unseen_graphs.py`, and `tests/test_inference_unseen.py` covering extraction (label-bypass, corrupted-row dropping, sample-cap, reservoir-sampling uniformity — including a regression test constructed to fail against the old tail-biased consolidation approach), graph construction (vocab-gap dropping, `y=-1` sentinel, `true_label` metadata), and the Dataset A/B analysis functions plus end-to-end orchestration. `tests/test_memory_bank.py` gained one test for the `map_location` passthrough fixed below.
+
+Two real bugs found and fixed only by running against real data (not the synthetic test fixtures), both caught in the same-day whole-branch final review before merge: `load_memory_bank` (`src/trench_ids/cl/memory_bank.py`) didn't accept a `map_location`, so a memory bank saved on a CUDA machine couldn't load on this CPU-only worktree — fixed by adding an optional `map_location` parameter, threaded through from `inference_unseen.run()`'s `device` argument. Separately, the OOM fix's periodic-consolidation memory bound (§23.1) silently made the sample tail-biased for the two highest-volume classes — this only became visible once the branch was reviewed as a whole rather than task-by-task, since the OOM fix and the classes it affected were introduced and reviewed in different sessions weeks apart; fixed by replacing consolidation with single-pass reservoir sampling.
+
+Source: `src/trench_ids/unseen_data.py`, `src/trench_ids/unseen_graphs.py`, `src/trench_ids/cl/inference_unseen.py`, `src/trench_ids/cl/memory_bank.py` (`map_location` fix), `configs/unseen.yaml`, `configs/unseen_graphs.yaml`, `pyproject.toml` (`trench-unseen-data`/`trench-unseen-graphs`/`trench-infer-unseen` entry points). Implemented via subagent-driven-development on branch `worktree-unseen-attack-inference`, 5 tasks plus one whole-branch final-review fix wave; real-data-only bugs found and fixed beyond the plan's original scope: OOM from unbounded row accumulation before sampling, `sampled`/`corrupted_rows_dropped` manifest bookkeeping across multi-cycle consolidation, the vocab-gap raise-vs-drop policy change, the `map_location` fix, the reservoir-sampling replacement for tail-biased consolidation, pooled Dataset A metrics, and joinable Dataset B output keys.
