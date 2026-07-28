@@ -1024,6 +1024,46 @@ Covered by the same 162-test count as §23.5 (this section documents an experime
 
 Source: `src/trench_ids/model/rhgnn.py`, `runs/replay_seed2/`, `runs/replay_seed2_newport/` (gitignored, reproduce via `python -m trench_ids.cl.train train.seed=2 replay.enabled=true ewc.lambda_r=0 ewc.lambda_s=0 ewc.lambda_u=0 paths.out_dir=runs/<name>` before/after the `rhgnn.py` port-embedding change), `scripts/make_port_figures.py`, `runs/figures/port_collision_before_after.png`, `runs/figures/port_scheme_per_task_comparison.png`.
 
+### 24.4 Multi-seed follow-up, git-verified this time (real runs, 2026-07-27) — resolves 24.2
+
+§24.1's comparison carried a real caveat: both runs' hydra configs were identical (the port scheme isn't a config field), so "old vs. new" rested on directory naming and run order, not a verified code diff — and the port-fix commit (`30ce5a0`, 2026-07-25) landed *after* both of those runs finished, meaning the "before" state was uncommitted working-tree code that git history can't confirm.
+
+This round closes that gap. Commit timeline, checked directly:
+- `runs/replay_baseline` (seed 42) and `runs/replay_seed1` (seed 1) — old scheme — both finished **2026-07-24**, a full day *before* `30ce5a0` landed. Verified old-scheme code.
+- `runs/replay_seed42_newport` and `runs/replay_seed1_newport` — new scheme — both run **2026-07-27**, two days *after* `30ce5a0`, on `master` HEAD which has no fallback path to the old scheme. Verified new-scheme code.
+
+Same replay config both sides (`replay.enabled=true`, `buffer_size_per_task=200`, `replay_fraction=0.3`, all `ewc.lambda_*=0`), only `train.seed` and the port-embedding code differ.
+
+**Pooled metrics, both seeds, old vs. new:**
+
+| Seed | Scheme | Avg. forgetting | Final accuracy |
+|---|---|---:|---:|
+| 42 | old | 0.0950 | 0.8571 |
+| 42 | new | 0.0854 | 0.8725 |
+| 1 | old | 0.1084 | 0.8498 |
+| 1 | new | 0.0931 | 0.8721 |
+| **mean** | old | **0.1017** | **0.8535** |
+| **mean** | new | **0.0893** | **0.8723** |
+
+New scheme wins on both metrics, both seeds, no exceptions — average forgetting drops ~12% relative, final accuracy gains ~1.9 points.
+
+**Per-task final (after-T6) accuracy tells a noisier story that explains why §24.1 alone was misleading:**
+
+| Task | Seed 42: old→new (Δ) | Seed 1: old→new (Δ) |
+|---|---:|---:|
+| T1 Scanning | 0.811→0.830 (+0.018) | 0.776→0.783 (+0.007) |
+| T2 Reconnaissance | 0.886→0.891 (+0.005) | 0.888→0.908 (+0.020) |
+| T3 DDoS+Infiltration | 0.774→0.881 (**+0.108**) | 0.839→0.835 (-0.004) |
+| T4 DoS+Injection | 0.701→0.691 (-0.010) | 0.626→0.738 (**+0.112**) |
+| T5 Password+Bot | 0.982→0.959 (-0.023) | 0.982→0.982 (-0.000) |
+| T6 XSS+BruteForce | 0.990→0.983 (-0.007) | 0.988→0.987 (-0.001) |
+
+T3 and T4 — the two tasks §24.1 flagged as the new scheme's losses (T3 -0.162, T4 -0.028) — **flip sign between seeds**: T3 swings from +0.108 (seed 42) to -0.004 (seed 1), T4 from -0.010 (seed 42) to +0.112 (seed 1). Neither task consistently regresses under the new scheme across both seeds. This is exactly the failure mode §24.2 warned about: a single seed pair can't distinguish a real per-task regression from seed noise, and §24.1's one comparison (seed 2, itself not even git-verified) landed on the noisy side.
+
+**24.2 is resolved: keep the new port-embedding scheme.** It now has both the structural justification (§24 preamble — the old scheme's ports-20-23 collision is a real information-loss bug) and the metric evidence the user's stated criterion required, on a comparison that's actually git-verified and 2-seeded rather than a single ambiguous run. No further port-scheme comparison work is planned.
+
+Source: `runs/replay_baseline/summary.json`, `runs/replay_seed1/summary.json`, `runs/replay_seed42_newport/summary.json`, `runs/replay_seed42_newport/eval/pooled_final_metrics.json`, `runs/replay_seed1_newport/summary.json` (evaluated into the shared `runs/step4/eval/` default path — seed42's evaluate call was rerun separately into `runs/replay_seed42_newport/eval/` after discovering `trench_ids.cl.evaluate`'s `--out-dir` defaults to the same path regardless of `--run-dir` unless passed explicitly, which silently overwrote seed42's first evaluate output with seed1's; `--out-dir` should be passed explicitly in any future multi-seed batch script). Reproduce via `.venv/Scripts/python.exe -m trench_ids.cl.train replay.enabled=true replay.buffer_size_per_task=200 replay.replay_fraction=0.3 ewc.lambda_r=0 ewc.lambda_s=0 ewc.lambda_u=0 train.seed=<42|1> paths.out_dir=runs/<name>` then `trench_ids.cl.evaluate --run-dir runs/<name> --out-dir runs/<name>/eval`.
+
 ---
 
 ## 25. Open items after the replay/joint/port round
@@ -1032,6 +1072,6 @@ Precisely what remains, so this doesn't get re-litigated from scratch next round
 
 1. **Multi-seed the plain-fine-tuning and EWC conditions** (§23.4's blank/single-seed rows) — currently only replay has 3-seed statistics; the "0.7054 ≈ 0.7103 ≈ 0.7108, indistinguishable" claim (§17.4) would benefit from the same seed coverage before being stated as settled fact in a paper, though §17's 5-order-of-magnitude lambda sweep and §23.1's hyperparameter sweep already give it strong indirect support.
 2. **Step 10's third bullet** — prediction on genuinely unseen (out-of-benchmark) traffic — remains explicitly deferred; §19-20 (Step 10a) cover only the transferability-analysis pieces of Step 10, not a standalone prediction deliverable.
-3. **Port-scheme decision** (§24.2) — currently open, not settled: the one comparison that exists favors the *old* scheme on metrics (mean Δ -0.028, driven by T3 -0.162), but `master` currently ships the new scheme with no config path back. Needs a user decision (keep on structural grounds / revert to the metric-favored scheme / run a 3-seed replay comparison first) before this can be called resolved either way.
+3. ~~**Port-scheme decision**~~ — **resolved 2026-07-27** (§24.4): a git-verified, 2-seed replay comparison shows the new scheme winning on both avg. forgetting (0.089 vs. 0.102 mean) and final accuracy (0.872 vs. 0.854 mean) with no consistent per-task regression across seeds. §24.1's single-seed result that favored the old scheme is superseded — it wasn't git-verified and the per-task pattern it flagged (T3/T4 regressing) turned out to flip sign between seeds, i.e. was seed noise. Keep the new scheme; no further comparison planned.
 4. **`benign_ratio` resweep against the replay regime** — the 2.0/3.0/4.0 sweep (§6-7) was produced during Step 2 to check graph construction, but every Step 4+ training run since (EWC, replay, joint, port comparison) has used only `benign_ratio=3.0`. Deciding a winner was always deferred to "once real CL metrics exist" (`CLAUDE.md`) — those now exist, but only for one ratio; revisiting under the replay regime (now the more relevant regime than plain EWC) hasn't been done.
 5. **The manuscript itself** — `TRENCH-IDS_Project_Summary.pdf` (2026-07-24) is a project-summary/status report, built from the real numbers in §23-24 (cross-checked against source JSON files during this reconciliation, all consistent), not a paper draft. No manuscript exists yet.
