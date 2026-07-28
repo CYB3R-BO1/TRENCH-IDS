@@ -126,8 +126,55 @@ graph_size: 300
 features: {FEATURES}
 """)
 
-    run(config_path)
+    summary = run(config_path)
 
     graphs = torch.load(out_dir / "ToN_backdoor.pt", weights_only=False)
     assert len(graphs) == 1
     assert graphs[0]["flow"].true_label == ["Backdoor"] * 3
+    assert summary["ToN_backdoor"]["vocab_gap_rows_dropped"] == 0
+
+    counts_on_disk = json.loads((out_dir / "graph_counts.json").read_text())
+    assert counts_on_disk["ToN_backdoor"]["vocab_gap_rows_dropped"] == 0
+
+
+def test_run_reports_vocab_gap_rows_dropped_in_graph_counts(tmp_path: Path) -> None:
+    # Finding #5: vocab_gap_rows_dropped must be wired through run()'s
+    # graph_counts.json summary -- the entire user-visible surface of the
+    # raise-to-drop policy change (see drop_vocab_gaps).
+    unseen_dir = tmp_path / "unseen"
+    unseen_dir.mkdir()
+    frame = _frame("Backdoor", 3)
+    frame.loc[1, "PROTOCOL"] = 999  # not in vocab -> dropped
+    frame.to_parquet(unseen_dir / "ToN_backdoor.parquet", index=False)
+    manifest = {
+        "classes": {
+            "ToN_backdoor": {
+                "canonical_label": "Backdoor",
+                "output_path": str(unseen_dir / "ToN_backdoor.parquet"),
+                "evaluation_type": "unseen_class",
+            }
+        }
+    }
+    (unseen_dir / "manifest.json").write_text(json.dumps(manifest))
+
+    vocab_path = tmp_path / "vocab.json"
+    vocab_path.write_text(json.dumps(_vocab()))
+
+    out_dir = tmp_path / "unseen_graphs"
+    config_path = tmp_path / "unseen_graphs.yaml"
+    config_path.write_text(f"""
+paths:
+  unseen_dir: {unseen_dir}
+  vocab_path: {vocab_path}
+  out_dir: {out_dir}
+graph_size: 300
+features: {FEATURES}
+""")
+
+    summary = run(config_path)
+
+    assert summary["ToN_backdoor"]["vocab_gap_rows_dropped"] == 1
+    assert summary["ToN_backdoor"]["num_flows"] == 2
+
+    counts_on_disk = json.loads((out_dir / "graph_counts.json").read_text())
+    assert counts_on_disk["ToN_backdoor"]["vocab_gap_rows_dropped"] == 1

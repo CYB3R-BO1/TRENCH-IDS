@@ -65,7 +65,7 @@ def drop_vocab_gaps(
         seen_str = frame[column].astype(str)
         drop_mask |= ~seen_str.isin(known)
 
-    dropped_count = drop_mask.sum()
+    dropped_count = int(drop_mask.sum())
     filtered = frame[~drop_mask].reset_index(drop=True)
     return filtered, dropped_count
 
