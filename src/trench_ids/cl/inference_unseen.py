@@ -39,7 +39,7 @@ import torch
 from torch_geometric.data import HeteroData
 from torch_geometric.loader import DataLoader
 
-from trench_ids.cl.evaluate import compute_metrics
+from trench_ids.cl.evaluate import compute_metrics, pool_predictions
 from trench_ids.cl.inference import load_checkpoint, predict
 from trench_ids.cl.memory_bank import load_memory_bank
 from trench_ids.cl.transferability import estimate_transferability
@@ -160,9 +160,16 @@ def run(
     label_names = checkpoint["config"]["label_names"]
 
     dataset_a: list[dict[str, Any]] = []
+    dataset_a_results: list[dict[str, Any]] = []
     dataset_b_predictions: dict[str, Any] = {}
     dataset_b_confidence: dict[str, Any] = {}
+    # Keyed on slug (not canonical_label) so it joins with dataset_b_predictions/
+    # dataset_b_confidence -- see Finding #3. Using canonical_label here would
+    # also risk silently merging distinct manifest entries that happen to share
+    # a canonical_label (e.g. Dataset A's two "DoS" entries), even though that
+    # collision can't currently occur within Dataset B specifically.
     dataset_b_means: dict[str, dict[str, torch.Tensor]] = {}
+    slug_to_canonical: dict[str, str] = {}
 
     for slug, entry in manifest["classes"].items():
         graphs = torch.load(Path(unseen_graphs_dir) / f"{slug}.pt", weights_only=False)
@@ -171,37 +178,76 @@ def run(
         if entry["evaluation_type"] == "seen_class_unseen_samples":
             metrics = compute_metrics(result["y_true"], result["y_pred"], label_names)
             dataset_a.append({"slug": slug, **entry, "metrics": metrics})
+            dataset_a_results.append(result)
         else:
-            dataset_b_predictions[slug] = prediction_distribution(result["y_pred"], label_names)
-            dataset_b_confidence[slug] = confidence_stats(result["y_prob"])
-            dataset_b_means[entry["canonical_label"]] = compute_class_relation_means(
+            canonical_label = entry["canonical_label"]
+            slug_to_canonical[slug] = canonical_label
+
+            pred_rows = prediction_distribution(result["y_pred"], label_names)
+            for row in pred_rows:
+                row["unseen_class"] = slug
+                row["canonical_label"] = canonical_label
+            dataset_b_predictions[slug] = pred_rows
+
+            conf = confidence_stats(result["y_prob"])
+            conf["unseen_class"] = slug
+            conf["canonical_label"] = canonical_label
+            dataset_b_confidence[slug] = conf
+
+            dataset_b_means[slug] = compute_class_relation_means(
                 model, graphs, device, batch_size
             )
 
-    bank = load_memory_bank(Path(memory_bank_path), map_location=device)
-    dataset_b_similarity = similarity_report(dataset_b_means, bank)
+    # Pooled Dataset A metrics -- micro-averaged over every Dataset A sample,
+    # alongside (not replacing) the per-class list already built above.
+    dataset_a_pooled_metrics: dict[str, Any] = {}
+    if dataset_a_results:
+        pooled = pool_predictions(dataset_a_results)
+        dataset_a_pooled_metrics = compute_metrics(
+            pooled["y_true"], pooled["y_pred"], pooled["label_names"]
+        )
 
-    (out_dir / "dataset_a_metrics.json").write_text(json.dumps(dataset_a, indent=2))
+    bank = load_memory_bank(Path(memory_bank_path), map_location=device)
+    dataset_b_similarity = similarity_report(dataset_b_means, bank)  # keyed by slug
+    dataset_b_similarity_out = {
+        slug: {"canonical_label": slug_to_canonical[slug], "similarity": by_relation}
+        for slug, by_relation in dataset_b_similarity.items()
+    }
+
+    (out_dir / "dataset_a_metrics.json").write_text(
+        json.dumps({"per_class": dataset_a, "pooled": dataset_a_pooled_metrics}, indent=2)
+    )
     (out_dir / "dataset_b_predictions.json").write_text(json.dumps(dataset_b_predictions, indent=2))
     (out_dir / "dataset_b_confidence.json").write_text(json.dumps(dataset_b_confidence, indent=2))
-    (out_dir / "dataset_b_similarity.json").write_text(json.dumps(dataset_b_similarity, indent=2))
+    (out_dir / "dataset_b_similarity.json").write_text(
+        json.dumps(dataset_b_similarity_out, indent=2)
+    )
 
     with open(out_dir / "dataset_b_predictions.csv", "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["unseen_class", "predicted_class", "percentage"])
+        writer.writerow(["unseen_class", "canonical_label", "predicted_class", "percentage"])
         for slug, rows in dataset_b_predictions.items():
             for row in rows:
-                writer.writerow([slug, row["predicted_class"], row["percentage"]])
+                writer.writerow(
+                    [slug, slug_to_canonical[slug], row["predicted_class"], row["percentage"]]
+                )
 
     with open(out_dir / "dataset_b_confidence.csv", "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(
-            ["unseen_class", "mean_max_softmax", "median_max_softmax", "std_max_softmax"]
+            [
+                "unseen_class",
+                "canonical_label",
+                "mean_max_softmax",
+                "median_max_softmax",
+                "std_max_softmax",
+            ]
         )
         for slug, stats in dataset_b_confidence.items():
             writer.writerow(
                 [
                     slug,
+                    slug_to_canonical[slug],
                     stats["mean_max_softmax"],
                     stats["median_max_softmax"],
                     stats["std_max_softmax"],
@@ -210,15 +256,18 @@ def run(
 
     with open(out_dir / "dataset_b_similarity.csv", "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["unseen_class", "relation", "known_class", "cosine_similarity"])
-        for row in similarity_rows(dataset_b_similarity):
-            writer.writerow(row)
+        writer.writerow(
+            ["unseen_class", "canonical_label", "relation", "known_class", "cosine_similarity"]
+        )
+        for slug, relation, known_class, cosine in similarity_rows(dataset_b_similarity):
+            writer.writerow([slug, slug_to_canonical[slug], relation, known_class, cosine])
 
     return {
         "dataset_a": dataset_a,
+        "dataset_a_pooled": dataset_a_pooled_metrics,
         "dataset_b_predictions": dataset_b_predictions,
         "dataset_b_confidence": dataset_b_confidence,
-        "dataset_b_similarity": dataset_b_similarity,
+        "dataset_b_similarity": dataset_b_similarity_out,
     }
 
 

@@ -60,7 +60,9 @@ def test_prediction_distribution_sums_to_100_percent() -> None:
     y_pred = [0, 0, 0, 1]
     dist = prediction_distribution(y_pred, ["Benign", "DoS"])
 
-    assert sum(row["percentage"] for row in dist) == 100.0
+    # round(pct, 4) doesn't guarantee an exact sum to 100.0 in general (e.g.
+    # thirds), so compare with a small tolerance rather than exact equality.
+    assert abs(sum(row["percentage"] for row in dist) - 100.0) < 0.01
     assert dist[0]["predicted_class"] == "Benign"
     assert dist[0]["count"] == 3
     assert dist[0]["percentage"] == 75.0
@@ -193,6 +195,13 @@ def test_run_writes_dataset_a_and_dataset_b_outputs(tmp_path) -> None:
 
     assert result["dataset_a"][0]["slug"] == "UNSW_dos"
     assert "accuracy" in result["dataset_a"][0]["metrics"]
+    # Finding #2: pooled Dataset A metrics, alongside the per-class list.
+    assert "accuracy" in result["dataset_a_pooled"]
     assert "ToN_backdoor" in result["dataset_b_predictions"]
     assert "ToN_backdoor" in result["dataset_b_confidence"]
-    assert "Backdoor" in result["dataset_b_similarity"]
+    # Finding #3: Dataset B outputs are all keyed by slug now (joinable across
+    # files), with canonical_label carried as a sibling field for robustness.
+    assert "ToN_backdoor" in result["dataset_b_similarity"]
+    assert result["dataset_b_similarity"]["ToN_backdoor"]["canonical_label"] == "Backdoor"
+    assert result["dataset_b_predictions"]["ToN_backdoor"][0]["canonical_label"] == "Backdoor"
+    assert result["dataset_b_confidence"]["ToN_backdoor"]["canonical_label"] == "Backdoor"
