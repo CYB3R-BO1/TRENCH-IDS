@@ -41,30 +41,81 @@ from trench_ids.labels import RAW_TO_CANONICAL
 from trench_ids.preprocess import _dataset_csv, _drop_corrupted_rows, _map_canonical
 
 
-def _consolidate_parts(
-    parts: list[pd.DataFrame],
-    original_cols: list[str],
+def _reservoir_update(
+    reservoir: list[dict[str, Any]],
+    seen_before: int,
+    new_rows: pd.DataFrame,
     sample_cap: int,
     rng: np.random.Generator,
-) -> tuple[pd.DataFrame, int, bool]:
-    """Consolidate and downsample accumulated parts to manage memory during
-    streaming. Returns (frame, corrupted_rows_dropped, was_sampled)."""
-    if not parts:
-        return (
-            pd.DataFrame(
-                columns=original_cols + ["flow_id", "source_dataset", "canonical_label"]
-            ),
-            0,
-            False,
-        )
-    frame = pd.concat(parts, ignore_index=True)
-    frame, corrupted_dropped = _drop_corrupted_rows(frame, original_cols)
-    was_sampled = False
-    if len(frame) > sample_cap:
-        seed = int(rng.integers(0, 2**31 - 1))
-        frame = frame.sample(n=sample_cap, random_state=seed).reset_index(drop=True)
-        was_sampled = True
-    return frame, corrupted_dropped, was_sampled
+) -> int:
+    """Algorithm R (reservoir sampling), applied in chunk-sized batches.
+
+    `reservoir` is mutated in place and holds at most `sample_cap` rows,
+    an exactly-uniform sample of every row passed to this function so far
+    (across all calls, i.e. across the whole stream) -- this is what makes
+    it safe to call once per CSV chunk without ever holding more than
+    `sample_cap` rows in memory, and without biasing the sample toward
+    whichever chunk happens to be seen last. `seen_before` is the count of
+    rows passed to this function prior to this call; returns the updated
+    total (`seen_before + len(new_rows)`).
+
+    Only converts to Python dicts the rows that actually win a reservoir
+    slot (`.to_dict("records")` on the whole chunk would be a
+    memory/throughput regression on exactly the high-volume classes this
+    is meant to bound -- expected winners across a full BoT-IoT-sized
+    stream is O(sample_cap * log(n / sample_cap)), not O(n)).
+    """
+    seen = seen_before
+    take = max(0, min(sample_cap - len(reservoir), len(new_rows)))
+
+    # Fill phase: reservoir isn't full yet, so new rows go straight in.
+    if take:
+        fill_part = new_rows.iloc[:take]
+        reservoir.extend(fill_part.to_dict("records"))
+        seen += take
+
+    # Replacement phase: for each remaining row, its 0-indexed global
+    # position is `seen` (before incrementing). Draw j uniformly from
+    # [0, seen] inclusive; replace reservoir[j] iff j < sample_cap. This
+    # is exactly Algorithm R, vectorized in the random-draw step (the draw
+    # for a row depends only on its position, not on any other row's
+    # outcome, so batching the draws is safe) and materializes dicts only
+    # for rows that win a slot.
+    remaining = new_rows.iloc[take:]
+    r = len(remaining)
+    if r:
+        positions = seen + np.arange(r)
+        js = rng.integers(0, positions + 1)  # high is exclusive -> [0, position]
+        winners = np.nonzero(js < sample_cap)[0]  # ascending order -> later row wins ties
+        if len(winners):
+            winner_js = js[winners]
+            winner_records = remaining.iloc[winners].to_dict("records")
+            for j, rec in zip(winner_js.tolist(), winner_records):
+                reservoir[j] = rec
+        seen += r
+
+    return seen
+
+
+def _restore_dtypes(frame: pd.DataFrame, target_dtypes: pd.Series) -> pd.DataFrame:
+    """Best-effort per-column re-cast to `target_dtypes` (a chunk's original
+    dtypes, captured before the dict round-trip in reservoir sampling).
+
+    Per-column and non-fatal: a column that can't be safely cast (e.g. the
+    winning reservoir rows genuinely span incompatible dtypes across
+    chunks -- possible on a 45-column, many-chunk real CSV even though it
+    doesn't happen in this module's own test fixtures) is left as pandas
+    inferred it rather than raising and losing an otherwise-complete,
+    multi-minute extraction.
+    """
+    for col, dtype in target_dtypes.items():
+        if frame[col].dtype == dtype:
+            continue
+        try:
+            frame[col] = frame[col].astype(dtype)
+        except (ValueError, TypeError):
+            pass
+    return frame
 
 
 def extract_unseen_class(
@@ -80,27 +131,38 @@ def extract_unseen_class(
     equals `canonical_label`, regardless of CLASS_DATASETS allowance.
 
     Applies _drop_corrupted_rows (same NaN/inf/float32-overflow filter as
-    Step 1). If more than `sample_cap` matching rows exist, draws a seeded
-    uniform sample of exactly `sample_cap` rows (for high-volume classes
-    like BoT-IoT's DDoS/DoS, 18.3M/16.7M available); otherwise keeps every
-    matching row. Returns (frame, manifest_entry) -- manifest_entry has no
-    "evaluation_type"/"used_in_training"/"output_path" keys yet; run()
-    adds those since they're a property of the config entry, not of the
-    extraction itself.
-
-    To bound memory during streaming of large CSVs, periodically consolidates
-    and downsamples accumulated rows when sample_cap is set.
+    Step 1), independently per chunk -- the check is row-local (no
+    cross-row statistics), so this is equivalent to applying it once over
+    the full concatenated set of matching rows. If more than `sample_cap`
+    matching (and clean) rows exist, draws a seeded uniform sample of
+    exactly `sample_cap` rows via single-pass reservoir sampling (Algorithm
+    R -- see _reservoir_update) -- for high-volume classes like BoT-IoT's
+    DDoS/DoS (18.3M/16.7M matching rows available) this bounds memory to
+    `sample_cap` rows without ever concatenating the full matching set, and
+    without biasing the sample toward rows seen later in the stream.
+    Otherwise keeps every matching row. Returns (frame, manifest_entry) --
+    manifest_entry has no "evaluation_type"/"used_in_training"/"output_path"
+    keys yet; run() adds those since they're a property of the config
+    entry, not of the extraction itself.
     """
     csv_path = _dataset_csv(raw_dir, dataset_dir)
     original_cols = list(pd.read_csv(csv_path, nrows=0).columns)
+    all_cols = original_cols + ["flow_id", "source_dataset", "canonical_label"]
 
-    parts: list[pd.DataFrame] = []
+    parts: list[pd.DataFrame] = []  # used only when sample_cap is None
+    reservoir: list[dict[str, Any]] = []  # used only when sample_cap is set
     rows_found_total = 0
     corrupted_dropped_total = 0
-    sampled_total = False
-    consolidation_threshold = (
-        max(sample_cap * 20, sample_cap) if sample_cap is not None else None
-    )
+    clean_seen_total = 0
+    # Dtypes of the first clean matched chunk -- reservoir rows pass through
+    # a Python-dict round trip (DataFrame.to_dict("records") / from_records),
+    # which can silently up-cast columns (e.g. an int PROTOCOL column
+    # becoming float64 if any dict along the way had a missing/NaN key).
+    # Restoring the original dtypes at the end keeps downstream consumers
+    # (e.g. unseen_graphs.drop_vocab_gaps's str(int) vocab lookup) working
+    # the same as the non-reservoir (sample_cap=None) path, which never
+    # leaves DataFrame-land and so never has this problem.
+    reservoir_dtypes: pd.Series | None = None
 
     for chunk in pd.read_csv(csv_path, chunksize=chunk_size):
         # Pre-filter to only rows with raw Attack labels in RAW_TO_CANONICAL
@@ -117,36 +179,36 @@ def extract_unseen_class(
         matched["flow_id"] = [f"{dataset_code}-{i}" for i in chunk.index[match]]
         matched["source_dataset"] = dataset_code
         matched["canonical_label"] = canonical_label
-        parts.append(matched)
         rows_found_total += len(matched)
 
-        # Periodic consolidation to bound memory when sample_cap is set
-        if consolidation_threshold is not None:
-            accumulated_rows = sum(len(p) for p in parts)
-            if accumulated_rows > consolidation_threshold:
-                consolidated_frame, corrupted_dropped, was_sampled = _consolidate_parts(
-                    parts, original_cols, sample_cap, rng  # type: ignore
-                )
-                parts = [consolidated_frame]
-                corrupted_dropped_total += corrupted_dropped
-                sampled_total = sampled_total or was_sampled
+        clean, corrupted_dropped = _drop_corrupted_rows(matched, original_cols)
+        corrupted_dropped_total += corrupted_dropped
+        if clean.empty:
+            continue
 
-    if parts:
-        frame = pd.concat(parts, ignore_index=True)
-    else:
-        frame = pd.DataFrame(
-            columns=original_cols + ["flow_id", "source_dataset", "canonical_label"]
-        )
+        if sample_cap is None:
+            parts.append(clean)
+        else:
+            if reservoir_dtypes is None:
+                reservoir_dtypes = clean.dtypes
+            clean_seen_total = _reservoir_update(
+                reservoir, clean_seen_total, clean, sample_cap, rng
+            )
 
     rows_found = rows_found_total
-    frame, corrupted_dropped = _drop_corrupted_rows(frame, original_cols)
-    corrupted_dropped_total += corrupted_dropped
-
-    sampled = sampled_total
-    if sample_cap is not None and len(frame) > sample_cap:
-        seed = int(rng.integers(0, 2**31 - 1))
-        frame = frame.sample(n=sample_cap, random_state=seed).reset_index(drop=True)
-        sampled = True
+    if sample_cap is None:
+        frame = (
+            pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=all_cols)
+        )
+        sampled = False
+    else:
+        if reservoir:
+            frame = pd.DataFrame.from_records(reservoir, columns=all_cols)
+            if reservoir_dtypes is not None:
+                frame = _restore_dtypes(frame, reservoir_dtypes)
+        else:
+            frame = pd.DataFrame(columns=all_cols)
+        sampled = clean_seen_total > sample_cap
 
     manifest_entry = {
         "canonical_label": canonical_label,
