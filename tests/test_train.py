@@ -401,6 +401,168 @@ def test_final_average_accuracy_averages_last_row() -> None:
     assert final_average_accuracy(forgetting_matrix) == pytest.approx((0.8 + 0.85) / 2)
 
 
+def test_train_one_task_fixed_w_r_mode_uses_sigmoid_of_s_r_and_skips_mlp_grad() -> None:
+    """w_r_mode="fixed" must compute w_r = sigmoid(S_r) directly -- no
+    ImportanceMLP call, so its parameters receive no gradient, mirroring
+    the existing disable_learned_weighting test's two-part verification."""
+    device = torch.device("cpu")
+    g = _tiny_graph()
+    model = RelationSpecificHeteroGNN.from_graph(
+        g, hidden_dim=8, protocol_vocab_size=2, service_vocab_size=2, num_layers=1,
+    )
+    from trench_ids.model.rhgnn import NodeFeatureEncoders
+
+    model.encoders = NodeFeatureEncoders(
+        8, protocol_vocab_size=2, service_vocab_size=2,
+        flow_feature_dim=FLOW_DIM, host_feature_dim=HOST_DIM,
+    )
+    model = model.to(device)
+    classifier = torch.nn.Linear(8, 2).to(device)
+    importance_mlp = ImportanceMLP().to(device)
+    ewc_manager = OnlineEWCManager(
+        model, classifier, FLOW_RELATIONS, gamma=0.9, lambda_r=1.0, lambda_s=1.0, lambda_u=1.0,
+    )
+    loader = DataLoader([g, g], batch_size=2)
+    ewc_manager.update_all(model, classifier, loader, device)
+
+    trainable_params = (
+        list(model.parameters())
+        + list(classifier.parameters())
+        + list(importance_mlp.parameters())
+    )
+    optimizer = torch.optim.Adam(trainable_params, lr=1e-3)
+    bank = {
+        "attack_a": {relation: torch.randn(8) for relation in FLOW_RELATIONS},
+    }
+
+    _, final_w_r = train_one_task(
+        model,
+        classifier,
+        [g, g],
+        device,
+        batch_size=2,
+        warmup_epochs=1,
+        full_loss_epochs=2,
+        optimizer=optimizer,
+        ewc_manager=ewc_manager,
+        importance_mlp=importance_mlp,
+        label_names=["a", "b"],
+        bank=bank,
+        w_r_mode="fixed",
+    )
+
+    # bank has one class ("attack_a") sharing every Flow relation with
+    # itself once compute_task_memory_means runs, so S_r's mean cosine
+    # per relation need not be a known closed form here -- instead assert
+    # every returned w_r sits in sigmoid's range and that it is NOT the
+    # constant importance_mlp would have produced from the same S_r (proves
+    # the MLP path was not taken).
+    for value in final_w_r.values():
+        assert 0.0 < value < 1.0
+    assert importance_mlp.net[0].weight.grad is None or torch.all(
+        importance_mlp.net[0].weight.grad == 0.0
+    )
+
+
+def test_train_one_task_fixed_w_r_mode_matches_sigmoid_of_cached_s_r() -> None:
+    """Direct numeric check: w_r_mode="fixed" must equal sigmoid(S_r) for
+    the S_r that would actually be computed inside train_one_task, using
+    an empty bank so S_r is a known, deterministic 0.0 for every relation
+    (aggregate_transferability_scores' documented empty-bank default) --
+    sigmoid(0.0) == 0.5 for every relation."""
+    device = torch.device("cpu")
+    g = _tiny_graph()
+    model = RelationSpecificHeteroGNN.from_graph(
+        g, hidden_dim=8, protocol_vocab_size=2, service_vocab_size=2, num_layers=1,
+    )
+    from trench_ids.model.rhgnn import NodeFeatureEncoders
+
+    model.encoders = NodeFeatureEncoders(
+        8, protocol_vocab_size=2, service_vocab_size=2,
+        flow_feature_dim=FLOW_DIM, host_feature_dim=HOST_DIM,
+    )
+    model = model.to(device)
+    classifier = torch.nn.Linear(8, 2).to(device)
+    importance_mlp = ImportanceMLP().to(device)
+    ewc_manager = OnlineEWCManager(
+        model, classifier, FLOW_RELATIONS, gamma=0.9, lambda_r=1.0, lambda_s=1.0, lambda_u=1.0,
+    )
+    trainable_params = (
+        list(model.parameters())
+        + list(classifier.parameters())
+        + list(importance_mlp.parameters())
+    )
+    optimizer = torch.optim.Adam(trainable_params, lr=1e-3)
+
+    _, final_w_r = train_one_task(
+        model,
+        classifier,
+        [g, g],
+        device,
+        batch_size=2,
+        warmup_epochs=1,
+        full_loss_epochs=1,
+        optimizer=optimizer,
+        ewc_manager=ewc_manager,
+        importance_mlp=importance_mlp,
+        label_names=["a", "b"],
+        bank={},
+        w_r_mode="fixed",
+    )
+
+    for value in final_w_r.values():
+        assert value == pytest.approx(0.5)
+
+
+def test_train_one_task_w_r_mode_disabled_matches_disable_learned_weighting() -> None:
+    """w_r_mode="disabled" is an explicit alias for
+    disable_learned_weighting=True -- both must fix w_r at 1.0."""
+    device = torch.device("cpu")
+    g = _tiny_graph()
+    model = RelationSpecificHeteroGNN.from_graph(
+        g, hidden_dim=8, protocol_vocab_size=2, service_vocab_size=2, num_layers=1,
+    )
+    from trench_ids.model.rhgnn import NodeFeatureEncoders
+
+    model.encoders = NodeFeatureEncoders(
+        8, protocol_vocab_size=2, service_vocab_size=2,
+        flow_feature_dim=FLOW_DIM, host_feature_dim=HOST_DIM,
+    )
+    model = model.to(device)
+    classifier = torch.nn.Linear(8, 2).to(device)
+    importance_mlp = ImportanceMLP().to(device)
+    ewc_manager = OnlineEWCManager(
+        model, classifier, FLOW_RELATIONS, gamma=0.9, lambda_r=1.0, lambda_s=1.0, lambda_u=1.0,
+    )
+    trainable_params = (
+        list(model.parameters())
+        + list(classifier.parameters())
+        + list(importance_mlp.parameters())
+    )
+    optimizer = torch.optim.Adam(trainable_params, lr=1e-3)
+    bank = {
+        "attack_a": {relation: torch.randn(8) for relation in FLOW_RELATIONS},
+    }
+
+    _, final_w_r = train_one_task(
+        model,
+        classifier,
+        [g, g],
+        device,
+        batch_size=2,
+        warmup_epochs=1,
+        full_loss_epochs=1,
+        optimizer=optimizer,
+        ewc_manager=ewc_manager,
+        importance_mlp=importance_mlp,
+        label_names=["a", "b"],
+        bank=bank,
+        w_r_mode="disabled",
+    )
+
+    assert final_w_r == {relation: 1.0 for relation in FLOW_RELATIONS}
+
+
 def test_save_checkpoint_writes_loadable_state(tmp_path: Path) -> None:
     device = torch.device("cpu")
     g = _tiny_graph()

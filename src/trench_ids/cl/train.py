@@ -205,6 +205,7 @@ def train_one_task(
     label_names: list[str],
     bank: dict[str, dict[str, torch.Tensor]],
     disable_learned_weighting: bool = False,
+    w_r_mode: str = "learned",
     epoch_log_path: Path | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Runs one task's full warm-up + full-loss training (design §5, steps
@@ -234,13 +235,25 @@ def train_one_task(
     s_r = {relation: value.to(device) for relation, value in s_r.items()}
 
     def _compute_w_r() -> dict[str, torch.Tensor]:
-        # The plain-Online-EWC baseline (disable_learned_weighting=True):
-        # w_r fixed at 1.0, never routed through importance_mlp, so
-        # lambda_r=lambda_s=lambda_u applies the same uniform, unweighted
-        # penalty to all 12 EWC groups instead of scaling Flow's 5 relations
-        # by a learned weight.
-        if disable_learned_weighting:
+        # Three w_r sources, in priority order:
+        # 1. disable_learned_weighting=True (legacy flag, kept for
+        #    backward compatibility with existing configs/runs) or
+        #    w_r_mode="disabled": fixed at 1.0 for every relation, so
+        #    lambda_r=lambda_s=lambda_u applies the same uniform,
+        #    unweighted penalty to all 12 EWC groups.
+        # 2. w_r_mode="fixed" (2026-07-29 ablation,
+        #    docs/superpowers/specs/2026-07-29-transferability-followup-design.md):
+        #    w_r = sigmoid(S_r) directly, no ImportanceMLP call -- S_r
+        #    already carries no gradient graph (aggregate_transferability_scores
+        #    wraps plain Python floats), so this value is a pure constant
+        #    from the loss's perspective, structurally incapable of the
+        #    w_r-collapses-to-zero pathology diagnosed in importance.py.
+        # 3. w_r_mode="learned" (default, original Step 7 behavior):
+        #    w_r = ImportanceMLP(S_r).
+        if disable_learned_weighting or w_r_mode == "disabled":
             return {relation: torch.ones((), device=device) for relation in s_r}
+        if w_r_mode == "fixed":
+            return {relation: torch.sigmoid(value) for relation, value in s_r.items()}
         return importance_mlp(s_r)
 
     # Step 5: full-loss epochs. w_r is recomputed fresh from the cached S_r
@@ -381,6 +394,7 @@ def main(cfg: DictConfig) -> None:
             label_names,
             memory_bank,
             disable_learned_weighting=cfg.ewc.disable_learned_weighting,
+            w_r_mode=cfg.ewc.w_r_mode,
             epoch_log_path=epoch_log_path,
         )
         print(f"[train] task {task}: final epoch mean loss = {final_loss:.4f}")
@@ -449,6 +463,7 @@ def main(cfg: DictConfig) -> None:
         "lambda_u": cfg.ewc.lambda_u,
         "gamma": cfg.ewc.gamma,
         "disable_learned_weighting": cfg.ewc.disable_learned_weighting,
+        "w_r_mode": cfg.ewc.w_r_mode,
         "replay_enabled": cfg.replay.enabled,
         "replay_buffer_size_per_task": cfg.replay.buffer_size_per_task,
         "replay_fraction": cfg.replay.replay_fraction,

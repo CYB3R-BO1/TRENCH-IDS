@@ -39,6 +39,13 @@ ewc:
   # equivalent, since it would zero out Flow's 5 relations entirely rather
   # than regularizing them like every other group.
   disable_learned_weighting: false
+  # Fixed, non-learned w_r ablation (2026-07-29 design,
+  # docs/superpowers/specs/2026-07-29-transferability-followup-design.md):
+  # "learned" (default) routes S_r through importance_mlp as before;
+  # "fixed" uses w_r = sigmoid(S_r) directly, no learnable parameters, so
+  # there is nothing for gradient descent to collapse; "disabled" is an
+  # explicit alias for disable_learned_weighting=True (w_r fixed at 1.0).
+  w_r_mode: learned
   # Diagnostic instrumentation (2026-07-21 lambda-sweep follow-up): when
   # true, writes runs/<out_dir>/loss_components_task_{t}.jsonl -- one line
   # per full-loss epoch with L_cls and the raw/weighted EWC breakdown, so
