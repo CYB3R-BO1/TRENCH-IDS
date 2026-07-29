@@ -905,4 +905,43 @@ The accuracy-forgetting average (0.7054) reproduces §16.1/§17.4 exactly, an in
 
 **157 tests passing** (`.venv/Scripts/python.exe -m pytest -q`, 0 failures) — up from 146 (§19.5) with `tests/test_inference.py` (3 tests: well-formed `predict()` output, real checkpoint save/load/predict round trip, `checkpoint_version` rejection) and `tests/test_evaluate.py` (7 tests: `compute_metrics` including a never-predicted/never-true-class edge case with hand-verified precision/recall/F1 arithmetic, `pool_predictions` including a label-name-mismatch rejection, `forgetting_metrics_table` flattening/sorting, `build_eval_matrix`/`run()` end-to-end against synthetic checkpoints, and writer/plot smoke tests). One new test in `tests/test_train.py` (`save_checkpoint` round-trip: dict shape, then loads its `model_state_dict`/`classifier_state_dict` into fresh modules with no error). `ruff check src tests` passes clean.
 
+---
+
+## 23. Fixed-`w_r` EWC ablation (real run, 2026-07-29)
+
+Design: `docs/superpowers/specs/2026-07-29-transferability-followup-design.md`, Experiment 1. §16.2 diagnosed the learned relation-importance weight `w_r = sigma(ImportanceMLP(S_r))` as self-defeating: since `w_r` only ever appears multiplied into its own EWC penalty term, gradient descent has a direct, unconditional incentive to shrink it toward zero, which functionally disables the weighted-EWC term almost immediately regardless of whether transferability-weighted regularization would otherwise help. This ablation tests whether that specific learned-weighting mechanism — not the underlying transferability-weighted-EWC idea — was the cause of §16/§17's negative result, by replacing the learned MLP with `w_r = sigmoid(S_r)` directly: a fixed, deterministic function of the transferability score with no learnable parameters, structurally immune to the same collapse (there is nothing for gradient descent to act on).
+
+Implementation: `src/trench_ids/cl/train.py`'s new `w_r_mode` parameter (`"learned"` / `"fixed"` / `"disabled"`), `configs/train.yaml`'s `ewc.w_r_mode` (Task 1, commits `30ce5a0`..`696b791`, reviewed clean — see `.superpowers/sdd/2026-07-29-transferability-followup/progress.md`).
+
+Command:
+
+```bash
+.venv/Scripts/python.exe -m trench_ids.cl.train \
+  ewc.w_r_mode=fixed \
+  ewc.lambda_r=1.0 ewc.lambda_s=1.0 ewc.lambda_u=1.0 \
+  train.seed=42 \
+  paths.out_dir=runs/step4_fixed_wr
+```
+
+Same `data/graphs` (11-relation schema), `hidden_dim=64`, `epochs_per_task=5` (2 warm-up + 3 full-loss), `batch_size=8`, Adam `lr=1e-3`, `num_layers=1` (frozen baseline architecture), GPU, seed 42 — every setting matched to the existing relation-aware-EWC run (§16) except `w_r_mode`.
+
+### 23.1 Result vs. the existing comparison points
+
+| Variant | Average forgetting | Final average accuracy |
+|---|---:|---:|
+| Plain fine-tuning (no EWC) | 0.7108 | — |
+| Plain unweighted EWC (`disable_learned_weighting=true`) | 0.7103 | — |
+| Learned relation-aware EWC (§16, `w_r_mode=learned`) | 0.7054 | 0.3622 |
+| **Fixed `w_r = sigmoid(S_r)` (this run, `w_r_mode=fixed`)** | **0.7257** | **0.3511** |
+
+Full run output: `runs/step4_fixed_wr/summary.json` (`average_forgetting=0.7257058512347256`, `final_average_accuracy=0.3510735684031165`, `runtime_seconds=3243.98`, `w_r_mode="fixed"`, `disable_learned_weighting=false`, `lambda_r=lambda_s=lambda_u=1.0`, `gamma=0.9`, `replay_enabled=false`, `seed=42`).
+
+### 23.2 Interpretation
+
+0.7257 falls inside the `[0.70, 0.75]` band established by every prior fine-tuning/EWC variant, and is not `<= 0.6854` (the pre-registered "meaningfully better" threshold, 0.02 below the best existing EWC variant). Per the design doc's pre-registered interpretation, a single seed is sufficient at this outcome — the result doesn't call for expansion to seeds 1/2, since it isn't a borderline or surprising value relative to the existing noise band (§17's coarse lambda sweep already showed 0.71-0.75 is consistent with run-to-run noise across 5 orders of magnitude of lambda under the learned-weighting mechanism).
+
+**This stays in the same band: it provides much stronger evidence that transferability-weighted EWC, including a fixed-weight variant, does not improve continual learning on this benchmark.** The fixed `w_r` variant does not merely fail to improve on the learned variant — at 0.7257 it is marginally *worse* than every other variant tried, including plain fine-tuning. Combined with §16.2's diagnosis, this rules out "the learned-weighting mechanism's collapse was masking an otherwise-effective idea": with the collapse mechanism removed entirely (no learnable parameters, no gradient incentive to shrink anything), transferability-weighted EWC still does not reduce forgetting on this benchmark, under this architecture (`num_layers=1`, frozen per the 2026-07-21 standing decision). The bottleneck is not specific to how `w_r` was learned — it is that transferability-weighted EWC itself, in either form, does not address whatever is actually driving catastrophic forgetting here. Experience replay (§ project-metrics.md's replay-baseline sections) remains the project's one demonstrated forgetting-mitigation result.
+
+Source: `src/trench_ids/cl/train.py` (`w_r_mode`), `configs/train.yaml`; `runs/step4_fixed_wr/` (gitignored, reproduce via the command above).
+
 Source: `src/trench_ids/cl/inference.py`, `src/trench_ids/cl/evaluate.py`, `src/trench_ids/cl/train.py` (`save_checkpoint`, wired into `main()`), `pyproject.toml` (scikit-learn dependency, `trench-infer`/`trench-evaluate` entry points — the latter has the Hydra-resolution issue noted above under real-run reproduction, use `python -m trench_ids.cl.evaluate` instead). Implemented via subagent-driven-development, 7 tasks, 7 commits, all task reviews clean on first pass with no fix rounds required.
