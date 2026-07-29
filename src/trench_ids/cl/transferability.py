@@ -78,3 +78,32 @@ def aggregate_transferability_scores(
         relation: torch.tensor(sums[relation] / counts[relation] if counts[relation] else 0.0)
         for relation in flow_relations
     }
+
+
+def aggregate_per_class_relation_scores(
+    report: dict[str, dict[str, dict[str, float]]], flow_relations: list[str]
+) -> dict[str, dict[str, float]]:
+    """Like ``aggregate_transferability_scores``, but keeps relations
+    separate instead of collapsing to one scalar `S_r` -- mean cosine
+    similarity *per new class, per relation*, averaged over old bank
+    classes only (design §Experiment 2, step 1: "keep relation-level
+    granularity as long as possible," since relation-specific
+    transferability is this project's core idea). Returns
+    ``{new_class: {relation: float}}``, one entry per key of ``report``.
+    ``0.0`` for a relation with zero old-class pairs to average -- same
+    convention as ``aggregate_transferability_scores``' empty-bank
+    default."""
+    result: dict[str, dict[str, float]] = {}
+    for new_class, old_classes in report.items():
+        sums = {relation: 0.0 for relation in flow_relations}
+        counts = {relation: 0 for relation in flow_relations}
+        for relations in old_classes.values():
+            for relation, cosine in relations.items():
+                if relation in sums:
+                    sums[relation] += cosine
+                    counts[relation] += 1
+        result[new_class] = {
+            relation: sums[relation] / counts[relation] if counts[relation] else 0.0
+            for relation in flow_relations
+        }
+    return result
