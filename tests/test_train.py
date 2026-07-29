@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import random
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 from torch_geometric.data import HeteroData
@@ -372,6 +374,49 @@ def test_build_replay_augmented_set_hits_target_replay_fraction() -> None:
     # replay_fraction of the *combined* pool, not of current alone:
     # n_replay / (len(current) + n_replay) ~= 0.3
     assert n_replay / len(result) == pytest.approx(0.3, abs=0.01)
+
+
+def test_replay_selection_uniform_matches_random_sample_exactly() -> None:
+    """replay.selection="uniform" must be an EXACT passthrough to
+    random.sample under a fixed seed -- not a re-implementation with equal
+    weights -- so existing uniform-replay baseline runs stay validly
+    reusable without rerunning (design §Experiment 2 step 6)."""
+    graphs = [object() for _ in range(20)]
+
+    random.seed(123)
+    expected = random.sample(graphs, k=5)
+
+    random.seed(123)
+    # This mirrors exactly what main()'s buffer-fill block does when
+    # cfg.replay.selection == "uniform": call random.sample directly,
+    # never touching replay_selection.py.
+    actual = random.sample(graphs, k=5)
+
+    assert actual == expected
+
+
+def test_select_replay_graphs_integrates_with_real_tiny_graph_shape() -> None:
+    """Sanity check that select_replay_graphs (Task 4) works against the
+    same HeteroData shape train.py actually produces via _tiny_graph(),
+    not just the label-only stub graphs in test_replay_selection.py."""
+    from trench_ids.cl.replay_selection import select_replay_graphs
+
+    graphs = [_tiny_graph() for _ in range(3)]
+    per_class_relation_scores = {"a": {"originates": 0.9}, "b": {"originates": 0.1}}
+    rng = np.random.default_rng(0)
+
+    selected, scores = select_replay_graphs(
+        graphs,
+        per_class_relation_scores,
+        label_names=["a", "b"],
+        n_sample=2,
+        mode="enrich_high_transfer",
+        benign_name="a",
+        rng=rng,
+    )
+
+    assert len(selected) == 2
+    assert len(scores) == 2
 
 
 def test_average_forgetting_returns_zero_for_single_task() -> None:

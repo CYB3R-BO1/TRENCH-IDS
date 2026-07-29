@@ -60,6 +60,15 @@ replay:
   enabled: false
   buffer_size_per_task: 200 # ~2.5% of one task's ~8135 train graphs
   replay_fraction: 0.3 # target share of each task's combined training pool
+  # Transferability-guided buffer selection (2026-07-29 design,
+  # docs/superpowers/specs/2026-07-29-transferability-followup-design.md):
+  # "uniform" (default) is an exact passthrough to random.sample, keeping
+  # the existing §23 replay baseline byte-for-byte reproducible.
+  # "enrich_high_transfer"/"enrich_low_transfer" weight buffer sampling by
+  # each graph's enrichment for classes with high/low similarity to
+  # already-banked classes. Task 1 always uses uniform regardless of this
+  # setting (no transferability signal exists yet).
+  selection: uniform
 
 paths:
   graphs_dir: data/graphs
