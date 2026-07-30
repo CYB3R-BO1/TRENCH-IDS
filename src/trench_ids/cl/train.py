@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import hydra
+import numpy as np
 import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig
@@ -41,8 +42,13 @@ from torch_geometric.loader import DataLoader
 from trench_ids.cl.ewc import FLOW_RELATIONS, OnlineEWCManager
 from trench_ids.cl.importance import ImportanceMLP
 from trench_ids.cl.memory_bank import RelationMeanAccumulator, merge_into_bank, save_memory_bank
-from trench_ids.cl.transferability import aggregate_transferability_scores, estimate_transferability
-from trench_ids.labels import NUM_TASKS, canonical_classes
+from trench_ids.cl.replay_selection import select_replay_graphs
+from trench_ids.cl.transferability import (
+    aggregate_per_class_relation_scores,
+    aggregate_transferability_scores,
+    estimate_transferability,
+)
+from trench_ids.labels import BENIGN, NUM_TASKS, canonical_classes
 from trench_ids.model.rhgnn import RelationSpecificHeteroGNN
 from trench_ids.vocab import load_vocab
 
@@ -205,6 +211,7 @@ def train_one_task(
     label_names: list[str],
     bank: dict[str, dict[str, torch.Tensor]],
     disable_learned_weighting: bool = False,
+    w_r_mode: str = "learned",
     epoch_log_path: Path | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Runs one task's full warm-up + full-loss training (design §5, steps
@@ -234,13 +241,25 @@ def train_one_task(
     s_r = {relation: value.to(device) for relation, value in s_r.items()}
 
     def _compute_w_r() -> dict[str, torch.Tensor]:
-        # The plain-Online-EWC baseline (disable_learned_weighting=True):
-        # w_r fixed at 1.0, never routed through importance_mlp, so
-        # lambda_r=lambda_s=lambda_u applies the same uniform, unweighted
-        # penalty to all 12 EWC groups instead of scaling Flow's 5 relations
-        # by a learned weight.
-        if disable_learned_weighting:
+        # Three w_r sources, in priority order:
+        # 1. disable_learned_weighting=True (legacy flag, kept for
+        #    backward compatibility with existing configs/runs) or
+        #    w_r_mode="disabled": fixed at 1.0 for every relation, so
+        #    lambda_r=lambda_s=lambda_u applies the same uniform,
+        #    unweighted penalty to all 12 EWC groups.
+        # 2. w_r_mode="fixed" (2026-07-29 ablation,
+        #    docs/superpowers/specs/2026-07-29-transferability-followup-design.md):
+        #    w_r = sigmoid(S_r) directly, no ImportanceMLP call -- S_r
+        #    already carries no gradient graph (aggregate_transferability_scores
+        #    wraps plain Python floats), so this value is a pure constant
+        #    from the loss's perspective, structurally incapable of the
+        #    w_r-collapses-to-zero pathology diagnosed in importance.py.
+        # 3. w_r_mode="learned" (default, original Step 7 behavior):
+        #    w_r = ImportanceMLP(S_r).
+        if disable_learned_weighting or w_r_mode == "disabled":
             return {relation: torch.ones((), device=device) for relation in s_r}
+        if w_r_mode == "fixed":
+            return {relation: torch.sigmoid(value) for relation, value in s_r.items()}
         return importance_mlp(s_r)
 
     # Step 5: full-loss epochs. w_r is recomputed fresh from the cached S_r
@@ -381,6 +400,7 @@ def main(cfg: DictConfig) -> None:
             label_names,
             memory_bank,
             disable_learned_weighting=cfg.ewc.disable_learned_weighting,
+            w_r_mode=cfg.ewc.w_r_mode,
             epoch_log_path=epoch_log_path,
         )
         print(f"[train] task {task}: final epoch mean loss = {final_loss:.4f}")
@@ -394,13 +414,55 @@ def main(cfg: DictConfig) -> None:
         final_means = compute_task_memory_means(
             model, train_graphs, device, cfg.train.batch_size, label_names
         )
-        if cfg.replay.enabled:
-            n_sample = min(cfg.replay.buffer_size_per_task, len(train_graphs))
-            replay_buffer.extend(random.sample(train_graphs, k=n_sample))
         transferability = estimate_transferability(final_means, memory_bank)
         (out_dir / f"transferability_task_{task}.json").write_text(
             json.dumps(transferability, indent=2)
         )
+
+        if cfg.replay.enabled:
+            n_sample = min(cfg.replay.buffer_size_per_task, len(train_graphs))
+            if cfg.replay.selection == "uniform" or task == 1:
+                # Exact passthrough -- task 1 always falls back here too,
+                # since memory_bank is empty and there is no transferability
+                # signal yet (design §Experiment 2 step 3).
+                replay_buffer.extend(random.sample(train_graphs, k=n_sample))
+            else:
+                per_class_relation_scores = aggregate_per_class_relation_scores(
+                    transferability, FLOW_RELATIONS
+                )
+                rng = np.random.default_rng(cfg.train.seed + task)
+                selected, selected_scores = select_replay_graphs(
+                    train_graphs,
+                    per_class_relation_scores,
+                    label_names,
+                    n_sample,
+                    mode=cfg.replay.selection,
+                    benign_name=BENIGN,
+                    rng=rng,
+                )
+                replay_buffer.extend(selected)
+                class_counts: dict[str, int] = {}
+                for g in selected:
+                    for class_idx in g["flow"].y.tolist():
+                        name = label_names[class_idx]
+                        class_counts[name] = class_counts.get(name, 0) + 1
+                total_flows = sum(class_counts.values())
+                composition = {
+                    "class_counts": class_counts,
+                    "class_fractions": (
+                        {k: v / total_flows for k, v in class_counts.items()}
+                        if total_flows
+                        else {}
+                    ),
+                    "mean_enrichment": sum(selected_scores) / len(selected_scores)
+                    if selected_scores
+                    else 0.0,
+                    "per_class_relation_scores": per_class_relation_scores,
+                }
+                (out_dir / f"replay_buffer_composition_task_{task}.json").write_text(
+                    json.dumps(composition, indent=2)
+                )
+
         memory_bank = merge_into_bank(memory_bank, final_means)
 
         # Step 6-7: Fisher/theta* update for the next task's EWC penalty.
@@ -434,6 +496,7 @@ def main(cfg: DictConfig) -> None:
                 "replay_enabled": cfg.replay.enabled,
                 "replay_buffer_size_per_task": cfg.replay.buffer_size_per_task,
                 "replay_fraction": cfg.replay.replay_fraction,
+                "replay_selection": cfg.replay.selection,
             },
         )
 
@@ -449,9 +512,11 @@ def main(cfg: DictConfig) -> None:
         "lambda_u": cfg.ewc.lambda_u,
         "gamma": cfg.ewc.gamma,
         "disable_learned_weighting": cfg.ewc.disable_learned_weighting,
+        "w_r_mode": cfg.ewc.w_r_mode,
         "replay_enabled": cfg.replay.enabled,
         "replay_buffer_size_per_task": cfg.replay.buffer_size_per_task,
         "replay_fraction": cfg.replay.replay_fraction,
+        "replay_selection": cfg.replay.selection,
         "seed": cfg.train.seed,
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))

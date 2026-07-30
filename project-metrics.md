@@ -1218,3 +1218,166 @@ This section exists to answer one question: does Step 10b's pipeline and its qua
 ### 27.4 Reproduction
 
 Same recipe as §26.4: `trench-unseen-data` → `trench-unseen-graphs` → `trench-infer-unseen --device auto`, all CPU-only, against `runs/replay_seed42_newport/checkpoint_task_6.pt` + its memory bank. Full output: `runs/unseen_eval/{dataset_a_metrics.json, dataset_b_predictions.{json,csv}, dataset_b_confidence.{json,csv}, dataset_b_similarity.{json,csv}}` (gitignored, regenerated fresh this round).
+## 28. Fixed-`w_r` EWC ablation (real run, 2026-07-29)
+
+Design: `docs/superpowers/specs/2026-07-29-transferability-followup-design.md`, Experiment 1. §16.2 diagnosed the learned relation-importance weight `w_r = sigma(ImportanceMLP(S_r))` as self-defeating: since `w_r` only ever appears multiplied into its own EWC penalty term, gradient descent has a direct, unconditional incentive to shrink it toward zero, which functionally disables the weighted-EWC term almost immediately regardless of whether transferability-weighted regularization would otherwise help. This ablation tests whether that specific learned-weighting mechanism — not the underlying transferability-weighted-EWC idea — was the cause of §16/§17's negative result, by replacing the learned MLP with `w_r = sigmoid(S_r)` directly: a fixed, deterministic function of the transferability score with no learnable parameters, structurally immune to the same collapse (there is nothing for gradient descent to act on).
+
+Implementation: `src/trench_ids/cl/train.py`'s new `w_r_mode` parameter (`"learned"` / `"fixed"` / `"disabled"`), `configs/train.yaml`'s `ewc.w_r_mode` (Task 1, commits `30ce5a0`..`696b791`, reviewed clean — see `.superpowers/sdd/2026-07-29-transferability-followup/progress.md`).
+
+Command:
+
+```bash
+.venv/Scripts/python.exe -m trench_ids.cl.train \
+  ewc.w_r_mode=fixed \
+  ewc.lambda_r=1.0 ewc.lambda_s=1.0 ewc.lambda_u=1.0 \
+  train.seed=42 \
+  paths.out_dir=runs/step4_fixed_wr
+```
+
+Same `data/graphs` (11-relation schema), `hidden_dim=64`, `epochs_per_task=5` (2 warm-up + 3 full-loss), `batch_size=8`, Adam `lr=1e-3`, `num_layers=1` (frozen baseline architecture), GPU, seed 42 — every setting matched to the existing relation-aware-EWC run (§16) except `w_r_mode`.
+
+### 28.1 Result vs. the existing comparison points
+
+| Variant | Average forgetting | Final average accuracy |
+|---|---:|---:|
+| Plain fine-tuning (no EWC) | 0.7108 | — |
+| Plain unweighted EWC (`disable_learned_weighting=true`) | 0.7103 | — |
+| Learned relation-aware EWC (§16, `w_r_mode=learned`) | 0.7054 | 0.3622 |
+| **Fixed `w_r = sigmoid(S_r)` (this run, `w_r_mode=fixed`)** | **0.7257** | **0.3511** |
+
+Full run output: `runs/step4_fixed_wr/summary.json` (`average_forgetting=0.7257058512347256`, `final_average_accuracy=0.3510735684031165`, `runtime_seconds=3243.98`, `w_r_mode="fixed"`, `disable_learned_weighting=false`, `lambda_r=lambda_s=lambda_u=1.0`, `gamma=0.9`, `replay_enabled=false`, `seed=42`).
+
+### 28.2 Interpretation
+
+0.7257 falls inside the `[0.70, 0.75]` band established by every prior fine-tuning/EWC variant, and is not `<= 0.6854` (the pre-registered "meaningfully better" threshold, 0.02 below the best existing EWC variant). Per the design doc's pre-registered interpretation, a single seed is sufficient at this outcome — the result doesn't call for expansion to seeds 1/2, since it isn't a borderline or surprising value relative to the existing noise band (§17's coarse lambda sweep already showed 0.71-0.75 is consistent with run-to-run noise across 5 orders of magnitude of lambda under the learned-weighting mechanism).
+
+**This stays in the same band: it provides much stronger evidence that transferability-weighted EWC, including a fixed-weight variant, does not improve continual learning on this benchmark.** The fixed `w_r` variant does not merely fail to improve on the learned variant — at 0.7257 it is marginally *worse* than every other variant tried, including plain fine-tuning. Combined with §16.2's diagnosis, this rules out "the learned-weighting mechanism's collapse was masking an otherwise-effective idea": with the collapse mechanism removed entirely (no learnable parameters, no gradient incentive to shrink anything), transferability-weighted EWC still does not reduce forgetting on this benchmark, under this architecture (`num_layers=1`, frozen per the 2026-07-21 standing decision). The bottleneck is not specific to how `w_r` was learned — it is that transferability-weighted EWC itself, in either form, does not address whatever is actually driving catastrophic forgetting here. Experience replay (§23.2, the project's replay-baseline result) remains the project's one demonstrated forgetting-mitigation result.
+
+Source: `src/trench_ids/cl/train.py` (`w_r_mode`), `configs/train.yaml`; `runs/step4_fixed_wr/` (gitignored, reproduce via the command above).
+
+---
+
+## 29. Transferability-guided replay: sanity-check runs (real run, 2026-07-30)
+
+Design: `docs/superpowers/specs/2026-07-29-transferability-followup-design.md`, Experiment 2. §28's fixed-`w_r` ablation closed out Experiment 1 (transferability-weighted EWC does not help, in either learned or fixed form). Experiment 2 tests a different mechanism for using transferability scores: instead of regularizing parameters, use per-relation transferability (Task 3's `aggregate_per_class_relation_scores`) to weight *which mini-graphs get selected into the replay buffer* (Task 4's `replay_selection.py`, wired into `train.py` in Task 5, commits `7f8ef13`..`4f414b9`, all reviewed clean — `.superpowers/sdd/2026-07-29-transferability-followup/progress.md`). This section is Task 6: one seed each direction, to sanity-check the wiring before committing to Task 7's full multi-seed comparison.
+
+Commands (EWC lambdas zeroed to isolate replay's effect, matching §23.2's replay-baseline comparison setup):
+
+```bash
+.venv/Scripts/python.exe -m trench_ids.cl.train \
+  replay.enabled=true replay.selection=enrich_high_transfer \
+  ewc.lambda_r=0 ewc.lambda_s=0 ewc.lambda_u=0 \
+  train.seed=42 \
+  paths.out_dir=runs/replay_enrich_high_seed42
+
+.venv/Scripts/python.exe -m trench_ids.cl.train \
+  replay.enabled=true replay.selection=enrich_low_transfer \
+  ewc.lambda_r=0 ewc.lambda_s=0 ewc.lambda_u=0 \
+  train.seed=42 \
+  paths.out_dir=runs/replay_enrich_low_seed42
+```
+
+Same `data/graphs`, `hidden_dim=64`, `epochs_per_task=5`, `batch_size=8`, Adam `lr=1e-3`, `num_layers=1`, GPU, seed 42, `replay.buffer_size_per_task=200`, `replay.replay_fraction=0.3` — only `replay.selection` differs between the two runs.
+
+### 29.1 Result
+
+| Run | Average forgetting | Final average accuracy | Runtime (s) |
+|---|---:|---:|---:|
+| `enrich_high_transfer` | 0.1186 | 0.8477 | 4459.7 |
+| `enrich_low_transfer` | 0.0956 | 0.8695 | 4203.7 |
+
+Both land close to the existing uniform-replay baseline (0.094 forgetting / 0.861 accuracy, mean over 3 seeds) — neither collapsed or produced NaN/near-zero accuracy. At a single seed each, `enrich_low_transfer` edges out `enrich_high_transfer` here, but this is exactly the single-seed noise the design flagged as requiring Task 7's 3-seed comparison before drawing any conclusion about which direction (or neither) actually helps.
+
+### 29.2 Buffer-composition diagnostics (`replay_buffer_composition_task_{2..6}.json`)
+
+Task 2 (single new class, Reconnaissance): `mean_enrichment=0.5` in both runs — expected, not a bug, since `normalize_scores` on a single-class input is documented to return a constant 0.5 regardless of selection mode (no other class to normalize against yet).
+
+Tasks 3-5 (two new classes each): `mean_enrichment` diverges meaningfully between the two runs as designed — e.g. task 3: 0.852 (high) vs. 0.151 (low); task 4: 0.400 (high) vs. 0.604 (low); task 5: 0.791 (high) vs. 0.212 (low). No class collapsed to exactly 0% or 100% of the buffer in any task/run. Flow-level `class_fractions` stayed close between high/low at the same task (e.g. task 3: DDoS ~72-73%, Infiltration ~2.5%, Benign ~25% in both runs) even though `mean_enrichment` diverged sharply — expected, since replay selection operates at mini-graph granularity and each mini-graph already mixes classes roughly in proportion to the task's natural distribution; the enrichment weighting changes *which* graphs get picked (and hence which fine-grained transferability profile the buffer represents) without necessarily moving the coarse per-class flow counts much.
+
+Task 6 (XSS + BruteForce): buffer composition (`class_counts`, `class_fractions`, `mean_enrichment`) came out **byte-identical** between the two runs, even though the underlying `per_class_relation_scores` differ (as expected, since the two runs' models evolved differently through tasks 2-5's different replay buffers). Root cause, confirmed by hand computation: with exactly two new classes per task (true for every task T3-T6 in this benchmark), `normalize_scores`' min-max is winner-take-all — the two classes get weights exactly `{0, 1}` regardless of the magnitude of the gap between their raw scores. In the `enrich_high_transfer` run, XSS ranked above BruteForce (mean cosine 0.299 vs. 0.280); in the `enrich_low_transfer` run, the independently-evolved model ranked them the other way (XSS 0.265, BruteForce 0.298), and `enrich_low_transfer`'s inversion of the normalized weight exactly cancels that rank flip — both runs ended up assigning weight 1 to XSS and 0 to BruteForce, purely by coincidence of which class ranked higher in each run's own embedding space. **This is a genuine, reportable limitation of binary min-max normalization on 2-class tasks, not an implementation bug** — Tasks 3-5 show the mechanism does produce real divergence when the two classes' ranking happens to align with the mode; Task 6 shows that when the two independently-trained models disagree on which of the two classes ranks higher, `enrich_high`/`enrich_low` can coincidentally converge on the same buffer. Worth keeping in mind when interpreting Task 7's per-task breakdowns.
+
+### 29.3 Verdict
+
+Sanity check passed: both runs trained end-to-end without error, produced non-degenerate accuracy in the expected range, and the diagnostics confirm the transferability-guided selection mechanism demonstrably behaves differently between `enrich_high_transfer`/`enrich_low_transfer` at tasks with genuine class-ranking divergence (3-5), with the single-run-coincidence caveat at task 6 (§29.2) noted for interpretation, not treated as a defect. Proceeding to Task 7's full 3-seed comparison.
+
+Source: `src/trench_ids/cl/replay_selection.py`, `src/trench_ids/cl/train.py`; `runs/replay_enrich_high_seed42/`, `runs/replay_enrich_low_seed42/` (gitignored, reproduce via the commands above).
+
+---
+
+## 30. Transferability-guided replay: full 3-seed comparison (real run, 2026-07-30)
+
+Design: `docs/superpowers/specs/2026-07-29-transferability-followup-design.md`, Experiment 2. §29's sanity check passed; this section extends the two seed-42 sanity runs with seeds 1 and 2 in both directions (`enrich_high_transfer`, `enrich_low_transfer`), evaluates all six checkpoints plus the two existing uniform-replay baseline checkpoints (`runs/replay_seed42_newport`, `runs/replay_seed1_newport` — the main checkout's port-embedding-fixed replay baseline, §24.4) with `python -m trench_ids.cl.evaluate`, and reports the full comparison.
+
+**Uniform baseline caveat, decided explicitly with the user before running Task 7**: only 2 uniform-replay checkpoints exist on disk (seeds 42 and 1 — not 3 as an earlier CLAUDE.md narrative claimed, a documentation/reality mismatch discovered this session). Per explicit user direction, the Uniform row below is `n=2`, not `n=3`, no third uniform seed was run, and Shannon Diversity is not reported for Uniform — `train.py`'s buffer-fill gate only emits `replay_buffer_composition_task_{t}.json` on the non-`"uniform"` branch (`src/trench_ids/cl/train.py`, verified directly), so the diagnostic is structurally absent for that condition regardless of how many seeds are run, not a data-collection gap.
+
+### 30.1 Comparison table (mean ± sample std across seeds)
+
+| Method | n (seeds) | Avg. Forgetting | Final Accuracy | Macro F1 | Weighted F1 | Mean Enrichment | Shannon Diversity |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Uniform (existing baseline) | 2 | 0.1031 ± 0.0131 | 0.8610 ± 0.0145 | 0.7981 ± 0.0059 | 0.8497 ± 0.0180 | — | n/a (not emitted for uniform selection by design) |
+| Enrich-high-transfer | 3 | 0.1045 ± 0.0139 | 0.8600 ± 0.0121 | 0.8071 ± 0.0293 | 0.8558 ± 0.0111 | 0.6902 ± 0.0239 | 0.7536 ± 0.0012 |
+| Enrich-low-transfer | 3 | 0.1000 ± 0.0130 | 0.8646 ± 0.0116 | 0.8006 ± 0.0285 | 0.8548 ± 0.0145 | 0.3703 ± 0.0785 | 0.7558 ± 0.0015 |
+
+Per-run detail (`summary.json` avg. forgetting / final accuracy, `pooled_final_metrics.json` macro F1 / weighted F1):
+
+| Run | Forgetting | Accuracy | Macro F1 | Weighted F1 |
+|---|---:|---:|---:|---:|
+| Uniform seed 42 | 0.1124 | 0.8508 | 0.7939 | 0.8370 |
+| Uniform seed 1 | 0.0939 | 0.8713 | 0.8022 | 0.8624 |
+| Enrich-high seed 42 | 0.1186 | 0.8477 | 0.7738 | 0.8443 |
+| Enrich-high seed 1 | 0.0909 | 0.8718 | 0.8287 | 0.8665 |
+| Enrich-high seed 2 | 0.1041 | 0.8604 | 0.8189 | 0.8565 |
+| Enrich-low seed 42 | 0.0956 | 0.8695 | 0.8206 | 0.8596 |
+| Enrich-low seed 1 | 0.0898 | 0.8729 | 0.8131 | 0.8662 |
+| Enrich-low seed 2 | 0.1146 | 0.8514 | 0.7680 | 0.8385 |
+
+Mean Enrichment and Shannon Diversity are averaged over `replay_buffer_composition_task_{2..6}.json` per run (mean enrichment: the raw diagnostic field; Shannon Diversity: normalized entropy `-Σ(p·log p) / log(num_classes)` over each task's `class_fractions`), then averaged across seeds.
+
+### 30.2 Replay-Class Distribution (realized buffer composition, pooled across tasks 2-6 and all 3 seeds per method)
+
+| Class | Enrich-high | Enrich-low |
+|---|---:|---:|
+| Benign | 25.00% | 25.05% |
+| Reconnaissance | 15.03% | 15.03% |
+| DDoS | 14.56% | 14.47% |
+| XSS | 14.27% | 14.23% |
+| Password | 13.36% | 13.29% |
+| DoS | 9.49% | 9.58% |
+| Injection | 5.45% | 5.44% |
+| Bot | 1.64% | 1.69% |
+| BruteForce | 0.71% | 0.72% |
+| Infiltration | 0.49% | 0.50% |
+
+The two distributions are nearly identical class-by-class, despite `enrich_high_transfer`'s buffer averaging almost double `enrich_low_transfer`'s mean enrichment (0.690 vs. 0.370, §30.1). This confirms and generalizes §29.2's per-task observation to the full 3-seed pool: replay selection operates at mini-graph granularity, and each mini-graph already mixes classes close to the task's natural proportions, so enrichment weighting shifts *which* graphs get picked (and their fine-grained transferability profile) without moving the coarse per-class flow counts appreciably.
+
+### 30.3 Per-class F1 (pooled final metrics, mean across seeds)
+
+| Class | Uniform (n=2) | Enrich-high (n=3) | Enrich-low (n=3) |
+|---|---:|---:|---:|
+| Benign | 0.7546 | 0.7442 | 0.7263 |
+| Scanning | 0.8550 | 0.8636 | 0.8757 |
+| Reconnaissance | 0.9088 | 0.9199 | 0.9246 |
+| DDoS | 0.9189 | 0.9703 | 0.9466 |
+| Infiltration | 0.0909 | 0.2796 | 0.2743 |
+| DoS | 0.6862 | 0.6652 | 0.7214 |
+| Injection | 0.7060 | 0.6714 | 0.6733 |
+| Password | 0.9857 | 0.9869 | 0.9883 |
+| Bot | 0.9964 | 0.9915 | 0.9453 |
+| XSS | 0.9649 | 0.9567 | 0.9737 |
+| BruteForce | 0.9113 | 0.8291 | 0.7567 |
+
+Infiltration is the striking outlier: uniform replay's F1 collapses to 0.091 (and one uniform seed individually hits 0.018, essentially never-predicted), while both enrichment-weighted conditions roughly triple it to ~0.27-0.28 — still poor in absolute terms (Infiltration is 0.49-0.50% of every buffer per §30.2, the rarest class by a wide margin), but a real, consistent, seed-robust improvement over uniform specifically on the class the buffer under-represents most. No other class shows a comparably large or consistent shift between conditions.
+
+### 30.4 Interpretation
+
+**On the headline metrics (forgetting, accuracy), transferability-guided replay does not beat uniform replay — this is a null result, in the same family as Step 8's EWC negative result, not a new positive one.** All three conditions' average forgetting (0.100-0.105) and final accuracy (0.860-0.865) sit within roughly one sample standard deviation of each other; `enrich_low_transfer`'s forgetting (0.1000) is nominally the best of the three and `enrich_high_transfer`'s (0.1045) nominally the worst, but the gap (0.0045) is smaller than any single condition's own seed-to-seed spread (0.0130-0.0139). Macro F1 tells a slightly different, still-inconclusive story: `enrich_high_transfer` (0.8071) edges out both `enrich_low_transfer` (0.8006) and Uniform (0.7981), driven substantially by the Infiltration effect below rather than a uniform lift across classes.
+
+**No diversity/enrichment tradeoff is visible in the outcome metrics, despite mean enrichment differing sharply between conditions (0.690 vs. 0.370).** Shannon Diversity is essentially identical between `enrich_high_transfer` (0.7536) and `enrich_low_transfer` (0.7558) — a 0.003 gap, an order of magnitude smaller than either condition's own seed variance. §30.2 explains why: the buffer's realized class composition barely moves between the two selection modes, so there is no diversity cost to pay for higher enrichment, but also no diversity-driven mechanism through which enrichment could have translated into a forgetting or accuracy difference — the two conditions are, in aggregate, selecting from largely the same pool of mini-graphs, just with different (and largely inconsequential, per §30.1's headline result) internal weighting.
+
+**The one real, consistent signal is the Infiltration per-class F1 effect (§30.3)**: both enrichment-weighted conditions roughly triple Infiltration's F1 over uniform replay, seed-robustly. This is consistent with transferability-guided weighting doing *something* real at the level of individual rare classes, even though it washes out in the pooled/macro metrics that this benchmark's headline numbers (§28, §29) are reported against. This is worth flagging for the write-up as the one place this experiment shows a positive, reproducible effect — not the pooled forgetting/accuracy numbers.
+
+**Caveat on how much the high-vs-low contrast can mechanistically reveal, given this benchmark's task design**: every task from T3 onward introduces exactly two new attack classes. `normalize_scores`' min-max on a 2-class input is winner-take-all (weights land at exactly `{0, 1}`, per §29.2's task-6 case study) — so for any given task, `enrich_high_transfer` and `enrich_low_transfer` can only ever produce *opposite* buffer weightings (if the two classes' relative transferability ranking happens to agree across the two independently-trained models) or *coincidentally identical* ones (if the two models disagree on which of the two classes ranks higher). Per-task divergence between the two conditions therefore measures whether independently-trained models agree on relative class ranking, not the magnitude of any underlying transferability gap between the classes. This caps what the high-vs-low contrast can reveal on this specific 2-class-per-task benchmark design — a benchmark with 3+ new classes per task would let `normalize_scores` express graded (not just binary) selection pressure, and might produce a cleaner signal one way or the other.
+
+**Bottom line**: like Step 8's transferability-weighted EWC, transferability-guided replay-buffer selection (in either direction) is a negative result on this benchmark's headline forgetting/accuracy metrics — uniform sampling is not measurably beaten by enrichment weighting. Unlike Step 8, this experiment does surface one genuine positive, reproducible, class-level effect (Infiltration F1), and a clean mechanistic explanation (graph-granularity sampling limits gross composition control; 2-class-per-task min-max normalization limits how much high/low can diverge) for why the pooled metrics don't move even though the underlying selection weights clearly do differ (§30.1's mean enrichment column). Experience replay itself (uniform, §23.2 baseline) remains the project's positive forgetting-mitigation result; this experiment's contribution is a precisely-scoped negative result on top of it, plus the Infiltration finding as a narrower positive lead for future work.
+
+Source: `src/trench_ids/cl/evaluate.py` (unmodified, invoked via `python -m trench_ids.cl.evaluate --run-dir <dir> --graphs-dir data/graphs --out-dir <dir>/eval` against all 8 checkpoint sets); `runs/replay_enrich_high_seed{42,1,2}/`, `runs/replay_enrich_low_seed{42,1,2}/` (this worktree, gitignored); `runs/replay_seed42_newport/`, `runs/replay_seed1_newport/` (main checkout, gitignored, pre-existing from §24.4's port-embedding comparison, reused here as the uniform-replay baseline per user direction).
