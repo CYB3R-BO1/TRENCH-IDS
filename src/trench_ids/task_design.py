@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import json
 from pathlib import Path
 from typing import Any
 
@@ -172,7 +173,19 @@ def run(config_path: str | Path, threshold: float = 0.35) -> list[list[str]]:
     out_dir = Path(cfg["paths"]["out_dir"])
     sim = load_similarity_matrix(out_dir / "similarity_matrix.csv")
 
-    groups, scores = assign_groups(sim, threshold)
+    counts_path = out_dir / "class_counts.json"
+    sizes: dict[str, float] | None = None
+    if counts_path.exists():
+        sizes = {k: float(v) for k, v in json.loads(counts_path.read_text()).items()}
+        print(f"[task_design] size-aware tie-break using {counts_path}")
+    else:
+        print(
+            f"[task_design] {counts_path} not found -- falling back to "
+            "total-similarity-only grouping (run trench_ids.similarity first "
+            "to enable the size-aware tie-break)"
+        )
+
+    groups, scores = assign_groups(sim, threshold, sizes)
     print(f"[task_design] threshold={threshold}, isolate-and-bundle grouping ({len(groups)} tasks)")
     for i, (group, score) in enumerate(zip(groups, scores, strict=True), start=1):
         label = " + ".join(group)

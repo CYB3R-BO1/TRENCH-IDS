@@ -1170,3 +1170,51 @@ Every unseen class collapses onto one or two known classes with high confidence 
 Two real bugs found and fixed only by running against real data (not the synthetic test fixtures), both caught in the same-day whole-branch final review before merge: `load_memory_bank` (`src/trench_ids/cl/memory_bank.py`) didn't accept a `map_location`, so a memory bank saved on a CUDA machine couldn't load on this CPU-only worktree — fixed by adding an optional `map_location` parameter, threaded through from `inference_unseen.run()`'s `device` argument. Separately, the OOM fix's periodic-consolidation memory bound (§26.1) silently made the sample tail-biased for the two highest-volume classes — this only became visible once the branch was reviewed as a whole rather than task-by-task, since the OOM fix and the classes it affected were introduced and reviewed in different sessions weeks apart; fixed by replacing consolidation with single-pass reservoir sampling.
 
 Source: `src/trench_ids/unseen_data.py`, `src/trench_ids/unseen_graphs.py`, `src/trench_ids/cl/inference_unseen.py`, `src/trench_ids/cl/memory_bank.py` (`map_location` fix), `configs/unseen.yaml`, `configs/unseen_graphs.yaml`, `pyproject.toml` (`trench-unseen-data`/`trench-unseen-graphs`/`trench-infer-unseen` entry points). Implemented via subagent-driven-development on branch `worktree-unseen-attack-inference`, 5 tasks plus one whole-branch final-review fix wave; real-data-only bugs found and fixed beyond the plan's original scope: OOM from unbounded row accumulation before sampling, `sampled`/`corrupted_rows_dropped` manifest bookkeeping across multi-cycle consolidation, the vocab-gap raise-vs-drop policy change, the `map_location` fix, the reservoir-sampling replacement for tail-biased consolidation, pooled Dataset A metrics, and joinable Dataset B output keys.
+
+## 27. Step 10b full reproduction after data/runs loss (real run, 2026-07-29)
+
+`data/` and `runs/` were lost (not a code change) and regenerated from scratch on this machine: Step 1 (`trench_ids.preprocess`), Step 2 (`trench_ids.graphs`), then Step 4/7 replay training (`trench_ids.cl.train replay.enabled=true replay.buffer_size_per_task=200 replay.replay_fraction=0.3 ewc.lambda_r=0 ewc.lambda_s=0 ewc.lambda_u=0 train.seed=42 paths.out_dir=runs/replay_seed42_newport`, GPU, same command as §24.4's new-port-scheme seed-42 run) produced a fresh `runs/replay_seed42_newport/checkpoint_task_6.pt` + `memory_bank.pt`. §26's three-command reproduction recipe (`trench-unseen-data` → `trench-unseen-graphs` → `trench-infer-unseen`, all CPU-only) was then rerun against this fresh checkpoint to confirm Step 10b survives a full from-scratch pipeline rebuild, not just its original worktree run.
+
+Extraction and graph-build row counts matched §26.1 exactly (Ransomware 3,416/3,425, Reconnaissance 4,359/5,000, UNSW DoS 3,298/5,000 after vocab-gap drops, all others un-dropped) — the vocab-gap behavior is deterministic given the same seed and source CSVs, as expected. Inference numbers below differ slightly from §26.2-26.3 in exact decimals (this is a freshly-trained checkpoint — different random init/data order under the same seed/config, not a rerun of the original weights) but tell the same qualitative story: near-zero Dataset A accuracy with confident, non-random mis-mapping, and Dataset B collapsing onto known classes at high confidence.
+
+### 27.1 Dataset A — seen classes, unseen samples
+
+**Pooled:** accuracy 0.0046, precision (macro) 0.0921, recall (macro) 0.0016, F1 (macro) 0.0016, precision (weighted) 0.4733, recall (weighted) 0.0046, F1 (weighted) 0.0049.
+
+| Class | Source dataset(s) | Support | Precision | Recall | F1 |
+|---|---|---:|---:|---:|---:|
+| Reconnaissance | NF-UNSW-NB15-v2 | 4,359 | 0.0135 | 0.0161 | 0.0147 |
+| DoS (BoT-IoT + UNSW-NB15 pooled) | NF-BoT-IoT-v2 / NF-UNSW-NB15-v2 | 8,298 | 1.0000 | 0.0013 | 0.0026 |
+| DDoS | NF-BoT-IoT-v2 | 5,000 | 0.0000 | 0.0000 | 0.0000 |
+
+(This run's `dataset_a_metrics.json` pools the two DoS sources into one `support=8,298` row rather than §26.2's per-source breakdown — same underlying evaluation, different aggregation granularity in the output. DoS's precision of 1.0 at recall 0.0013 means the handful of correct DoS predictions were never false positives for that class, consistent with §26.2's note on the same pattern.) The confusion matrix confirms this is systematic mis-mapping, not random spread: most DoS/DDoS rows land on Benign or one specific wrong attack class rather than spreading evenly across the label space.
+
+### 27.2 Dataset B — behavioral analysis of classes never seen in training
+
+| Unseen class | Top predicted class | Share | 2nd predicted class | Share | Mean confidence | Median confidence | Std confidence |
+|---|---|---:|---|---:|---:|---:|---:|
+| Backdoor | Bot | 60.0% | Password | 23.8% | 0.752 | 0.798 | 0.147 |
+| MITM | XSS | 88.1% | DoS | 5.9% | 0.957 | 1.000 | 0.119 |
+| Ransomware | Scanning | 78.8% | Benign | 21.2% | 0.727 | 0.723 | 0.095 |
+| Web Attacks | DDoS | 98.6% | BruteForce | 1.1% | 0.965 | 0.999 | 0.081 |
+| Theft | Benign | 84.7% | BruteForce | 13.2% | 0.973 | 0.985 | 0.049 |
+
+As in §26.3, every unseen class collapses onto 1-2 known classes with high confidence (medians ≥0.72, mostly ≥0.98) — the softmax head never signals "novel" via confidence alone. This run's top-predicted class differs from §26.3's for every unseen class except the general shape of the finding (e.g. Backdoor was Reconnaissance/XSS in §26.3, Bot/Password here; MITM stayed XSS-dominant in both) — consistent with this being a different trained checkpoint (different random init under the same seed/config), not the same weights re-evaluated. The instability of *which* known class an unseen class collapses onto, across two otherwise-identical training runs, is itself worth noting: it suggests the nearest-known-class mapping is sensitive to incidental aspects of training (initialization, batch order) rather than a stable, reproducible association.
+
+Nearest known-class match per relation (cosine similarity against the fresh memory bank), same-relation-only:
+
+| Unseen class | `originates` | `protocol_of` | `service_of` | `targeted_by` | `terminated_by` |
+|---|---|---|---|---|---|
+| Backdoor | XSS (0.94) | BruteForce (0.89) | BruteForce (0.67) | Bot (0.61) | BruteForce (0.90) |
+| MITM | XSS (0.35) | XSS (0.93) | XSS (0.45) | XSS (0.48) | XSS (0.62) |
+| Ransomware | XSS (0.73) | BruteForce (0.91) | Scanning (0.28) | Bot (0.90) | XSS (0.70) |
+| Web Attacks | DoS (0.79) | BruteForce (0.93) | Password (0.90) | Password (0.95) | BruteForce (0.68) |
+| Theft | DDoS (0.69) | BruteForce (0.77) | XSS (0.37) | Bot (0.78) | Bot (0.79) |
+
+### 27.3 Interpretation
+
+This section exists to answer one question: does Step 10b's pipeline and its qualitative conclusions survive a full from-scratch data/runs rebuild, or was §26 an artifact of one specific training run? **Answer: it survives.** The pipeline reproduces cleanly end-to-end (extraction and graph-build counts match exactly), and both headline findings replicate — Dataset A generalization is still near-zero with systematic (not random) mis-mapping, and Dataset B still collapses to known classes at high confidence with no novelty signal. The *exact* known-class each unseen class maps to is not stable across training runs (§27.2), which is a genuine new observation this reproduction surfaces that a single run could not have shown — it should be read as evidence that the specific nearest-class mapping is not a robust, reportable finding on its own, even though the higher-level pattern (high-confidence collapse onto 1-2 known classes, no OOD signal) is.
+
+### 27.4 Reproduction
+
+Same recipe as §26.4: `trench-unseen-data` → `trench-unseen-graphs` → `trench-infer-unseen --device auto`, all CPU-only, against `runs/replay_seed42_newport/checkpoint_task_6.pt` + its memory bank. Full output: `runs/unseen_eval/{dataset_a_metrics.json, dataset_b_predictions.{json,csv}, dataset_b_confidence.{json,csv}, dataset_b_similarity.{json,csv}}` (gitignored, regenerated fresh this round).

@@ -23,6 +23,7 @@ Run:  python -m trench_ids.similarity --config configs/similarity.yaml
 from __future__ import annotations
 
 import argparse
+import json
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -214,6 +215,8 @@ def run(config_path: str | Path) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Candidate classes absent from data: {sorted(missing)}")
     print(f"[count] done: {dict(counts)}", flush=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "class_counts.json").write_text(json.dumps(dict(counts), indent=2))
 
     print(f"[sample] drawing ~{cfg['samples_per_class']} rows per class ...", flush=True)
     samples = sample_classes(cfg, classes, counts, rng)
