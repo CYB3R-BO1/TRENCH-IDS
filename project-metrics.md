@@ -944,4 +944,51 @@ Full run output: `runs/step4_fixed_wr/summary.json` (`average_forgetting=0.72570
 
 Source: `src/trench_ids/cl/train.py` (`w_r_mode`), `configs/train.yaml`; `runs/step4_fixed_wr/` (gitignored, reproduce via the command above).
 
+---
+
+## 24. Transferability-guided replay: sanity-check runs (real run, 2026-07-30)
+
+Design: `docs/superpowers/specs/2026-07-29-transferability-followup-design.md`, Experiment 2. §23's fixed-`w_r` ablation closed out Experiment 1 (transferability-weighted EWC does not help, in either learned or fixed form). Experiment 2 tests a different mechanism for using transferability scores: instead of regularizing parameters, use per-relation transferability (Task 3's `aggregate_per_class_relation_scores`) to weight *which mini-graphs get selected into the replay buffer* (Task 4's `replay_selection.py`, wired into `train.py` in Task 5, commits `7f8ef13`..`4f414b9`, all reviewed clean — `.superpowers/sdd/2026-07-29-transferability-followup/progress.md`). This section is Task 6: one seed each direction, to sanity-check the wiring before committing to Task 7's full multi-seed comparison.
+
+Commands (EWC lambdas zeroed to isolate replay's effect, matching the existing §23-adjacent replay-baseline comparison setup):
+
+```bash
+.venv/Scripts/python.exe -m trench_ids.cl.train \
+  replay.enabled=true replay.selection=enrich_high_transfer \
+  ewc.lambda_r=0 ewc.lambda_s=0 ewc.lambda_u=0 \
+  train.seed=42 \
+  paths.out_dir=runs/replay_enrich_high_seed42
+
+.venv/Scripts/python.exe -m trench_ids.cl.train \
+  replay.enabled=true replay.selection=enrich_low_transfer \
+  ewc.lambda_r=0 ewc.lambda_s=0 ewc.lambda_u=0 \
+  train.seed=42 \
+  paths.out_dir=runs/replay_enrich_low_seed42
+```
+
+Same `data/graphs`, `hidden_dim=64`, `epochs_per_task=5`, `batch_size=8`, Adam `lr=1e-3`, `num_layers=1`, GPU, seed 42, `replay.buffer_size_per_task=200`, `replay.replay_fraction=0.3` — only `replay.selection` differs between the two runs.
+
+### 24.1 Result
+
+| Run | Average forgetting | Final average accuracy | Runtime (s) |
+|---|---:|---:|---:|
+| `enrich_high_transfer` | 0.1186 | 0.8477 | 4459.7 |
+| `enrich_low_transfer` | 0.0956 | 0.8695 | 4203.7 |
+
+Both land close to the existing uniform-replay baseline (0.094 forgetting / 0.861 accuracy, mean over 3 seeds) — neither collapsed or produced NaN/near-zero accuracy. At a single seed each, `enrich_low_transfer` edges out `enrich_high_transfer` here, but this is exactly the single-seed noise the design flagged as requiring Task 7's 3-seed comparison before drawing any conclusion about which direction (or neither) actually helps.
+
+### 24.2 Buffer-composition diagnostics (`replay_buffer_composition_task_{2..6}.json`)
+
+Task 2 (single new class, Reconnaissance): `mean_enrichment=0.5` in both runs — expected, not a bug, since `normalize_scores` on a single-class input is documented to return a constant 0.5 regardless of selection mode (no other class to normalize against yet).
+
+Tasks 3-5 (two new classes each): `mean_enrichment` diverges meaningfully between the two runs as designed — e.g. task 3: 0.852 (high) vs. 0.151 (low); task 4: 0.400 (high) vs. 0.604 (low); task 5: 0.791 (high) vs. 0.212 (low). No class collapsed to exactly 0% or 100% of the buffer in any task/run. Flow-level `class_fractions` stayed close between high/low at the same task (e.g. task 3: DDoS ~72-73%, Infiltration ~2.5%, Benign ~25% in both runs) even though `mean_enrichment` diverged sharply — expected, since replay selection operates at mini-graph granularity and each mini-graph already mixes classes roughly in proportion to the task's natural distribution; the enrichment weighting changes *which* graphs get picked (and hence which fine-grained transferability profile the buffer represents) without necessarily moving the coarse per-class flow counts much.
+
+Task 6 (XSS + BruteForce): buffer composition (`class_counts`, `class_fractions`, `mean_enrichment`) came out **byte-identical** between the two runs, even though the underlying `per_class_relation_scores` differ (as expected, since the two runs' models evolved differently through tasks 2-5's different replay buffers). Root cause, confirmed by hand computation: with exactly two new classes per task (true for every task T3-T6 in this benchmark), `normalize_scores`' min-max is winner-take-all — the two classes get weights exactly `{0, 1}` regardless of the magnitude of the gap between their raw scores. In the `enrich_high_transfer` run, XSS ranked above BruteForce (mean cosine 0.299 vs. 0.280); in the `enrich_low_transfer` run, the independently-evolved model ranked them the other way (XSS 0.265, BruteForce 0.298), and `enrich_low_transfer`'s inversion of the normalized weight exactly cancels that rank flip — both runs ended up assigning weight 1 to XSS and 0 to BruteForce, purely by coincidence of which class ranked higher in each run's own embedding space. **This is a genuine, reportable limitation of binary min-max normalization on 2-class tasks, not an implementation bug** — Tasks 3-5 show the mechanism does produce real divergence when the two classes' ranking happens to align with the mode; Task 6 shows that when the two independently-trained models disagree on which of the two classes ranks higher, `enrich_high`/`enrich_low` can coincidentally converge on the same buffer. Worth keeping in mind when interpreting Task 7's per-task breakdowns.
+
+### 24.3 Verdict
+
+Sanity check passed: both runs trained end-to-end without error, produced non-degenerate accuracy in the expected range, and the diagnostics confirm the transferability-guided selection mechanism demonstrably behaves differently between `enrich_high_transfer`/`enrich_low_transfer` at tasks with genuine class-ranking divergence (3-5), with the single-run-coincidence caveat at task 6 (§24.2) noted for interpretation, not treated as a defect. Proceeding to Task 7's full 3-seed comparison.
+
+Source: `src/trench_ids/cl/replay_selection.py`, `src/trench_ids/cl/train.py`; `runs/replay_enrich_high_seed42/`, `runs/replay_enrich_low_seed42/` (gitignored, reproduce via the commands above).
+
 Source: `src/trench_ids/cl/inference.py`, `src/trench_ids/cl/evaluate.py`, `src/trench_ids/cl/train.py` (`save_checkpoint`, wired into `main()`), `pyproject.toml` (scikit-learn dependency, `trench-infer`/`trench-evaluate` entry points — the latter has the Hydra-resolution issue noted above under real-run reproduction, use `python -m trench_ids.cl.evaluate` instead). Implemented via subagent-driven-development, 7 tasks, 7 commits, all task reviews clean on first pass with no fix rounds required.
