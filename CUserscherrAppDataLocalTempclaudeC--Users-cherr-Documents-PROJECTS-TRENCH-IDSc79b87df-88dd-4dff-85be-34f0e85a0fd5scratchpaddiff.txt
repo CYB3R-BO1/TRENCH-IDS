@@ -1,0 +1,1412 @@
+diff --git a/configs/preprocess.yaml b/configs/preprocess.yaml
+index 8451ad5..3ec3963 100644
+--- a/configs/preprocess.yaml
++++ b/configs/preprocess.yaml
+@@ -18,24 +18,46 @@ datasets:
+   NF-BoT-IoT-v2: BoT
+ 
+ sampling:
+-  # NOTE: attack_per_class_cap is intentionally REMOVED. Every attack row
+-  # that passes trench_ids.labels.CLASS_DATASETS' per-dataset restriction
+-  # and isn't in EXCLUDED_CLASSES is kept, in full -- no pre-graph sampling
+-  # cap. See docs/superpowers/specs/2026-07-13-dataset-task-respec-design.md
+-  # §3. Any class-level balancing now happens after Step 2 graph
+-  # construction, on constructed graphs, not here.
+-
+-  # Benign pool retained per dataset during the streaming pass. Tasks draw
+-  # their benign quota from these pools (fresh per task, from the task's own
+-  # datasets). Kept as a runtime/memory safeguard -- not part of the
+-  # attack-cap removal.
+-  benign_per_dataset_cap: 60000
+-
+-  # Benign flows added to each task (split across that task's contributing
+-  # datasets). This is a Step 1 pool-size safeguard, not the final
+-  # attack:benign ratio a task's graphs see -- Step 2's benign_ratio
+-  # (configs/graph.yaml) controls that. See design spec §3a.
+-  benign_per_task: 8000
++  # QUOTA-BASED SAMPLING (rewritten 2026-08-16, replacing "keep every attack
++  # row in full, subsample benign to a small fixed pool").
++  #
++  # Why the previous design was replaced -- three measured defects, all
++  # traceable to the same root cause (attack volume was uncapped while the
++  # benign pool was fixed and tiny):
++  #
++  #   1. Benign duplication. Step 2's benign selector had to sample WITH
++  #      REPLACEMENT to reach benign_ratio, replicating ~5,600 unique train
++  #      flows 54-158x. Benign is ~25% of every pooled metric, so a quarter
++  #      of every headline number rested on a few thousand distinct flows.
++  #   2. Cross-task benign leakage. Tasks drew benign independently from
++  #      shared pools, so 47-72 flow_ids appeared in one task's train split
++  #      and another task's test split -- train/test contamination on the
++  #      benchmark's largest class.
++  #   3. Task-size and class-size imbalance. Largest:smallest task was 2.9x,
++  #      and within T3 the DDoS:Infiltration ratio was ~30:1, leaving
++  #      Infiltration at ~0.5% of the training signal (its F1 never rose
++  #      above 0.28 in any run). Per-class forgetting was not measurable for
++  #      the rare classes at all.
++  #
++  # The quota planner (preprocess.compute_quotas) fixes all three: every
++  # task gets the SAME budget, waterfilled evenly across its classes and
++  # their source datasets, and each task's benign slice is disjoint from
++  # every other task's.
++
++  # Attack rows per task, split as evenly as availability allows across that
++  # task's classes (a class short of its even share saturates and the
++  # remainder is redistributed). 390,000 is set by the binding constraint
++  # below: it is 3 x benign_per_task, so Step 2's benign_ratio=3.0 is exactly
++  # satisfiable with no sampling-with-replacement anywhere.
++  attack_per_task: 390000
++
++  # Benign rows per task, drawn disjointly across tasks from that task's own
++  # contributing datasets. The ceiling is NF-BoT-IoT-v2: T2 (Reconnaissance)
++  # can only draw benign from BoT-IoT, which holds just 135,037 benign rows
++  # in total (verified against the raw CSV). 130,000 leaves headroom under
++  # that hard ceiling while keeping every task identical in size. ToN
++  # (6,099,469) and CSE (16,635,567) are nowhere near binding.
++  benign_per_task: 130000
+ 
+   # CSV read chunk size (rows). Files are up to 6 GB — never read whole.
+   chunk_size: 500000
+diff --git a/configs/train.yaml b/configs/train.yaml
+index bda906f..c5e0d61 100644
+--- a/configs/train.yaml
++++ b/configs/train.yaml
+@@ -10,6 +10,16 @@ model:
+   attn_dim: 128
+   num_layers: 1
+   port_tail_buckets: 32
++  # How a node type's per-relation embeddings are merged.
++  #   attention  HAN-style convex combination (softmax weights, sums to 1).
++  #              The project default throughout; kept as the default so every
++  #              earlier result stays reproducible from this config.
++  #   concat     concatenate then project. Tests whether the convex
++  #              combination -- which compresses R x hidden_dim to hidden_dim
++  #              before anything reads it -- is what puts the GNN behind the
++  #              non-graph Flat+Host baseline (0.749 vs 0.854 mean final
++  #              accuracy at matched parameters). See ConcatFusion.
++  fusion: attention
+ 
+ optim:
+   name: adam
+@@ -39,6 +49,13 @@ ewc:
+   # equivalent, since it would zero out Flow's 5 relations entirely rather
+   # than regularizing them like every other group.
+   disable_learned_weighting: false
++  # Fixed, non-learned w_r ablation (2026-07-29 design,
++  # docs/superpowers/specs/2026-07-29-transferability-followup-design.md):
++  # "learned" (default) routes S_r through importance_mlp as before;
++  # "fixed" uses w_r = sigmoid(S_r) directly, no learnable parameters, so
++  # there is nothing for gradient descent to collapse; "disabled" is an
++  # explicit alias for disable_learned_weighting=True (w_r fixed at 1.0).
++  w_r_mode: learned
+   # Diagnostic instrumentation (2026-07-21 lambda-sweep follow-up): when
+   # true, writes runs/<out_dir>/loss_components_task_{t}.jsonl -- one line
+   # per full-loss epoch with L_cls and the raw/weighted EWC breakdown, so
+@@ -53,6 +70,52 @@ replay:
+   enabled: false
+   buffer_size_per_task: 200 # ~2.5% of one task's ~8135 train graphs
+   replay_fraction: 0.3 # target share of each task's combined training pool
++  # Transferability-guided buffer selection (2026-07-29 design,
++  # docs/superpowers/specs/2026-07-29-transferability-followup-design.md):
++  # "uniform" (default) is an exact passthrough to random.sample, keeping
++  # the existing §23 replay baseline byte-for-byte reproducible.
++  # "enrich_high_transfer"/"enrich_low_transfer" weight buffer sampling by
++  # each graph's enrichment for classes with high/low similarity to
++  # already-banked classes. Task 1 always uses uniform regardless of this
++  # setting (no transferability signal exists yet).
++  selection: uniform
++
++# Transferability-weighted relation distillation (TRD) -- the replacement
++# for relation-aware EWC above, which a Fisher-mass audit showed could only
++# ever modulate 2.2% of its own penalty (see
++# src/trench_ids/cl/distillation.py for the full diagnosis). Disabled by
++# default so every pre-existing run config reproduces unchanged.
++distill:
++  enabled: false
++  # Weight on L_TRD relative to L_cls. The penalty is a mean cosine distance
++  # in [0, 2] and the relation weights sum to 1, so lambda_d is directly
++  # comparable to the cross-entropy scale -- unlike the EWC lambdas, whose
++  # useful range depended on the Fisher magnitudes.
++  lambda_d: 1.0
++  # uniform | transfer | inverse -- see distillation.WEIGHTING_MODES. These
++  # three form the ablation that tests the project's actual hypothesis:
++  # "transfer" is the proposed method, "uniform" the preserve-everything
++  # control, "inverse" the sign control.
++  weighting: transfer
++  # Softmax temperature turning S_r into w_r. Lower = more selective.
++  # Measured on real runs: S_r spans roughly 0.0-0.85 across relations, so
++  # 0.1 comes out nearly one-hot -- it collapsed "transfer" to "regularise
++  # service_of alone", and service_of happens to be the relation that drifts
++  # least across a task boundary (0.05 cosine, versus 0.60 for
++  # terminated_by), making the penalty near-inert. 0.3 preserves a clear
++  # ordering while leaving every relation a non-negligible share.
++  temperature: 0.3
++  # cosine | logit | both -- see distillation.OBJECTIVES. "cosine" matches
++  # the relation embeddings, "logit" matches what each relation says about
++  # the classes (through the frozen old head), "both" sums them. Default
++  # "both": the two failure modes -- representation drift and decision-
++  # boundary drift -- are independent, and this benchmark exhibits both.
++  objective: both
++  # Softmax temperature for the logit term (Hinton et al. 2015). 2.0 softens
++  # the target enough to carry inter-class similarity structure rather than
++  # just the argmax; the term is rescaled by tau^2 so this does not act as a
++  # second lambda.
++  logit_temperature: 2.0
+ 
+ paths:
+   graphs_dir: data/graphs
+diff --git a/configs/unseen.yaml b/configs/unseen.yaml
+new file mode 100644
+index 0000000..83fde67
+--- /dev/null
++++ b/configs/unseen.yaml
+@@ -0,0 +1,47 @@
++seed: 42
++paths:
++  raw_dir: dataset
++  out_dir: data/unseen
++chunk_size: 500000
++sample_cap: 5000
++classes:
++  # Dataset B -- unseen attack classes (no CLASS_DATASETS entry at all)
++  - canonical_label: Backdoor
++    dataset_dir: NF-ToN-IoT-v2
++    dataset_code: ToN
++    evaluation_type: unseen_class
++  - canonical_label: MITM
++    dataset_dir: NF-ToN-IoT-v2
++    dataset_code: ToN
++    evaluation_type: unseen_class
++  - canonical_label: Ransomware
++    dataset_dir: NF-ToN-IoT-v2
++    dataset_code: ToN
++    evaluation_type: unseen_class
++  - canonical_label: Web Attacks
++    dataset_dir: NF-CSE-CIC-IDS2018-v2
++    dataset_code: CSE
++    evaluation_type: unseen_class
++  - canonical_label: Theft
++    dataset_dir: NF-BoT-IoT-v2
++    dataset_code: BoT
++    evaluation_type: unseen_class
++  # Dataset A -- seen classes, unseen samples (CLASS_DATASETS-disallowed
++  # source for a class the model already knows, or a dataset never opened
++  # by trench_ids.preprocess at all)
++  - canonical_label: DDoS
++    dataset_dir: NF-BoT-IoT-v2
++    dataset_code: BoT
++    evaluation_type: seen_class_unseen_samples
++  - canonical_label: DoS
++    dataset_dir: NF-BoT-IoT-v2
++    dataset_code: BoT
++    evaluation_type: seen_class_unseen_samples
++  - canonical_label: Reconnaissance
++    dataset_dir: NF-UNSW-NB15-v2
++    dataset_code: UNSW
++    evaluation_type: seen_class_unseen_samples
++  - canonical_label: DoS
++    dataset_dir: NF-UNSW-NB15-v2
++    dataset_code: UNSW
++    evaluation_type: seen_class_unseen_samples
+diff --git a/configs/unseen_graphs.yaml b/configs/unseen_graphs.yaml
+new file mode 100644
+index 0000000..d1142a1
+--- /dev/null
++++ b/configs/unseen_graphs.yaml
+@@ -0,0 +1,43 @@
++paths:
++  unseen_dir: data/unseen
++  vocab_path: data/graphs/vocab.json
++  out_dir: data/unseen/graphs
++graph_size: 300
++features:
++  - IN_BYTES
++  - IN_PKTS
++  - OUT_BYTES
++  - OUT_PKTS
++  - TCP_FLAGS
++  - CLIENT_TCP_FLAGS
++  - SERVER_TCP_FLAGS
++  - FLOW_DURATION_MILLISECONDS
++  - DURATION_IN
++  - DURATION_OUT
++  - MIN_TTL
++  - MAX_TTL
++  - LONGEST_FLOW_PKT
++  - SHORTEST_FLOW_PKT
++  - MIN_IP_PKT_LEN
++  - MAX_IP_PKT_LEN
++  - SRC_TO_DST_SECOND_BYTES
++  - DST_TO_SRC_SECOND_BYTES
++  - RETRANSMITTED_IN_BYTES
++  - RETRANSMITTED_IN_PKTS
++  - RETRANSMITTED_OUT_BYTES
++  - RETRANSMITTED_OUT_PKTS
++  - SRC_TO_DST_AVG_THROUGHPUT
++  - DST_TO_SRC_AVG_THROUGHPUT
++  - NUM_PKTS_UP_TO_128_BYTES
++  - NUM_PKTS_128_TO_256_BYTES
++  - NUM_PKTS_256_TO_512_BYTES
++  - NUM_PKTS_512_TO_1024_BYTES
++  - NUM_PKTS_1024_TO_1514_BYTES
++  - TCP_WIN_MAX_IN
++  - TCP_WIN_MAX_OUT
++  - ICMP_TYPE
++  - ICMP_IPV4_TYPE
++  - DNS_QUERY_ID
++  - DNS_QUERY_TYPE
++  - DNS_TTL_ANSWER
++  - FTP_COMMAND_RET_CODE
+diff --git a/pyproject.toml b/pyproject.toml
+index b766b1b..4bc9d7c 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -15,6 +15,7 @@ dependencies = [
+     "matplotlib>=3.8",
+     "scipy>=1.11",
+     "scikit-learn>=1.3",
++    "psutil>=5.9",
+ ]
+ 
+ [project.optional-dependencies]
+@@ -29,9 +30,18 @@ trench-similarity = "trench_ids.similarity:main"
+ trench-graphs = "trench_ids.graphs:main"
+ trench-graph-composition = "trench_ids.graph_composition:main"
+ trench-train = "trench_ids.cl.train:main"
++trench-train-flat = "trench_ids.cl.train_flat:main"
++trench-compare-runs = "trench_ids.cl.compare_runs:main"
+ trench-transferability-report = "trench_ids.cl.transferability_report:main"
+ trench-infer = "trench_ids.cl.inference:main"
+ trench-evaluate = "trench_ids.cl.evaluate:main"
++trench-novelty = "trench_ids.cl.novelty:main"
++trench-drift = "trench_ids.cl.drift:main"
++trench-run-matrix = "trench_ids.cl.run_matrix:main"
++trench-report = "trench_ids.cl.report:main"
++trench-unseen-data = "trench_ids.unseen_data:main"
++trench-unseen-graphs = "trench_ids.unseen_graphs:main"
++trench-infer-unseen = "trench_ids.cl.inference_unseen:main"
+ 
+ [build-system]
+ requires = ["hatchling"]
+diff --git a/src/trench_ids/cl/ewc.py b/src/trench_ids/cl/ewc.py
+index c6c3e07..9eb40e3 100644
+--- a/src/trench_ids/cl/ewc.py
++++ b/src/trench_ids/cl/ewc.py
+@@ -170,6 +170,18 @@ class OnlineEWCManager:
+             group_name: OnlineEWCState(names, gamma) for group_name, names in self.groups.items()
+         }
+ 
++    def any_lambda_nonzero(self) -> bool:
++        """Whether this manager contributes anything to the loss at all.
++
++        Callers use it to skip work whose only consumer is the EWC penalty
++        -- the Fisher update and the temporary-prototype pass -- when every
++        lambda is zero. Both cost a full sweep over the task's training set,
++        and most arms in the experiment matrix deliberately run with EWC off,
++        so doing them unconditionally spends real hours computing numbers no
++        loss reads.
++        """
++        return bool(self.lambda_r or self.lambda_s or self.lambda_u)
++
+     def loss(
+         self, model: nn.Module, classifier: nn.Module, w_r: dict[str, torch.Tensor]
+     ) -> torch.Tensor:
+diff --git a/src/trench_ids/cl/inference.py b/src/trench_ids/cl/inference.py
+index c35a2c9..536b890 100644
+--- a/src/trench_ids/cl/inference.py
++++ b/src/trench_ids/cl/inference.py
+@@ -22,20 +22,75 @@ from torch_geometric.data import HeteroData
+ from torch_geometric.loader import DataLoader
+ 
+ from trench_ids.cl.train import load_split
++from trench_ids.model.flat import FlatFlowEncoder
+ from trench_ids.model.rhgnn import RelationSpecificHeteroGNN
+ 
+ SUPPORTED_CHECKPOINT_VERSION = 1
+ 
++# Checkpoints written before the non-graph baseline existed carry no
++# "model_type" key; they are all RelationSpecificHeteroGNN runs.
++DEFAULT_MODEL_TYPE = "rhgnn"
++
++
++def build_model(
++    config: dict, sample_graph, device: torch.device
++) -> torch.nn.Module:
++    """Rebuild the encoder a checkpoint's ``config`` describes.
++
++    Dispatches on ``config["model_type"]``: ``"rhgnn"`` (the default, and
++    what every pre-2026-08-07 checkpoint implicitly is) builds the
++    relation-specific heterogeneous GNN; ``"flat"`` builds the non-graph
++    baseline. ``sample_graph`` supplies edge/node-type metadata and is used
++    only by the GNN path -- the flat encoder has no schema to match, which
++    is the whole point of it.
++    """
++    model_type = config.get("model_type", DEFAULT_MODEL_TYPE)
++    if model_type == DEFAULT_MODEL_TYPE:
++        return RelationSpecificHeteroGNN.from_graph(
++            sample_graph,
++            hidden_dim=config["hidden_dim"],
++            protocol_vocab_size=config["protocol_vocab_size"],
++            service_vocab_size=config["service_vocab_size"],
++            num_layers=config["num_layers"],
++            attn_dim=config["attn_dim"],
++            port_tail_buckets=config["port_tail_buckets"],
++            # Defaults to "attention" for checkpoints predating the key --
++            # all of which were attention-fusion runs. Getting this wrong
++            # would not silently degrade accuracy, it would fail to load:
++            # the two modes have different parameter sets.
++            fusion=config.get("fusion", "attention"),
++        ).to(device)
++    if model_type == "flat":
++        use_host_features = config.get("use_host_features", False)
++        return FlatFlowEncoder(
++            hidden_dim=config["hidden_dim"],
++            protocol_vocab_size=config["protocol_vocab_size"],
++            service_vocab_size=config["service_vocab_size"],
++            port_tail_buckets=config["port_tail_buckets"],
++            use_host_features=use_host_features,
++            # None lets FlatFlowEncoder pick the width matching this arm;
++            # every checkpoint train_flat.py writes records the resolved
++            # value, so this fallback only covers hand-built configs.
++            mlp_hidden=config.get("mlp_hidden"),
++        ).to(device)
++    raise ValueError(f"Unknown model_type {model_type!r} in checkpoint config")
++
+ 
+ def load_checkpoint(
+     path: Path, graphs_dir: Path, device: torch.device
+-) -> tuple[RelationSpecificHeteroGNN, torch.nn.Linear, dict]:
++) -> tuple[torch.nn.Module, torch.nn.Linear, dict]:
+     """Rebuilds the model + classifier from a checkpoint saved by
+     trench_ids.cl.train.save_checkpoint. Reads task 1's train split's first
+     graph purely for edge/node-type metadata
+     (RelationSpecificHeteroGNN.from_graph) -- every mini-graph in this
+     benchmark shares the same schema, so any graph would do; task 1's train
+-    split is guaranteed to exist for any run that reached checkpointing."""
++    split is guaranteed to exist for any run that reached checkpointing.
++
++    The returned encoder's concrete class depends on the checkpoint's
++    ``model_type`` (see ``build_model``); both satisfy the same
++    ``forward(graph) -> RelationSpecificOutput`` contract, so ``predict``
++    and everything downstream of it (``trench_ids.cl.evaluate``) is
++    unchanged either way."""
+     checkpoint = torch.load(
+         path, map_location=device, weights_only=False
+     )  # trusted, first-party output (same convention as memory_bank.load_memory_bank)
+@@ -47,15 +102,7 @@ def load_checkpoint(
+         )
+     config = checkpoint["config"]
+     sample_graph = load_split(graphs_dir, 1, "train")[0]
+-    model = RelationSpecificHeteroGNN.from_graph(
+-        sample_graph,
+-        hidden_dim=config["hidden_dim"],
+-        protocol_vocab_size=config["protocol_vocab_size"],
+-        service_vocab_size=config["service_vocab_size"],
+-        num_layers=config["num_layers"],
+-        attn_dim=config["attn_dim"],
+-        port_tail_buckets=config["port_tail_buckets"],
+-    ).to(device)
++    model = build_model(config, sample_graph, device)
+     model.load_state_dict(checkpoint["model_state_dict"])
+     model.eval()
+ 
+@@ -67,7 +114,7 @@ def load_checkpoint(
+ 
+ 
+ def predict(
+-    model: RelationSpecificHeteroGNN,
++    model: torch.nn.Module,
+     classifier: torch.nn.Linear,
+     graphs: list[HeteroData],
+     device: torch.device,
+diff --git a/src/trench_ids/cl/inference_unseen.py b/src/trench_ids/cl/inference_unseen.py
+new file mode 100644
+index 0000000..6fe51d0
+--- /dev/null
++++ b/src/trench_ids/cl/inference_unseen.py
+@@ -0,0 +1,308 @@
++"""Step 10 (third bullet) -- inference and behavioral analysis on
++unseen-attack data (trench_ids.unseen_graphs's output).
++
++Dataset A (evaluation_type="seen_class_unseen_samples") is scored with
++ordinary classification metrics (trench_ids.cl.evaluate.compute_metrics) --
++a ground-truth label exists in the classifier's output space.
++
++Dataset B (evaluation_type="unseen_class") does NOT evaluate classification
++accuracy -- there is no output neuron for an unseen class, so accuracy is
++undefined. Instead it characterizes representation behavior via:
++
++  1. Prediction distribution -- full percentage breakdown of which known
++     class each sample's argmax prediction lands on.
++  2. Confidence statistics -- mean/median/std of max-softmax probability.
++  3. Relation-specific embedding similarity -- reuses
++     trench_ids.cl.transferability's existing per-relation cosine-
++     similarity machinery, pointed at Dataset B's graphs instead of a new
++     task's graphs. Same-relation-only comparison.
++
++No dedicated OOD/novelty detector is built here -- that is out of scope
++(see docs/superpowers/specs/2026-07-27-unseen-attack-inference-design.md).
++
++Run: trench-infer-unseen --checkpoint runs/replay_seed42_newport/checkpoint_task_6.pt \
++    --unseen-graphs-dir data/unseen/graphs --out-dir runs/unseen_eval
++  or: python -m trench_ids.cl.inference_unseen ...
++"""
++
++from __future__ import annotations
++
++import argparse
++import csv
++import json
++from collections import Counter
++from pathlib import Path
++from typing import Any
++
++import numpy as np
++import torch
++from torch_geometric.data import HeteroData
++from torch_geometric.loader import DataLoader
++
++from trench_ids.cl.evaluate import compute_metrics, pool_predictions
++from trench_ids.cl.inference import load_checkpoint, predict
++from trench_ids.cl.memory_bank import load_memory_bank
++from trench_ids.cl.transferability import estimate_transferability
++from trench_ids.model.rhgnn import RelationSpecificHeteroGNN
++
++
++def prediction_distribution(y_pred: list[int], label_names: list[str]) -> list[dict[str, Any]]:
++    """Full percentage breakdown of predicted-class distribution, ranked
++    most to least frequent -- not just the argmax mode, so a diffuse
++    distribution reads differently from a concentrated one."""
++    total = len(y_pred)
++    if total == 0:
++        return []
++    counts = Counter(y_pred)
++    ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
++    return [
++        {
++            "predicted_class": label_names[idx],
++            "count": count,
++            "percentage": round(100.0 * count / total, 4),
++        }
++        for idx, count in ranked
++    ]
++
++
++def confidence_stats(y_prob: list[list[float]]) -> dict[str, float]:
++    """Mean/median/std of max-softmax probability. The standard deviation
++    distinguishes "consistently confident" from "occasionally confident"."""
++    if not y_prob:
++        return {"mean_max_softmax": 0.0, "median_max_softmax": 0.0, "std_max_softmax": 0.0}
++    max_probs = np.array([max(row) for row in y_prob])
++    return {
++        "mean_max_softmax": float(max_probs.mean()),
++        "median_max_softmax": float(np.median(max_probs)),
++        "std_max_softmax": float(max_probs.std()),
++    }
++
++
++def compute_class_relation_means(
++    model: RelationSpecificHeteroGNN,
++    graphs: list[HeteroData],
++    device: torch.device,
++    batch_size: int,
++) -> dict[str, torch.Tensor]:
++    """Mean per-relation Flow embedding across every row in `graphs`.
++
++    Unlike trench_ids.cl.memory_bank.RelationMeanAccumulator (which masks
++    per-row by known-class index via graph["flow"].y), no masking is
++    needed or possible here: every graph in this list belongs to exactly
++    one unseen class (trench_ids.unseen_data writes one parquet, and
++    trench_ids.unseen_graphs one .pt file, per class), and Dataset B's y is
++    the -1 sentinel, not a usable class index.
++    """
++    model.eval()
++    sums: dict[str, torch.Tensor] = {}
++    count = 0
++    loader = DataLoader(graphs, batch_size=batch_size)
++    with torch.no_grad():
++        for batch in loader:
++            batch = batch.to(device)
++            output = model(batch)
++            n = batch["flow"].y.shape[0]
++            count += n
++            for relation, embed in output.relations["flow"].items():
++                contribution = embed.sum(dim=0).detach()
++                if relation in sums:
++                    sums[relation] = sums[relation] + contribution
++                else:
++                    sums[relation] = contribution.clone()
++    return {relation: total / count for relation, total in sums.items()}
++
++
++def similarity_report(
++    unseen_means: dict[str, dict[str, torch.Tensor]],
++    bank: dict[str, dict[str, torch.Tensor]],
++) -> dict[str, dict[str, dict[str, float]]]:
++    """Re-nests transferability.estimate_transferability's
++    {unseen_class: {known_class: {relation: cosine}}} output into
++    {unseen_class: {relation: {known_class: cosine}}}, the shape declared
++    in the design spec (grouped by relation first, since that's how a
++    reader compares one relation across known classes)."""
++    raw = estimate_transferability(unseen_means, bank)
++    nested: dict[str, dict[str, dict[str, float]]] = {}
++    for unseen_class, by_known_class in raw.items():
++        nested[unseen_class] = {}
++        for known_class, by_relation in by_known_class.items():
++            for relation, cosine in by_relation.items():
++                nested[unseen_class].setdefault(relation, {})[known_class] = cosine
++    return nested
++
++
++def similarity_rows(
++    nested: dict[str, dict[str, dict[str, float]]],
++) -> list[tuple[str, str, str, float]]:
++    return [
++        (unseen_class, relation, known_class, cosine)
++        for unseen_class, by_relation in nested.items()
++        for relation, by_known_class in by_relation.items()
++        for known_class, cosine in by_known_class.items()
++    ]
++
++
++def run(
++    checkpoint_path: Path,
++    graphs_dir_for_schema: Path,
++    unseen_graphs_dir: Path,
++    unseen_manifest_path: Path,
++    memory_bank_path: Path,
++    out_dir: Path,
++    device: torch.device,
++    batch_size: int,
++) -> dict[str, Any]:
++    out_dir.mkdir(parents=True, exist_ok=True)
++    manifest = json.loads(Path(unseen_manifest_path).read_text())
++    model, classifier, checkpoint = load_checkpoint(
++        Path(checkpoint_path), Path(graphs_dir_for_schema), device
++    )
++    label_names = checkpoint["config"]["label_names"]
++
++    dataset_a: list[dict[str, Any]] = []
++    dataset_a_results: list[dict[str, Any]] = []
++    dataset_b_predictions: dict[str, Any] = {}
++    dataset_b_confidence: dict[str, Any] = {}
++    # Keyed on slug (not canonical_label) so it joins with dataset_b_predictions/
++    # dataset_b_confidence -- see Finding #3. Using canonical_label here would
++    # also risk silently merging distinct manifest entries that happen to share
++    # a canonical_label (e.g. Dataset A's two "DoS" entries), even though that
++    # collision can't currently occur within Dataset B specifically.
++    dataset_b_means: dict[str, dict[str, torch.Tensor]] = {}
++    slug_to_canonical: dict[str, str] = {}
++
++    for slug, entry in manifest["classes"].items():
++        graphs = torch.load(Path(unseen_graphs_dir) / f"{slug}.pt", weights_only=False)
++        result = predict(model, classifier, graphs, device, batch_size, label_names)
++
++        if entry["evaluation_type"] == "seen_class_unseen_samples":
++            metrics = compute_metrics(result["y_true"], result["y_pred"], label_names)
++            dataset_a.append({"slug": slug, **entry, "metrics": metrics})
++            dataset_a_results.append(result)
++        else:
++            canonical_label = entry["canonical_label"]
++            slug_to_canonical[slug] = canonical_label
++
++            pred_rows = prediction_distribution(result["y_pred"], label_names)
++            for row in pred_rows:
++                row["unseen_class"] = slug
++                row["canonical_label"] = canonical_label
++            dataset_b_predictions[slug] = pred_rows
++
++            conf = confidence_stats(result["y_prob"])
++            conf["unseen_class"] = slug
++            conf["canonical_label"] = canonical_label
++            dataset_b_confidence[slug] = conf
++
++            dataset_b_means[slug] = compute_class_relation_means(
++                model, graphs, device, batch_size
++            )
++
++    # Pooled Dataset A metrics -- micro-averaged over every Dataset A sample,
++    # alongside (not replacing) the per-class list already built above.
++    dataset_a_pooled_metrics: dict[str, Any] = {}
++    if dataset_a_results:
++        pooled = pool_predictions(dataset_a_results)
++        dataset_a_pooled_metrics = compute_metrics(
++            pooled["y_true"], pooled["y_pred"], pooled["label_names"]
++        )
++
++    bank = load_memory_bank(Path(memory_bank_path), map_location=device)
++    dataset_b_similarity = similarity_report(dataset_b_means, bank)  # keyed by slug
++    dataset_b_similarity_out = {
++        slug: {"canonical_label": slug_to_canonical[slug], "similarity": by_relation}
++        for slug, by_relation in dataset_b_similarity.items()
++    }
++
++    (out_dir / "dataset_a_metrics.json").write_text(
++        json.dumps({"per_class": dataset_a, "pooled": dataset_a_pooled_metrics}, indent=2)
++    )
++    (out_dir / "dataset_b_predictions.json").write_text(json.dumps(dataset_b_predictions, indent=2))
++    (out_dir / "dataset_b_confidence.json").write_text(json.dumps(dataset_b_confidence, indent=2))
++    (out_dir / "dataset_b_similarity.json").write_text(
++        json.dumps(dataset_b_similarity_out, indent=2)
++    )
++
++    with open(out_dir / "dataset_b_predictions.csv", "w", newline="") as f:
++        writer = csv.writer(f)
++        writer.writerow(["unseen_class", "canonical_label", "predicted_class", "percentage"])
++        for slug, rows in dataset_b_predictions.items():
++            for row in rows:
++                writer.writerow(
++                    [slug, slug_to_canonical[slug], row["predicted_class"], row["percentage"]]
++                )
++
++    with open(out_dir / "dataset_b_confidence.csv", "w", newline="") as f:
++        writer = csv.writer(f)
++        writer.writerow(
++            [
++                "unseen_class",
++                "canonical_label",
++                "mean_max_softmax",
++                "median_max_softmax",
++                "std_max_softmax",
++            ]
++        )
++        for slug, stats in dataset_b_confidence.items():
++            writer.writerow(
++                [
++                    slug,
++                    slug_to_canonical[slug],
++                    stats["mean_max_softmax"],
++                    stats["median_max_softmax"],
++                    stats["std_max_softmax"],
++                ]
++            )
++
++    with open(out_dir / "dataset_b_similarity.csv", "w", newline="") as f:
++        writer = csv.writer(f)
++        writer.writerow(
++            ["unseen_class", "canonical_label", "relation", "known_class", "cosine_similarity"]
++        )
++        for slug, relation, known_class, cosine in similarity_rows(dataset_b_similarity):
++            writer.writerow([slug, slug_to_canonical[slug], relation, known_class, cosine])
++
++    return {
++        "dataset_a": dataset_a,
++        "dataset_a_pooled": dataset_a_pooled_metrics,
++        "dataset_b_predictions": dataset_b_predictions,
++        "dataset_b_confidence": dataset_b_confidence,
++        "dataset_b_similarity": dataset_b_similarity_out,
++    }
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description="Step 10 -- unseen-attack inference.")
++    parser.add_argument(
++        "--checkpoint", default="runs/replay_seed42_newport/checkpoint_task_6.pt"
++    )
++    parser.add_argument("--graphs-dir", default="data/graphs")
++    parser.add_argument("--unseen-graphs-dir", default="data/unseen/graphs")
++    parser.add_argument("--unseen-manifest", default="data/unseen/manifest.json")
++    parser.add_argument("--memory-bank", default="runs/replay_seed42_newport/memory_bank.pt")
++    parser.add_argument("--out-dir", default="runs/unseen_eval")
++    parser.add_argument("--batch-size", type=int, default=8)
++    parser.add_argument("--device", default="auto")
++    args = parser.parse_args()
++
++    device = (
++        torch.device("cuda" if torch.cuda.is_available() else "cpu")
++        if args.device == "auto"
++        else torch.device(args.device)
++    )
++
++    run(
++        checkpoint_path=Path(args.checkpoint),
++        graphs_dir_for_schema=Path(args.graphs_dir),
++        unseen_graphs_dir=Path(args.unseen_graphs_dir),
++        unseen_manifest_path=Path(args.unseen_manifest),
++        memory_bank_path=Path(args.memory_bank),
++        out_dir=Path(args.out_dir),
++        device=device,
++        batch_size=args.batch_size,
++    )
++    print(f"Wrote results to {args.out_dir}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/src/trench_ids/cl/memory_bank.py b/src/trench_ids/cl/memory_bank.py
+index 3ed3c0d..963ff8b 100644
+--- a/src/trench_ids/cl/memory_bank.py
++++ b/src/trench_ids/cl/memory_bank.py
+@@ -96,5 +96,8 @@ def save_memory_bank(bank: dict[str, dict[str, torch.Tensor]], path: Path) -> No
+     torch.save(bank, path)
+ 
+ 
+-def load_memory_bank(path: Path) -> dict[str, dict[str, torch.Tensor]]:
+-    return torch.load(path, weights_only=False)  # trusted, first-party output
++def load_memory_bank(
++    path: Path, map_location: torch.device | str | None = None
++) -> dict[str, dict[str, torch.Tensor]]:
++    # trusted, first-party output
++    return torch.load(path, map_location=map_location, weights_only=False)
+diff --git a/src/trench_ids/cl/replay_selection.py b/src/trench_ids/cl/replay_selection.py
+new file mode 100644
+index 0000000..c77a133
+--- /dev/null
++++ b/src/trench_ids/cl/replay_selection.py
+@@ -0,0 +1,127 @@
++"""Transferability-guided replay-buffer selection (2026-07-29 design,
++docs/superpowers/specs/2026-07-29-transferability-followup-design.md,
++Experiment 2).
++
++Mini-graphs are not class-pure (``graphs.py``'s ``_chunk_frame`` shuffles
++rows before chunking), so this module implements *enrichment-weighted*
++sampling rather than class-pure selection: each candidate graph gets a
++score based on how much of its flow-node composition favors
++high/low-transferability classes, then the replay buffer is filled via
++weighted sampling without replacement using that score.
++"""
++
++from __future__ import annotations
++
++import numpy as np
++import torch
++from torch_geometric.data import HeteroData
++
++
++def class_scores_from_relation_scores(
++    per_class_relation_scores: dict[str, dict[str, float]],
++) -> dict[str, float]:
++    """Collapse ``aggregate_per_class_relation_scores``' per-relation
++    output to one scalar per class (mean over relations) -- v1's
++    simplification, see design §Experiment 2 step 2. ``0.0`` for a class
++    with no relations to average (matches the empty-bank convention
++    upstream in ``transferability.py``)."""
++    return {
++        class_name: (sum(relations.values()) / len(relations) if relations else 0.0)
++        for class_name, relations in per_class_relation_scores.items()
++    }
++
++
++def normalize_scores(scores: dict[str, float]) -> dict[str, float]:
++    """Min-max normalize into [0, 1]. All-equal input (including a single
++    class, e.g. T1/T2's one new attack class) has no basis to
++    differentiate classes, so it maps to a constant 0.5 rather than
++    dividing by zero."""
++    if not scores:
++        return {}
++    values = list(scores.values())
++    lo, hi = min(values), max(values)
++    if hi - lo < 1e-12:
++        return {name: 0.5 for name in scores}
++    return {name: (value - lo) / (hi - lo) for name, value in scores.items()}
++
++
++def with_neutral_benign(class_weights: dict[str, float], benign_name: str) -> dict[str, float]:
++    """Benign has no entry in the attack-only memory bank, so it gets a
++    neutral weight equal to the mean of the (already mode-specific, i.e.
++    already high- or low-transfer-adjusted) attack-class weights, keeping
++    it from being starved out of the buffer regardless of which direction
++    is being tested."""
++    weights = dict(class_weights)
++    weights[benign_name] = (
++        sum(class_weights.values()) / len(class_weights) if class_weights else 0.5
++    )
++    return weights
++
++
++def graph_enrichment_score(
++    graph: HeteroData, class_weights: dict[str, float], label_names: list[str]
++) -> float:
++    """Weighted mean of ``class_weights`` over one graph's flow-node
++    labels -- how much this graph's composition favors the weighted
++    classes. A class present in ``label_names`` but absent from
++    ``class_weights`` defaults to 0.0 (shouldn't happen once
++    ``with_neutral_benign`` has been applied upstream, but avoids a
++    KeyError if called directly in a test)."""
++    y = graph["flow"].y
++    per_index_weight = torch.tensor(
++        [class_weights.get(name, 0.0) for name in label_names], dtype=torch.float32
++    )
++    return per_index_weight[y].mean().item()
++
++
++def weighted_sample_without_replacement(
++    items: list, weights: np.ndarray, n_sample: int, rng: np.random.Generator
++) -> list:
++    """Sample ``min(n_sample, len(items))`` items without replacement,
++    weighted by ``weights``. An all-zero (or otherwise non-positive-sum)
++    weight vector falls back to uniform sampling rather than dividing by
++    zero -- a degenerate case (e.g. every candidate graph scored 0.0), not
++    an error worth raising over."""
++    n_sample = min(n_sample, len(items))
++    total = float(weights.sum())
++    probs = weights / total if total > 0 else np.full(len(items), 1.0 / len(items))
++    indices = rng.choice(len(items), size=n_sample, replace=False, p=probs)
++    return [items[i] for i in indices]
++
++
++def select_replay_graphs(
++    graphs: list[HeteroData],
++    per_class_relation_scores: dict[str, dict[str, float]],
++    label_names: list[str],
++    n_sample: int,
++    mode: str,
++    benign_name: str,
++    rng: np.random.Generator,
++) -> tuple[list[HeteroData], list[float]]:
++    """Full pipeline: per-class-per-relation scores -> per-class scalar
++    -> normalized -> (for enrich_low_transfer) inverted -> neutral benign
++    weight added -> per-graph enrichment score -> weighted sample without
++    replacement. Returns ``(selected_graphs, selected_graph_scores)`` --
++    the scores are logged by the caller for the buffer-composition
++    diagnostics (design §Experiment 2 Diagnostics), not recomputed there.
++
++    ``mode`` must be ``"enrich_high_transfer"`` or ``"enrich_low_transfer"``
++    -- ``"uniform"`` is handled by the caller as an exact passthrough to
++    the pre-existing ``random.sample`` code path and never reaches this
++    function (design §Experiment 2 step 6).
++    """
++    raw = class_scores_from_relation_scores(per_class_relation_scores)
++    normalized = normalize_scores(raw)
++    if mode == "enrich_low_transfer":
++        normalized = {name: 1.0 - value for name, value in normalized.items()}
++    elif mode != "enrich_high_transfer":
++        raise ValueError(f"Unknown replay selection mode: {mode!r}")
++    class_weights = with_neutral_benign(normalized, benign_name)
++
++    graph_scores = np.array(
++        [graph_enrichment_score(g, class_weights, label_names) for g in graphs]
++    )
++    selected = weighted_sample_without_replacement(graphs, graph_scores, n_sample, rng)
++    selected_indices = {id(g): score for g, score in zip(graphs, graph_scores, strict=True)}
++    selected_scores = [selected_indices[id(g)] for g in selected]
++    return selected, selected_scores
+diff --git a/src/trench_ids/cl/transferability.py b/src/trench_ids/cl/transferability.py
+index 51dd941..b6f6814 100644
+--- a/src/trench_ids/cl/transferability.py
++++ b/src/trench_ids/cl/transferability.py
+@@ -78,3 +78,32 @@ def aggregate_transferability_scores(
+         relation: torch.tensor(sums[relation] / counts[relation] if counts[relation] else 0.0)
+         for relation in flow_relations
+     }
++
++
++def aggregate_per_class_relation_scores(
++    report: dict[str, dict[str, dict[str, float]]], flow_relations: list[str]
++) -> dict[str, dict[str, float]]:
++    """Like ``aggregate_transferability_scores``, but keeps relations
++    separate instead of collapsing to one scalar `S_r` -- mean cosine
++    similarity *per new class, per relation*, averaged over old bank
++    classes only (design §Experiment 2, step 1: "keep relation-level
++    granularity as long as possible," since relation-specific
++    transferability is this project's core idea). Returns
++    ``{new_class: {relation: float}}``, one entry per key of ``report``.
++    ``0.0`` for a relation with zero old-class pairs to average -- same
++    convention as ``aggregate_transferability_scores``' empty-bank
++    default."""
++    result: dict[str, dict[str, float]] = {}
++    for new_class, old_classes in report.items():
++        sums = {relation: 0.0 for relation in flow_relations}
++        counts = {relation: 0 for relation in flow_relations}
++        for relations in old_classes.values():
++            for relation, cosine in relations.items():
++                if relation in sums:
++                    sums[relation] += cosine
++                    counts[relation] += 1
++        result[new_class] = {
++            relation: sums[relation] / counts[relation] if counts[relation] else 0.0
++            for relation in flow_relations
++        }
++    return result
+diff --git a/src/trench_ids/similarity.py b/src/trench_ids/similarity.py
+index 16794cd..140e47e 100644
+--- a/src/trench_ids/similarity.py
++++ b/src/trench_ids/similarity.py
+@@ -23,6 +23,7 @@ Run:  python -m trench_ids.similarity --config configs/similarity.yaml
+ from __future__ import annotations
+ 
+ import argparse
++import json
+ from collections import Counter
+ from pathlib import Path
+ from typing import Any
+@@ -214,6 +215,8 @@ def run(config_path: str | Path) -> pd.DataFrame:
+     if missing:
+         raise ValueError(f"Candidate classes absent from data: {sorted(missing)}")
+     print(f"[count] done: {dict(counts)}", flush=True)
++    out_dir.mkdir(parents=True, exist_ok=True)
++    (out_dir / "class_counts.json").write_text(json.dumps(dict(counts), indent=2))
+ 
+     print(f"[sample] drawing ~{cfg['samples_per_class']} rows per class ...", flush=True)
+     samples = sample_classes(cfg, classes, counts, rng)
+diff --git a/src/trench_ids/task_design.py b/src/trench_ids/task_design.py
+index 9714c00..65635a4 100644
+--- a/src/trench_ids/task_design.py
++++ b/src/trench_ids/task_design.py
+@@ -26,6 +26,7 @@ from __future__ import annotations
+ 
+ import argparse
+ import itertools
++import json
+ from pathlib import Path
+ from typing import Any
+ 
+@@ -172,7 +173,19 @@ def run(config_path: str | Path, threshold: float = 0.35) -> list[list[str]]:
+     out_dir = Path(cfg["paths"]["out_dir"])
+     sim = load_similarity_matrix(out_dir / "similarity_matrix.csv")
+ 
+-    groups, scores = assign_groups(sim, threshold)
++    counts_path = out_dir / "class_counts.json"
++    sizes: dict[str, float] | None = None
++    if counts_path.exists():
++        sizes = {k: float(v) for k, v in json.loads(counts_path.read_text()).items()}
++        print(f"[task_design] size-aware tie-break using {counts_path}")
++    else:
++        print(
++            f"[task_design] {counts_path} not found -- falling back to "
++            "total-similarity-only grouping (run trench_ids.similarity first "
++            "to enable the size-aware tie-break)"
++        )
++
++    groups, scores = assign_groups(sim, threshold, sizes)
+     print(f"[task_design] threshold={threshold}, isolate-and-bundle grouping ({len(groups)} tasks)")
+     for i, (group, score) in enumerate(zip(groups, scores, strict=True), start=1):
+         label = " + ".join(group)
+diff --git a/src/trench_ids/unseen_data.py b/src/trench_ids/unseen_data.py
+new file mode 100644
+index 0000000..1f0f441
+--- /dev/null
++++ b/src/trench_ids/unseen_data.py
+@@ -0,0 +1,276 @@
++"""Step 10 (third bullet) -- extraction of unseen-attack data.
++
++Two evaluation datasets, both genuinely untouched by trench_ids.preprocess:
++
++  Dataset A (evaluation_type="seen_class_unseen_samples") -- new samples of
++    attack classes the model already knows (Reconnaissance/DoS from
++    NF-UNSW-NB15-v2, DDoS/DoS from NF-BoT-IoT-v2). trench_ids.preprocess
++    keeps 100% of every CLASS_DATASETS-allowed attack row for the 3
++    in-scope datasets, so there is no leftover untouched subset of an
++    already-selected class within those datasets -- these rows come from
++    sources the training pipeline never opens at all (NF-UNSW-NB15-v2) or
++    filters out entirely via CLASS_DATASETS (BoT-IoT's DDoS/DoS).
++
++  Dataset B (evaluation_type="unseen_class") -- attack classes with no
++    CLASS_DATASETS entry at all (Backdoor, MITM, Ransomware, Web Attacks,
++    Theft). Their raw labels map successfully via RAW_TO_CANONICAL, but
++    trench_ids.preprocess._class_allowed always returns False for them, so
++    they are read then discarded in every run of the frozen pipeline.
++
++This module deliberately bypasses _class_allowed/CLASS_DATASETS (the
++opposite of trench_ids.preprocess) -- it does not modify or call that
++check. It reuses _map_canonical and _drop_corrupted_rows for row-level
++consistency with Step 1.
++
++Run: trench-unseen-data --config configs/unseen.yaml
++  or: python -m trench_ids.unseen_data --config configs/unseen.yaml
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++from pathlib import Path
++from typing import Any
++
++import numpy as np
++import pandas as pd
++import yaml
++
++from trench_ids.labels import RAW_TO_CANONICAL
++from trench_ids.preprocess import _dataset_csv, _drop_corrupted_rows, _map_canonical
++
++
++def _reservoir_update(
++    reservoir: list[dict[str, Any]],
++    seen_before: int,
++    new_rows: pd.DataFrame,
++    sample_cap: int,
++    rng: np.random.Generator,
++) -> int:
++    """Algorithm R (reservoir sampling), applied in chunk-sized batches.
++
++    `reservoir` is mutated in place and holds at most `sample_cap` rows,
++    an exactly-uniform sample of every row passed to this function so far
++    (across all calls, i.e. across the whole stream) -- this is what makes
++    it safe to call once per CSV chunk without ever holding more than
++    `sample_cap` rows in memory, and without biasing the sample toward
++    whichever chunk happens to be seen last. `seen_before` is the count of
++    rows passed to this function prior to this call; returns the updated
++    total (`seen_before + len(new_rows)`).
++
++    Only converts to Python dicts the rows that actually win a reservoir
++    slot (`.to_dict("records")` on the whole chunk would be a
++    memory/throughput regression on exactly the high-volume classes this
++    is meant to bound -- expected winners across a full BoT-IoT-sized
++    stream is O(sample_cap * log(n / sample_cap)), not O(n)).
++    """
++    seen = seen_before
++    take = max(0, min(sample_cap - len(reservoir), len(new_rows)))
++
++    # Fill phase: reservoir isn't full yet, so new rows go straight in.
++    if take:
++        fill_part = new_rows.iloc[:take]
++        reservoir.extend(fill_part.to_dict("records"))
++        seen += take
++
++    # Replacement phase: for each remaining row, its 0-indexed global
++    # position is `seen` (before incrementing). Draw j uniformly from
++    # [0, seen] inclusive; replace reservoir[j] iff j < sample_cap. This
++    # is exactly Algorithm R, vectorized in the random-draw step (the draw
++    # for a row depends only on its position, not on any other row's
++    # outcome, so batching the draws is safe) and materializes dicts only
++    # for rows that win a slot.
++    remaining = new_rows.iloc[take:]
++    r = len(remaining)
++    if r:
++        positions = seen + np.arange(r)
++        js = rng.integers(0, positions + 1)  # high is exclusive -> [0, position]
++        winners = np.nonzero(js < sample_cap)[0]  # ascending order -> later row wins ties
++        if len(winners):
++            winner_js = js[winners]
++            winner_records = remaining.iloc[winners].to_dict("records")
++            for j, rec in zip(winner_js.tolist(), winner_records, strict=True):
++                reservoir[j] = rec
++        seen += r
++
++    return seen
++
++
++def _restore_dtypes(frame: pd.DataFrame, target_dtypes: pd.Series) -> pd.DataFrame:
++    """Best-effort per-column re-cast to `target_dtypes` (a chunk's original
++    dtypes, captured before the dict round-trip in reservoir sampling).
++
++    Per-column and non-fatal: a column that can't be safely cast (e.g. the
++    winning reservoir rows genuinely span incompatible dtypes across
++    chunks -- possible on a 45-column, many-chunk real CSV even though it
++    doesn't happen in this module's own test fixtures) is left as pandas
++    inferred it rather than raising and losing an otherwise-complete,
++    multi-minute extraction.
++    """
++    for col, dtype in target_dtypes.items():
++        if frame[col].dtype == dtype:
++            continue
++        try:
++            frame[col] = frame[col].astype(dtype)
++        except (ValueError, TypeError):
++            pass
++    return frame
++
++
++def extract_unseen_class(
++    raw_dir: Path,
++    dataset_dir: str,
++    dataset_code: str,
++    canonical_label: str,
++    chunk_size: int,
++    sample_cap: int | None,
++    rng: np.random.Generator,
++) -> tuple[pd.DataFrame, dict[str, Any]]:
++    """Stream `dataset_dir`'s CSV; keep only rows whose canonical label
++    equals `canonical_label`, regardless of CLASS_DATASETS allowance.
++
++    Applies _drop_corrupted_rows (same NaN/inf/float32-overflow filter as
++    Step 1), independently per chunk -- the check is row-local (no
++    cross-row statistics), so this is equivalent to applying it once over
++    the full concatenated set of matching rows. If more than `sample_cap`
++    matching (and clean) rows exist, draws a seeded uniform sample of
++    exactly `sample_cap` rows via single-pass reservoir sampling (Algorithm
++    R -- see _reservoir_update) -- for high-volume classes like BoT-IoT's
++    DDoS/DoS (18.3M/16.7M matching rows available) this bounds memory to
++    `sample_cap` rows without ever concatenating the full matching set, and
++    without biasing the sample toward rows seen later in the stream.
++    Otherwise keeps every matching row. Returns (frame, manifest_entry) --
++    manifest_entry has no "evaluation_type"/"used_in_training"/"output_path"
++    keys yet; run() adds those since they're a property of the config
++    entry, not of the extraction itself.
++    """
++    csv_path = _dataset_csv(raw_dir, dataset_dir)
++    original_cols = list(pd.read_csv(csv_path, nrows=0).columns)
++    all_cols = original_cols + ["flow_id", "source_dataset", "canonical_label"]
++
++    parts: list[pd.DataFrame] = []  # used only when sample_cap is None
++    reservoir: list[dict[str, Any]] = []  # used only when sample_cap is set
++    rows_found_total = 0
++    corrupted_dropped_total = 0
++    clean_seen_total = 0
++    # Dtypes of the first clean matched chunk -- reservoir rows pass through
++    # a Python-dict round trip (DataFrame.to_dict("records") / from_records),
++    # which can silently up-cast columns (e.g. an int PROTOCOL column
++    # becoming float64 if any dict along the way had a missing/NaN key).
++    # Restoring the original dtypes at the end keeps downstream consumers
++    # (e.g. unseen_graphs.drop_vocab_gaps's str(int) vocab lookup) working
++    # the same as the non-reservoir (sample_cap=None) path, which never
++    # leaves DataFrame-land and so never has this problem.
++    reservoir_dtypes: pd.Series | None = None
++
++    for chunk in pd.read_csv(csv_path, chunksize=chunk_size):
++        # Pre-filter to only rows with raw Attack labels in RAW_TO_CANONICAL
++        # to avoid UnknownAttackLabel errors on unmapped labels (e.g., UNSW-NB15's
++        # Exploits, Fuzzers, etc. which aren't used for training).
++        chunk = chunk[chunk["Attack"].isin(RAW_TO_CANONICAL)]
++        if chunk.empty:
++            continue
++        canon = _map_canonical(chunk["Attack"])
++        match = (canon == canonical_label).to_numpy()
++        if not match.any():
++            continue
++        matched = chunk.loc[match].copy()
++        matched["flow_id"] = [f"{dataset_code}-{i}" for i in chunk.index[match]]
++        matched["source_dataset"] = dataset_code
++        matched["canonical_label"] = canonical_label
++        rows_found_total += len(matched)
++
++        clean, corrupted_dropped = _drop_corrupted_rows(matched, original_cols)
++        corrupted_dropped_total += corrupted_dropped
++        if clean.empty:
++            continue
++
++        if sample_cap is None:
++            parts.append(clean)
++        else:
++            if reservoir_dtypes is None:
++                reservoir_dtypes = clean.dtypes
++            clean_seen_total = _reservoir_update(
++                reservoir, clean_seen_total, clean, sample_cap, rng
++            )
++
++    rows_found = rows_found_total
++    if sample_cap is None:
++        frame = (
++            pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=all_cols)
++        )
++        sampled = False
++    else:
++        if reservoir:
++            frame = pd.DataFrame.from_records(reservoir, columns=all_cols)
++            if reservoir_dtypes is not None:
++                frame = _restore_dtypes(frame, reservoir_dtypes)
++        else:
++            frame = pd.DataFrame(columns=all_cols)
++        sampled = clean_seen_total > sample_cap
++
++    manifest_entry = {
++        "canonical_label": canonical_label,
++        "dataset": dataset_dir,
++        "dataset_code": dataset_code,
++        "rows_found": rows_found,
++        "corrupted_rows_dropped": corrupted_dropped_total,
++        "rows_kept": len(frame),
++        "sampled": sampled,
++        "sample_cap": sample_cap,
++    }
++    return frame, manifest_entry
++
++
++def _slug(dataset_code: str, canonical_label: str) -> str:
++    return f"{dataset_code}_{canonical_label.lower().replace(' ', '_')}"
++
++
++def run(config_path: str | Path) -> dict[str, Any]:
++    cfg = yaml.safe_load(Path(config_path).read_text())
++    raw_dir = Path(cfg["paths"]["raw_dir"])
++    out_dir = Path(cfg["paths"]["out_dir"])
++    out_dir.mkdir(parents=True, exist_ok=True)
++    rng = np.random.default_rng(cfg["seed"])
++    chunk_size = cfg["chunk_size"]
++    sample_cap = cfg.get("sample_cap")
++
++    manifest: dict[str, Any] = {"seed": cfg["seed"], "classes": {}}
++    for entry in cfg["classes"]:
++        canonical_label = entry["canonical_label"]
++        dataset_dir = entry["dataset_dir"]
++        dataset_code = entry["dataset_code"]
++        evaluation_type = entry["evaluation_type"]
++
++        frame, manifest_entry = extract_unseen_class(
++            raw_dir, dataset_dir, dataset_code, canonical_label,
++            chunk_size, sample_cap, rng,
++        )
++
++        slug = _slug(dataset_code, canonical_label)
++        out_path = out_dir / f"{slug}.parquet"
++        frame.to_parquet(out_path, index=False)
++
++        manifest_entry["used_in_training"] = False
++        manifest_entry["evaluation_type"] = evaluation_type
++        manifest_entry["output_path"] = str(out_path)
++        manifest["classes"][slug] = manifest_entry
++
++    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
++    return manifest
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(
++        description="Extract unseen-attack rows for Step 10 inference."
++    )
++    parser.add_argument("--config", default="configs/unseen.yaml")
++    args = parser.parse_args()
++    manifest = run(args.config)
++    for slug, entry in manifest["classes"].items():
++        print(f"{slug}: {entry['rows_kept']} rows kept ({entry['evaluation_type']})")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/src/trench_ids/unseen_graphs.py b/src/trench_ids/unseen_graphs.py
+new file mode 100644
+index 0000000..7c3a3f1
+--- /dev/null
++++ b/src/trench_ids/unseen_graphs.py
+@@ -0,0 +1,150 @@
++"""Step 10 (third bullet) -- build inference-only mini-graphs for
++unseen-attack data (trench_ids.unseen_data's output).
++
++Reuses trench_ids.graphs.build_task_graph completely unchanged -- these
++graphs are built exactly the same way as the continual-learning pipeline's;
++the only difference is they are never used during training, only passed
++through a trained checkpoint for inference and analysis.
++
++Two adjustments live here, not in graphs.py:
++
++  - Vocabulary gap handling: every PROTOCOL/L7_PROTO value in the extracted
++    data should already exist in the trained vocab (data/graphs/vocab.json).
++    NetFlow v2 standardizes these fields across all UQ datasets, so this is
++    expected to rarely occur -- but when gaps are found, we drop just those
++    rows (not silently extending the vocab, which would produce meaningless,
++    never-trained embedding rows). The drop count is reported per-class for
++    transparency.
++
++  - y=-1 sentinel: build_task_graph maps canonical_label -> global class
++    index via graphs.LABEL_LOOKUP, which has no entry for Dataset B's
++    classes (Backdoor, MITM, Ransomware, Web Attacks, Theft). This module
++    substitutes BENIGN (present in LABEL_LOOKUP) purely to satisfy that
++    cast, then immediately overwrites graph["flow"].y with -1 -- a
++    placeholder that exists only to satisfy the graph schema. It is never
++    passed to CrossEntropyLoss or any training routine (this pipeline is
++    inference-only). The true label survives separately as reporting
++    metadata: graph["flow"].true_label.
++
++Run: trench-unseen-graphs --config configs/unseen_graphs.yaml
++  or: python -m trench_ids.unseen_graphs --config configs/unseen_graphs.yaml
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++from pathlib import Path
++from typing import Any
++
++import pandas as pd
++import torch
++import yaml
++from torch_geometric.data import HeteroData
++
++from trench_ids.graphs import LABEL_LOOKUP, build_task_graph
++from trench_ids.labels import BENIGN
++from trench_ids.vocab import load_vocab
++
++VOCAB_COLUMNS = ("PROTOCOL", "L7_PROTO")
++
++
++def drop_vocab_gaps(
++    frame: pd.DataFrame, vocab: dict[str, dict[str, int]]
++) -> tuple[pd.DataFrame, int]:
++    """Drop rows with PROTOCOL/L7_PROTO values not present in the trained vocab.
++    Returns (filtered_frame, drop_count). Never silently extends the vocab, but
++    reports how many rows were dropped due to unseen values."""
++    if frame.empty:
++        return frame, 0
++
++    # Identify rows to drop: any row missing a value in either column
++    drop_mask = pd.Series(False, index=frame.index)
++    for column in VOCAB_COLUMNS:
++        known = vocab[column]
++        seen_str = frame[column].astype(str)
++        drop_mask |= ~seen_str.isin(known)
++
++    dropped_count = int(drop_mask.sum())
++    filtered = frame[~drop_mask].reset_index(drop=True)
++    return filtered, dropped_count
++
++
++def _chunk(frame: pd.DataFrame, size: int) -> list[pd.DataFrame]:
++    return [
++        frame.iloc[start : start + size].reset_index(drop=True)
++        for start in range(0, len(frame), size)
++    ]
++
++
++def build_unseen_graphs(
++    frame: pd.DataFrame,
++    features: list[str],
++    vocab: dict[str, dict[str, int]],
++    graph_size: int,
++) -> tuple[list[tuple[HeteroData, dict[str, Any]]], int]:
++    """Builds one or more HeteroData mini-graphs from `frame` (every row
++    shares one canonical_label, since trench_ids.unseen_data writes one
++    parquet per class). Returns (graphs_and_counts, vocab_gap_dropped)."""
++    frame, vocab_gap_dropped = drop_vocab_gaps(frame, vocab)
++    if frame.empty:
++        return [], vocab_gap_dropped
++
++    true_label = frame["canonical_label"].iloc[0]
++    is_known = true_label in LABEL_LOOKUP
++
++    out: list[tuple[HeteroData, dict[str, Any]]] = []
++    for chunk in _chunk(frame, graph_size):
++        working = chunk.copy()
++        working["split"] = "test"
++        if not is_known:
++            working["canonical_label"] = BENIGN  # sentinel-only, overwritten below
++        graph, counts = build_task_graph(working, features, vocab)
++        if not is_known:
++            graph["flow"].y = torch.full((len(chunk),), -1, dtype=torch.int64)
++            counts["flow_class_counts"] = {true_label: len(chunk)}
++        graph["flow"].true_label = [true_label] * len(chunk)
++        out.append((graph, counts))
++    return out, vocab_gap_dropped
++
++
++def run(config_path: str | Path) -> dict[str, Any]:
++    cfg = yaml.safe_load(Path(config_path).read_text())
++    unseen_dir = Path(cfg["paths"]["unseen_dir"])
++    out_dir = Path(cfg["paths"]["out_dir"])
++    out_dir.mkdir(parents=True, exist_ok=True)
++    vocab = load_vocab(Path(cfg["paths"]["vocab_path"]))
++    features = cfg["features"]
++    graph_size = cfg["graph_size"]
++
++    manifest = json.loads((unseen_dir / "manifest.json").read_text())
++    summary: dict[str, Any] = {}
++    for slug, entry in manifest["classes"].items():
++        frame = pd.read_parquet(entry["output_path"])
++        graphs_and_counts, vocab_gap_dropped = build_unseen_graphs(
++            frame, features, vocab, graph_size
++        )
++        graphs = [g for g, _ in graphs_and_counts]
++        torch.save(graphs, out_dir / f"{slug}.pt")
++        summary[slug] = {
++            "num_graphs": len(graphs),
++            "num_flows": sum(len(g["flow"].true_label) for g in graphs),
++            "vocab_gap_rows_dropped": int(vocab_gap_dropped),
++        }
++    (out_dir / "graph_counts.json").write_text(json.dumps(summary, indent=2))
++    return summary
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(
++        description="Build inference-only mini-graphs for Step 10 unseen-attack data."
++    )
++    parser.add_argument("--config", default="configs/unseen_graphs.yaml")
++    args = parser.parse_args()
++    summary = run(args.config)
++    for slug, info in summary.items():
++        print(f"{slug}: {info['num_graphs']} graphs, {info['num_flows']} flows")
++
++
++if __name__ == "__main__":
++    main()

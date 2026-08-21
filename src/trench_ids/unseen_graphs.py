@@ -44,7 +44,7 @@ from torch_geometric.data import HeteroData
 
 from trench_ids.graphs import LABEL_LOOKUP, build_task_graph
 from trench_ids.labels import BENIGN
-from trench_ids.vocab import load_vocab
+from trench_ids.vocab import load_vocab, vocab_key
 
 VOCAB_COLUMNS = ("PROTOCOL", "L7_PROTO")
 
@@ -58,11 +58,13 @@ def drop_vocab_gaps(
     if frame.empty:
         return frame, 0
 
-    # Identify rows to drop: any row missing a value in either column
+    # Identify rows to drop: any row missing a value in either column.
+    # vocab_key, not astype(str), so a float-coerced 6.0 matches the vocab's
+    # "6" instead of being dropped as a spurious gap (see vocab.vocab_key).
     drop_mask = pd.Series(False, index=frame.index)
     for column in VOCAB_COLUMNS:
         known = vocab[column]
-        seen_str = frame[column].astype(str)
+        seen_str = frame[column].map(vocab_key)
         drop_mask |= ~seen_str.isin(known)
 
     dropped_count = int(drop_mask.sum())

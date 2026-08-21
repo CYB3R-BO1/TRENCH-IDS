@@ -119,6 +119,25 @@ def test_weighted_sample_without_replacement_all_zero_weights_falls_back_to_unif
     assert all(item in items for item in result)
 
 
+def test_weighted_sample_without_replacement_falls_back_when_too_few_items_score_nonzero() -> None:
+    """A capture-order mini-graph can be purely the min-scoring class with
+    no Benign (e.g. inside a flood-style attack's burst), scoring exactly
+    0.0 under min-max normalisation. If enough graphs in a task do that,
+    fewer than n_sample carry positive weight -- np.random.Generator.choice
+    raises ValueError('Fewer non-zero entries in p than size') for a
+    without-replacement draw in that situation unless this falls back to
+    uniform, the same way the all-zero case already does."""
+    items = [1, 2, 3, 4, 5]
+    weights = np.array([0.0, 0.0, 0.0, 1.0, 1.0])  # only 2 nonzero, n_sample=3
+    rng = np.random.default_rng(0)
+
+    result = weighted_sample_without_replacement(items, weights, n_sample=3, rng=rng)
+
+    assert len(result) == 3
+    assert len(set(result)) == 3
+    assert all(item in items for item in result)
+
+
 def test_select_replay_graphs_high_transfer_favors_higher_scoring_class() -> None:
     """Two graphs, one entirely benign, one entirely a high-transferability
     class -- enrich_high_transfer weighted sampling with n_sample=1 must be

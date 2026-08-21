@@ -2,12 +2,16 @@
 docs/superpowers/specs/2026-07-29-transferability-followup-design.md,
 Experiment 2).
 
-Mini-graphs are not class-pure (``graphs.py``'s ``_chunk_frame`` shuffles
-rows before chunking), so this module implements *enrichment-weighted*
-sampling rather than class-pure selection: each candidate graph gets a
-score based on how much of its flow-node composition favors
-high/low-transferability classes, then the replay buffer is filled via
-weighted sampling without replacement using that score.
+Mini-graphs are usually not class-pure (2-3 distinct classes per 300-flow
+window even under the 2026-08-17 rebuild's capture-order chunking, per
+``docs/methodology-2026-08-17.md`` -- though a single-class window is now
+possible where a real capture has a long same-class run, e.g. a flood-style
+attack; see ``weighted_sample_without_replacement``'s handling of that), so
+this module implements *enrichment-weighted* sampling rather than
+class-pure selection: each candidate graph gets a score based on how much
+of its flow-node composition favors high/low-transferability classes, then
+the replay buffer is filled via weighted sampling without replacement using
+that score.
 """
 
 from __future__ import annotations
@@ -78,13 +82,34 @@ def weighted_sample_without_replacement(
     items: list, weights: np.ndarray, n_sample: int, rng: np.random.Generator
 ) -> list:
     """Sample ``min(n_sample, len(items))`` items without replacement,
-    weighted by ``weights``. An all-zero (or otherwise non-positive-sum)
-    weight vector falls back to uniform sampling rather than dividing by
-    zero -- a degenerate case (e.g. every candidate graph scored 0.0), not
-    an error worth raising over."""
+    weighted by ``weights``. Falls back to uniform sampling -- rather than
+    letting ``rng.choice`` raise -- whenever the weighting cannot support a
+    without-replacement draw of this size:
+
+    * an all-zero (or otherwise non-positive-sum) weight vector (e.g. every
+      candidate graph scored 0.0), or
+    * fewer nonzero-weight items than ``n_sample``. This is a real risk, not
+      a theoretical one: graphs.py chunks mini-graphs in *capture order*
+      (2026-08-17 rebuild), not from a global shuffle, so a 300-flow window
+      landing entirely inside a flood-style attack's burst can be purely the
+      min-scoring class with zero Benign flows -- which scores exactly 0.0
+      under this module's min-max normalisation (see
+      ``graph_enrichment_score``). If enough of a task's graphs do that,
+      fewer than ``n_sample`` carry positive weight and an unguarded
+      ``rng.choice(..., replace=False, p=probs)`` raises
+      ``ValueError: Fewer non-zero entries in p than size``.
+
+    Both are degenerate weighting, not errors worth raising over -- a
+    replay buffer that falls back to uniform for one task is still a
+    correct buffer, just an unweighted one for that draw.
+    """
     n_sample = min(n_sample, len(items))
     total = float(weights.sum())
-    probs = weights / total if total > 0 else np.full(len(items), 1.0 / len(items))
+    nonzero = int((weights > 0).sum())
+    if total > 0 and nonzero >= n_sample:
+        probs = weights / total
+    else:
+        probs = np.full(len(items), 1.0 / len(items))
     indices = rng.choice(len(items), size=n_sample, replace=False, p=probs)
     return [items[i] for i in indices]
 

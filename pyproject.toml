@@ -15,6 +15,7 @@ dependencies = [
     "matplotlib>=3.8",
     "scipy>=1.11",
     "scikit-learn>=1.3",
+    "psutil>=5.9",
 ]
 
 [project.optional-dependencies]
@@ -29,9 +30,15 @@ trench-similarity = "trench_ids.similarity:main"
 trench-graphs = "trench_ids.graphs:main"
 trench-graph-composition = "trench_ids.graph_composition:main"
 trench-train = "trench_ids.cl.train:main"
+trench-train-flat = "trench_ids.cl.train_flat:main"
+trench-compare-runs = "trench_ids.cl.compare_runs:main"
 trench-transferability-report = "trench_ids.cl.transferability_report:main"
 trench-infer = "trench_ids.cl.inference:main"
 trench-evaluate = "trench_ids.cl.evaluate:main"
+trench-novelty = "trench_ids.cl.novelty:main"
+trench-drift = "trench_ids.cl.drift:main"
+trench-run-matrix = "trench_ids.cl.run_matrix:main"
+trench-report = "trench_ids.cl.report:main"
 trench-unseen-data = "trench_ids.unseen_data:main"
 trench-unseen-graphs = "trench_ids.unseen_graphs:main"
 trench-infer-unseen = "trench_ids.cl.inference_unseen:main"

@@ -30,6 +30,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import hydra
 import numpy as np
@@ -39,6 +40,7 @@ from omegaconf import DictConfig
 from torch_geometric.data import HeteroData
 from torch_geometric.loader import DataLoader
 
+from trench_ids.cl.distillation import RelationDistiller
 from trench_ids.cl.ewc import FLOW_RELATIONS, OnlineEWCManager
 from trench_ids.cl.importance import ImportanceMLP
 from trench_ids.cl.memory_bank import RelationMeanAccumulator, merge_into_bank, save_memory_bank
@@ -48,15 +50,42 @@ from trench_ids.cl.transferability import (
     aggregate_transferability_scores,
     estimate_transferability,
 )
-from trench_ids.labels import BENIGN, NUM_TASKS, canonical_classes
+from trench_ids.labels import (
+    BENIGN,
+    NUM_TASKS,
+    attack_classes_for_task,
+    canonical_classes,
+)
 from trench_ids.model.rhgnn import RelationSpecificHeteroGNN
-from trench_ids.vocab import load_vocab
+from trench_ids.vocab import load_vocab, vocab_fingerprint
 
 
 def resolve_device(device_cfg: str) -> torch.device:
     if device_cfg == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device_cfg)
+
+
+def seed_everything(seed: int) -> None:
+    """Seed torch, Python's ``random``, and NumPy's global RNG.
+
+    Until 2026-08-07 only ``torch.manual_seed`` was called here, so the
+    replay buffer's ``random.sample``/``random.choices`` draws (below) ran
+    off OS entropy: two runs of the *same* config produced different replay
+    buffers. That made every replay run non-reproducible, and made any
+    between-condition difference smaller than that hidden variance
+    uninterpretable -- including the port-scheme decision
+    (``project-metrics.md`` §24.4) and the transferability-guided-replay
+    comparison (§30), both of which turn on gaps of ~0.01 average
+    forgetting.
+
+    Runs recorded before this fix cannot be reproduced exactly; re-run them
+    before comparing their numbers against anything produced afterwards.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 def _git_commit() -> str | None:
@@ -76,13 +105,21 @@ def save_checkpoint(
     epochs_per_task: int,
     warmup_epochs: int,
     seed: int,
-    model: RelationSpecificHeteroGNN,
+    model: torch.nn.Module,
     classifier: torch.nn.Linear,
     config: dict,
 ) -> None:
     """Saves an evaluation-only checkpoint -- no optimizer state, since
     these are inference/evaluation artifacts, not resumable training
-    snapshots (design doc: "Optimizer state is intentionally omitted")."""
+    snapshots (design doc: "Optimizer state is intentionally omitted").
+
+    ``model`` is typed as a plain ``nn.Module`` rather than
+    ``RelationSpecificHeteroGNN`` because the non-graph baseline
+    (``trench_ids.model.flat.FlatFlowEncoder``) checkpoints through this
+    same function. ``config`` should carry a ``model_type`` key so
+    ``trench_ids.cl.inference.load_checkpoint`` can rebuild the right class;
+    checkpoints written before that key existed are treated as
+    ``"rhgnn"``."""
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
@@ -105,8 +142,29 @@ def load_split(graphs_dir: Path, task: int, split: str) -> list[HeteroData]:
     return torch.load(graphs_dir / f"task_{task}_{split}.pt", weights_only=False)
 
 
+def sample_graphs(
+    graphs: list[HeteroData], max_graphs: int, seed: int | str = 0
+) -> list[HeteroData]:
+    """Seeded uniform subsample of a split's mini-graphs.
+
+    Since the 2026-08-17 rebuild, mini-graphs are chunked in capture order,
+    so position in a split file encodes real time -- ``graphs[:max_graphs]``
+    samples one specific early-capture window (and whichever classes run
+    there) rather than a random subset. Every analysis that subsamples a
+    split should go through this instead of a prefix slice. ``max_graphs <=
+    0`` (or a split smaller than the cap) returns the input unchanged, so a
+    caller can request "everything" with 0. ``seed`` may be a string so
+    callers can derive per-purpose, per-task determinism without colliding.
+    """
+    if max_graphs <= 0 or len(graphs) <= max_graphs:
+        return graphs
+    rng = random.Random(seed)
+    indices = sorted(rng.sample(range(len(graphs)), max_graphs))
+    return [graphs[i] for i in indices]
+
+
 def evaluate_accuracy(
-    model: RelationSpecificHeteroGNN,
+    model: torch.nn.Module,
     classifier: torch.nn.Linear,
     graphs: list[HeteroData],
     device: torch.device,
@@ -158,6 +216,47 @@ def average_forgetting(forgetting_matrix: dict[int, dict[int, float]]) -> float:
         final_accuracy = forgetting_matrix[final_task][evaluated_task]
         per_task_forgetting.append(peak - final_accuracy)
     return sum(per_task_forgetting) / len(per_task_forgetting)
+
+
+def backward_transfer(forgetting_matrix: dict[int, dict[int, float]]) -> float:
+    """Backward transfer (Lopez-Paz & Ranzato, GEM, NeurIPS 2017):
+    ``BWT = mean over i<T of (R[T][i] - R[i][i])`` -- how much learning
+    every later task changed performance on task ``i``, relative to the
+    moment task ``i`` finished training. Negative means forgetting;
+    *positive* means later tasks improved an earlier one.
+
+    Not redundant with ``average_forgetting``, despite both summarising the
+    same matrix, but the distinction is *not* "one can go negative and the
+    other cannot" -- both can. ``average_forgetting`` takes the peak over
+    ``l`` in ``[i, T-1]``, which excludes the final row, so it too comes out
+    negative when a task ends above every earlier measurement.
+
+    The real difference is the reference point. Forgetting measures the drop
+    from each task's *best observed* accuracy ("how much of our best did we
+    lose"); BWT measures the change from ``R[i][i]`` specifically ("are we
+    better or worse than when this task was introduced"). They coincide only
+    when a task's peak sits on the diagonal, and diverge whenever an earlier
+    task kept improving after its own training -- plausible under replay,
+    where later tasks' buffers keep rehearsing task ``i``. Reporting both is
+    what makes that case legible instead of averaging it away.
+
+    0.0 when only one task has been trained (no earlier task to transfer
+    back to), matching ``average_forgetting``'s convention.
+
+    Note that forward transfer (FWT) is *not* derivable from this matrix:
+    it needs each task's accuracy before that task was trained, plus a
+    random-init reference, and the matrix only stores cells with
+    ``evaluated_task <= trained_up_to``.
+    """
+    final_task = max(forgetting_matrix)
+    if final_task == 1:
+        return 0.0
+    deltas = [
+        forgetting_matrix[final_task][evaluated_task]
+        - forgetting_matrix[evaluated_task][evaluated_task]
+        for evaluated_task in range(1, final_task)
+    ]
+    return sum(deltas) / len(deltas)
 
 
 def final_average_accuracy(forgetting_matrix: dict[int, dict[int, float]]) -> float:
@@ -213,10 +312,18 @@ def train_one_task(
     disable_learned_weighting: bool = False,
     w_r_mode: str = "learned",
     epoch_log_path: Path | None = None,
-) -> tuple[float, dict[str, float]]:
+    distiller: RelationDistiller | None = None,
+) -> tuple[float, dict[str, float], dict[str, Any]]:
     """Runs one task's full warm-up + full-loss training (design §5, steps
-    1-5). Returns ``(final_epoch_mean_loss, final_w_r)`` -- ``final_w_r`` is
-    logged by the caller for reproducibility (design §7)."""
+    1-5). Returns ``(final_epoch_mean_loss, final_w_r, distill_report)``.
+
+    ``final_w_r`` is logged by the caller for reproducibility (design §7).
+    ``distiller``, when given, adds the transferability-weighted relation
+    distillation penalty of ``trench_ids.cl.distillation`` to the full-loss
+    epochs; its weights are set here (not by the caller) because they depend
+    on ``S_r``, which is only known after the warm-up pass. ``distill_report``
+    carries that task's realised weights and per-relation distances for the
+    run record, and is empty when no distiller is in use."""
     loader = DataLoader(graphs, batch_size=batch_size, shuffle=True)
 
     # Step 1: warm-up, plain classification loss only, every task.
@@ -233,12 +340,23 @@ def train_one_task(
             optimizer.step()
 
     # Step 2: fresh no-grad pass -> temporary prototypes.
-    temp_means = compute_task_memory_means(model, graphs, device, batch_size, label_names)
-
-    # Step 3-4: transferability against the bank as of task t-1 -> S_r -> w_r.
-    transferability = estimate_transferability(temp_means, bank)
-    s_r = aggregate_transferability_scores(transferability, FLOW_RELATIONS)
-    s_r = {relation: value.to(device) for relation, value in s_r.items()}
+    #
+    # Skipped entirely when nothing downstream consumes S_r -- i.e. when EWC
+    # is off (all lambdas zero) and no distiller is attached. That is the
+    # case for 24 of the 30 runs in the experiment matrix, and this pass
+    # costs a full sweep over the task's training set, so running it anyway
+    # would spend hours computing a number no loss ever reads. The *final*
+    # prototypes (computed by the caller after training) are unaffected --
+    # those feed the memory bank and the transferability report, which every
+    # run does produce.
+    needs_s_r = distiller is not None or ewc_manager.any_lambda_nonzero()
+    if needs_s_r:
+        temp_means = compute_task_memory_means(model, graphs, device, batch_size, label_names)
+        transferability = estimate_transferability(temp_means, bank)
+        s_r = aggregate_transferability_scores(transferability, FLOW_RELATIONS)
+        s_r = {relation: value.to(device) for relation, value in s_r.items()}
+    else:
+        s_r = {relation: torch.zeros((), device=device) for relation in FLOW_RELATIONS}
 
     def _compute_w_r() -> dict[str, torch.Tensor]:
         # Three w_r sources, in priority order:
@@ -262,6 +380,12 @@ def train_one_task(
             return {relation: torch.sigmoid(value) for relation, value in s_r.items()}
         return importance_mlp(s_r)
 
+    distill_report: dict[str, Any] = {}
+    if distiller is not None:
+        distill_report["weights"] = distiller.set_weights(s_r)
+        distill_report["s_r"] = {relation: float(v) for relation, v in s_r.items()}
+        distill_report["active"] = distiller.active
+
     # Step 5: full-loss epochs. w_r is recomputed fresh from the cached S_r
     # every batch (not cached itself) so the MLP trains via backprop without
     # retaining a graph across batches (design §3, revised after user review).
@@ -275,6 +399,7 @@ def train_one_task(
             "l_cls": 0.0, "shared_raw": 0.0, "flow_raw": 0.0,
             "other_raw": 0.0, "total_weighted": 0.0,
         }
+        distill_sum = 0.0
         for batch in loader:
             batch = batch.to(device)
             optimizer.zero_grad()
@@ -284,6 +409,12 @@ def train_one_task(
             cls_loss = F.cross_entropy(logits, batch["flow"].y)
             breakdown = ewc_manager.loss_breakdown(model, classifier, w_r)
             loss = cls_loss + breakdown["total_weighted"]
+            if distiller is not None and distiller.active:
+                distill_term = distiller.penalty(
+                    batch, output.relations["flow"], classifier=classifier
+                )
+                loss = loss + distill_term
+                distill_sum += distill_term.item() * batch["flow"].y.numel()
             loss.backward()
             optimizer.step()
             n = batch["flow"].y.numel()
@@ -294,14 +425,19 @@ def train_one_task(
                 for key in ("shared_raw", "flow_raw", "other_raw", "total_weighted"):
                     component_sums[key] += breakdown[key].item() * n
         last_epoch_loss = total_loss / total_flows if total_flows else 0.0
+        if total_flows:
+            distill_report.setdefault("mean_penalty_per_epoch", []).append(
+                distill_sum / total_flows
+            )
         if epoch_log_path is not None and total_flows:
             record = {"epoch": epoch, **{k: v / total_flows for k, v in component_sums.items()}}
             record["loss_total"] = last_epoch_loss
+            record["distill"] = distill_sum / total_flows
             with epoch_log_path.open("a") as f:
                 f.write(json.dumps(record) + "\n")
 
     final_w_r = {relation: value.item() for relation, value in _compute_w_r().items()}
-    return last_epoch_loss, final_w_r
+    return last_epoch_loss, final_w_r, distill_report
 
 
 def compute_task_memory_means(
@@ -325,7 +461,7 @@ def compute_task_memory_means(
 @hydra.main(version_base="1.3", config_path="../../../configs", config_name="train")
 def main(cfg: DictConfig) -> None:
     device = resolve_device(cfg.train.device)
-    torch.manual_seed(cfg.train.seed)
+    seed_everything(cfg.train.seed)
     print(f"[train] device = {device}")
 
     graphs_dir = Path(cfg.paths.graphs_dir)
@@ -335,6 +471,7 @@ def main(cfg: DictConfig) -> None:
     vocab = load_vocab(graphs_dir / "vocab.json")
     protocol_vocab_size = len(vocab["PROTOCOL"])
     service_vocab_size = len(vocab["L7_PROTO"])
+    vocab_fingerprint_value = vocab_fingerprint(vocab)
     label_names = canonical_classes()
 
     sample_graphs = load_split(graphs_dir, 1, "train")
@@ -346,6 +483,7 @@ def main(cfg: DictConfig) -> None:
         num_layers=cfg.model.num_layers,
         attn_dim=cfg.model.attn_dim,
         port_tail_buckets=cfg.model.port_tail_buckets,
+        fusion=cfg.model.get("fusion", "attention"),
     ).to(device)
     classifier = torch.nn.Linear(cfg.model.hidden_dim, len(label_names)).to(device)
 
@@ -359,6 +497,18 @@ def main(cfg: DictConfig) -> None:
         lambda_u=cfg.ewc.lambda_u,
     )
     importance_mlp = ImportanceMLP().to(device)
+    distiller = (
+        RelationDistiller(
+            FLOW_RELATIONS,
+            lambda_d=cfg.distill.lambda_d,
+            weighting=cfg.distill.weighting,
+            temperature=cfg.distill.temperature,
+            objective=cfg.distill.objective,
+            logit_temperature=cfg.distill.logit_temperature,
+        )
+        if cfg.distill.enabled
+        else None
+    )
     trainable_params = (
         list(model.parameters()) + list(classifier.parameters()) + list(importance_mlp.parameters())
     )
@@ -366,6 +516,7 @@ def main(cfg: DictConfig) -> None:
 
     memory_bank: dict[str, dict[str, torch.Tensor]] = {}
     forgetting_matrix: dict[int, dict[int, float]] = {}
+    val_matrix: dict[int, dict[int, float]] = {}
     replay_buffer: list[HeteroData] = []
     run_start = time.monotonic()
 
@@ -386,7 +537,20 @@ def main(cfg: DictConfig) -> None:
             if cfg.ewc.log_loss_components
             else None
         )
-        final_loss, final_w_r = train_one_task(
+
+        if distiller is not None:
+            # The teacher is the encoder+head as of task t-1, so the only
+            # classes it can speak about are Benign (present in every task)
+            # plus the attack classes of tasks 1..t-1. Telling the distiller
+            # which those are keeps its logit term off the classes this task
+            # is here to learn -- see RelationDistiller.set_old_classes.
+            seen = {BENIGN}
+            for earlier in range(1, task):
+                seen.update(attack_classes_for_task(earlier))
+            distiller.set_old_classes(
+                [i for i, name in enumerate(label_names) if name in seen]
+            )
+        final_loss, final_w_r, distill_report = train_one_task(
             model,
             classifier,
             training_set,
@@ -402,11 +566,35 @@ def main(cfg: DictConfig) -> None:
             disable_learned_weighting=cfg.ewc.disable_learned_weighting,
             w_r_mode=cfg.ewc.w_r_mode,
             epoch_log_path=epoch_log_path,
+            distiller=distiller,
         )
         print(f"[train] task {task}: final epoch mean loss = {final_loss:.4f}")
+        # Mirrors train_one_task's own needs_s_r check: when neither EWC nor
+        # the distiller is attached, S_r is never computed there and
+        # final_w_r is derived from an all-zero placeholder, not a real
+        # transferability signal (see train_one_task's Step 2 comment). That
+        # is the case for most of the experiment matrix's runs (plain replay
+        # included), so the file has to say so -- an unmarked
+        # importance_weights_task_*.json reading identically to a real one is
+        # exactly the kind of silent placeholder that produced the earlier,
+        # genuine w_r-collapse finding (CLAUDE.md, 2026-07-21) from real data.
+        s_r_is_real = distiller is not None or ewc_manager.any_lambda_nonzero()
+        importance_record: dict[str, Any] = {"weights": final_w_r, "s_r_is_real": s_r_is_real}
+        if not s_r_is_real:
+            importance_record["note"] = (
+                "S_r was not computed this task (no EWC lambda nonzero, no "
+                "distiller attached), so these weights were derived from an "
+                "all-zero placeholder S_r, not a real transferability signal. "
+                "Do not read them as evidence about relation importance."
+            )
         (out_dir / f"importance_weights_task_{task}.json").write_text(
-            json.dumps(final_w_r, indent=2)
+            json.dumps(importance_record, indent=2)
         )
+        if distiller is not None:
+            print(f"[distill] task {task}: w_r = {distill_report.get('weights')}")
+            (out_dir / f"distillation_task_{task}.json").write_text(
+                json.dumps(distill_report, indent=2)
+            )
 
         # Step 8: final prototypes (post full-loss weights) -- discards the
         # warm-up's temporary prototypes, which only existed to drive this
@@ -465,17 +653,29 @@ def main(cfg: DictConfig) -> None:
 
         memory_bank = merge_into_bank(memory_bank, final_means)
 
+        # The next task's distillation target is this task's finished
+        # encoder -- snapshotted after the memory bank update so the teacher
+        # and the bank describe the same parameter state.
+        if distiller is not None:
+            distiller.snapshot(model, classifier)
+
         # Step 6-7: Fisher/theta* update for the next task's EWC penalty.
-        eval_loader = DataLoader(train_graphs, batch_size=cfg.train.batch_size)
-        ewc_manager.update_all(model, classifier, eval_loader, device)
+        # Only the EWC arms read it -- see OnlineEWCManager.any_lambda_nonzero.
+        if ewc_manager.any_lambda_nonzero():
+            eval_loader = DataLoader(train_graphs, batch_size=cfg.train.batch_size)
+            ewc_manager.update_all(model, classifier, eval_loader, device)
 
-        def _accuracy_for(evaluated_task: int) -> float:
-            test_graphs = load_split(graphs_dir, evaluated_task, "test")
-            return evaluate_accuracy(model, classifier, test_graphs, device, cfg.train.batch_size)
+        def _accuracy_for(evaluated_task: int, split: str) -> float:
+            split_graphs = load_split(graphs_dir, evaluated_task, split)
+            return evaluate_accuracy(model, classifier, split_graphs, device, cfg.train.batch_size)
 
-        forgetting_matrix[task] = forgetting_row(_accuracy_for, task)
+        forgetting_matrix[task] = forgetting_row(lambda t: _accuracy_for(t, "test"), task)
         for evaluated_task, acc in forgetting_matrix[task].items():
             print(f"[eval] after task {task}, task {evaluated_task} test accuracy = {acc:.4f}")
+
+        val_matrix[task] = forgetting_row(lambda t: _accuracy_for(t, "val"), task)
+        for evaluated_task, acc in val_matrix[task].items():
+            print(f"[eval] after task {task}, task {evaluated_task} val accuracy = {acc:.4f}")
 
         save_checkpoint(
             out_dir / f"checkpoint_task_{task}.pt",
@@ -490,8 +690,17 @@ def main(cfg: DictConfig) -> None:
                 "num_layers": cfg.model.num_layers,
                 "attn_dim": cfg.model.attn_dim,
                 "port_tail_buckets": cfg.model.port_tail_buckets,
+                # Recorded because the fusion mode changes the parameter set,
+                # not just its values: a concat-fusion checkpoint cannot be
+                # loaded into an attention-fusion model at all. Absent in
+                # checkpoints written before this key existed, which were all
+                # attention-fusion runs -- hence build_model's default.
+                "fusion": cfg.model.get("fusion", "attention"),
                 "protocol_vocab_size": protocol_vocab_size,
                 "service_vocab_size": service_vocab_size,
+                # Re-checked by inference.load_checkpoint against whatever
+                # vocab.json a later run loads -- see vocab.vocab_fingerprint.
+                "vocab_fingerprint": vocab_fingerprint_value,
                 "label_names": label_names,
                 "replay_enabled": cfg.replay.enabled,
                 "replay_buffer_size_per_task": cfg.replay.buffer_size_per_task,
@@ -502,10 +711,13 @@ def main(cfg: DictConfig) -> None:
 
     save_memory_bank(memory_bank, out_dir / "memory_bank.pt")
     (out_dir / "forgetting_matrix.json").write_text(json.dumps(forgetting_matrix, indent=2))
+    (out_dir / "val_matrix.json").write_text(json.dumps(val_matrix, indent=2))
 
     summary = {
         "average_forgetting": average_forgetting(forgetting_matrix),
+        "backward_transfer": backward_transfer(forgetting_matrix),
         "final_average_accuracy": final_average_accuracy(forgetting_matrix),
+        "final_average_val_accuracy": final_average_accuracy(val_matrix),
         "runtime_seconds": time.monotonic() - run_start,
         "lambda_r": cfg.ewc.lambda_r,
         "lambda_s": cfg.ewc.lambda_s,
@@ -517,6 +729,12 @@ def main(cfg: DictConfig) -> None:
         "replay_buffer_size_per_task": cfg.replay.buffer_size_per_task,
         "replay_fraction": cfg.replay.replay_fraction,
         "replay_selection": cfg.replay.selection,
+        "distill_enabled": cfg.distill.enabled,
+        "distill_lambda_d": cfg.distill.lambda_d,
+        "distill_weighting": cfg.distill.weighting,
+        "distill_temperature": cfg.distill.temperature,
+        "distill_objective": cfg.distill.objective,
+        "distill_logit_temperature": cfg.distill.logit_temperature,
         "seed": cfg.train.seed,
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))

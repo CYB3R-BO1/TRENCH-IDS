@@ -34,6 +34,7 @@ def _sample_frame() -> pd.DataFrame:
             "canonical_label": ["Benign", "DDoS", "Benign", "DDoS"],
             "split": ["train", "train", "val", "test"],
             "flow_id": ["ToN-0", "ToN-1", "ToN-2", "ToN-3"],
+            "source_row": [0, 1, 2, 3],
         }
     )
 
@@ -227,12 +228,16 @@ def test_build_split_graphs_produces_one_mini_graph_per_chunk() -> None:
 
 def _class_ordered_frame(n_per_class: int = 20) -> pd.DataFrame:
     """Rows grouped by class, like Step 1's real output (per-class sampling
-    then concatenation) -- reproduces the ordering that breaks unshuffled
-    chunking."""
+    then concatenation), but with ``source_row`` interleaving the classes the
+    way the raw capture does -- so capture-order chunking has to undo the
+    Parquet's class grouping to produce mixed mini-graphs."""
     n = n_per_class * 2
     labels = ["Benign"] * n_per_class + ["DDoS"] * n_per_class
+    # Benign rows landed on even capture positions, DDoS on odd ones.
+    capture_rows = [2 * i for i in range(n_per_class)] + [2 * i + 1 for i in range(n_per_class)]
     return pd.DataFrame(
         {
+            "source_row": capture_rows,
             "source_dataset": ["ToN"] * n,
             "IPV4_SRC_ADDR": [f"10.0.0.{i % 250}" for i in range(n)],
             "IPV4_DST_ADDR": [f"10.0.1.{i % 250}" for i in range(n)],
@@ -245,13 +250,13 @@ def _class_ordered_frame(n_per_class: int = 20) -> pd.DataFrame:
             "FLOW_DURATION_MILLISECONDS": [10] * n,
             "canonical_label": labels,
             "split": ["train"] * n,
-            "flow_id": [f"ToN-{i}" for i in range(n)],
+            "flow_id": [f"ToN-{r}" for r in capture_rows],
         }
     )
 
 
-def test_build_split_graphs_shuffles_before_chunking() -> None:
-    frame = _class_ordered_frame(n_per_class=20)  # rows 0-19 = Benign, 20-39 = DDoS
+def test_build_split_graphs_chunks_in_capture_order_not_parquet_order() -> None:
+    frame = _class_ordered_frame(n_per_class=20)  # Parquet order: 20 Benign, then 20 DDoS
     vocab = {"PROTOCOL": {"6": 0}, "L7_PROTO": {"1": 0}}
     features = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
 
@@ -259,11 +264,35 @@ def test_build_split_graphs_shuffles_before_chunking() -> None:
         frame, features, vocab, graph_size=10, seed=42, benign_ratio=1.0
     )
 
-    # Without shuffling, every chunk would be monolithic (all Benign or all
-    # DDoS). With shuffling, at least one chunk must mix both classes.
-    # label_names is now the fixed global list in every chunk regardless of
-    # content, so mixing must be checked via the actual y values instead.
-    assert any(len(set(g["flow"].y.tolist())) > 1 for g in graphs)
+    # Chunking the Parquet order directly would give monolithic single-class
+    # mini-graphs. Capture order interleaves the classes back the way the raw
+    # CSV had them, so every chunk mixes both. label_names is the fixed
+    # global list in every chunk regardless of content, so mixing has to be
+    # checked via the actual y values.
+    assert all(len(set(g["flow"].y.tolist())) > 1 for g in graphs)
+
+
+def test_build_split_graphs_preserves_capture_order_within_and_across_chunks() -> None:
+    """Every mini-graph is a contiguous capture window, in order.
+
+    This is the property the whole construction change exists for: a Host or
+    Port node's aggregate only means "burst of activity" if the flows it
+    aggregates were adjacent in the capture. Under the previous global
+    shuffle this held for no chunk at all.
+    """
+    frame = _class_ordered_frame(n_per_class=25)
+    vocab = {"PROTOCOL": {"6": 0}, "L7_PROTO": {"1": 0}}
+    features = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
+
+    graphs, report = build_split_graphs(
+        frame, features, vocab, graph_size=10, seed=42, benign_ratio=1.0
+    )
+
+    # The fixture's 50 rows occupy capture positions 0..49, so a 10-flow
+    # window that is genuinely contiguous spans exactly 9. A shuffle would
+    # give a span near the full 49 for every window.
+    assert len(graphs) == 5
+    assert report["capture_span_mean"] == pytest.approx(9.0)
 
 
 def _mixed_frame(n_attack: int, n_benign: int) -> pd.DataFrame:
@@ -284,6 +313,7 @@ def _mixed_frame(n_attack: int, n_benign: int) -> pd.DataFrame:
             "canonical_label": labels_,
             "split": ["train"] * n,
             "flow_id": [f"ToN-{i}" for i in range(n)],
+            "source_row": list(range(n)),
         }
     )
 
@@ -304,10 +334,16 @@ def test_build_split_graphs_subsamples_benign_to_target_ratio() -> None:
     assert split_report["class_counts"]["DDoS"] == 20
 
 
-def test_build_split_graphs_reuses_benign_with_replacement_when_pool_too_small() -> None:
-    # 20 attack rows but only 2 benign rows available; ratio 1:1 needs 20
-    # benign -- must reuse (sample with replacement) rather than error or
-    # silently under-fill.
+def test_build_split_graphs_never_duplicates_benign_when_pool_too_small() -> None:
+    """A short benign pool is under-filled honestly, never duplicated.
+
+    The old behaviour sampled with replacement to hit the requested ratio,
+    which at the previous Step 1 sizing meant every benign flow appeared
+    54-158 times -- ~25% of every reported metric resting on ~7,200 distinct
+    flows. Step 1's quota planner now sizes pools so this branch is
+    unnecessary; if it is ever hit anyway, the shortfall has to be visible in
+    the report rather than papered over.
+    """
     frame = _mixed_frame(n_attack=20, n_benign=2)
     vocab = {"PROTOCOL": {"6": 0}, "L7_PROTO": {"1": 0}}
     features = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
@@ -316,8 +352,24 @@ def test_build_split_graphs_reuses_benign_with_replacement_when_pool_too_small()
         frame, features, vocab, graph_size=100, seed=42, benign_ratio=1.0
     )
 
-    assert split_report["class_counts"]["Benign"] == 20
+    assert split_report["class_counts"]["Benign"] == 2  # all of the pool, once each
     assert split_report["class_counts"]["DDoS"] == 20
+    assert split_report["benign_unique_rows"] == 2
+    # The requested 1:1 could not be met, and the report says so.
+    assert split_report["realised_attack_benign_ratio"] == pytest.approx(10.0)
+
+
+def test_build_split_graphs_reports_a_met_ratio_as_requested() -> None:
+    frame = _mixed_frame(n_attack=20, n_benign=20)
+    vocab = {"PROTOCOL": {"6": 0}, "L7_PROTO": {"1": 0}}
+    features = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
+
+    _, split_report = build_split_graphs(
+        frame, features, vocab, graph_size=100, seed=42, benign_ratio=4.0
+    )
+
+    assert split_report["realised_attack_benign_ratio"] == pytest.approx(4.0)
+    assert split_report["benign_unique_rows"] == 5
 
 
 def _write_fake_graphs(path, n: int) -> None:

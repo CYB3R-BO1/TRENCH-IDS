@@ -1,0 +1,69 @@
+# Non-graph baseline config -- see src/trench_ids/cl/train_flat.py for the
+# question this run answers and the decision rule fixed in advance.
+#
+# Everything outside the `model:` block is copied from configs/train.yaml so
+# the ONLY variable between this run and the GNN replay baseline is the
+# encoder. Do not tune these independently -- a hyperparameter difference
+# would reintroduce exactly the confound this experiment exists to remove.
+
+model:
+  # hidden_dim / port_tail_buckets match configs/train.yaml so the Flow and
+  # Port pathways are byte-for-byte the same as the GNN's.
+  hidden_dim: 64
+  port_tail_buckets: 32
+  # Which rung of the three-arm ablation ladder this run is
+  # (src/trench_ids/model/flat.py documents the full table):
+  #   false -> Flat       : no host aggregates, no message passing
+  #   true  -> Flat+Host  : host aggregates as per-flow columns, still no
+  #                         message passing
+  # The GNN (configs/train.yaml) is the third rung. Flat+Host minus Flat
+  # isolates the value of host statistics; GNN minus Flat+Host isolates the
+  # value of propagation.
+  use_host_features: false
+  # Width of the 3-layer per-flow MLP that replaces message passing. Leave
+  # null to let FlatFlowEncoder pick the width that parameter-matches the
+  # GNN for whichever arm is selected (292 for Flat -> 263,586; 254 for
+  # Flat+Host -> 263,442; the GNN encoder is 263,378). Set an explicit int
+  # only to deliberately break the match. Realised counts land in
+  # summary.json every run, so drift shows up in the results rather than
+  # silently biasing them.
+  mlp_hidden: null
+
+# Used only to compute the reference parameter count recorded in
+# summary.json (no GNN is trained here). Mirrors configs/train.yaml's model
+# block for the two fields the flat encoder has no analogue for.
+reference_model:
+  num_layers: 1
+  attn_dim: 128
+
+optim:
+  name: adam
+  learning_rate: 0.001
+
+train:
+  # 5 = the GNN's warmup_epochs (2) + full_loss_epochs (3). With no EWC
+  # penalty to stage there is nothing to warm up, so the matched quantity is
+  # total gradient exposure, not the split.
+  epochs_per_task: 5
+  batch_size: 8
+  seed: 42
+  device: auto
+
+# Off by default: the first comparison point is plain sequential
+# fine-tuning, against the GNN's own plain-fine-tuning result. Override with
+# replay.enabled=true for the arm that compares against
+# runs/replay_seed{42,1}_newport.
+replay:
+  enabled: false
+  buffer_size_per_task: 200
+  replay_fraction: 0.3
+
+paths:
+  graphs_dir: data/graphs
+  out_dir: runs/flat
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.out_dir}/hydra

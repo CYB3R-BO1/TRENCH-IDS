@@ -26,12 +26,15 @@ docs/dataset-plan.md §3:
   ``trench_ids.model.rhgnn``).
 
 Each task's rows are split by train/val/test (the ``split`` column from
-Step 1), then each split's rows are shuffled (seeded by ``seed``) and
-chunked into consecutive mini-graphs of at most ``graph_size`` flows
-(configs/graph.yaml). Chunking within a split keeps every mini-graph on one
-side of the train/val/test boundary; shuffling before chunking keeps each
-mini-graph a representative class mix, since the source Parquet is ordered
-by canonical_label from Step 1's per-class sampling. Flow
+Step 1), then each split's rows are put back into **capture order**
+(``source_dataset``, ``source_row``) and chunked into consecutive
+mini-graphs of at most ``graph_size`` flows (configs/graph.yaml). Chunking
+within a split keeps every mini-graph on one side of the train/val/test
+boundary; capture-order chunking (replacing the global random shuffle used
+until 2026-08-16) makes each mini-graph a contiguous window of one dataset's
+traffic, so Host/Port aggregation describes a real interval of activity
+rather than a task-wide average -- see ``_capture_order`` for the full
+rationale and for why class mixing survives the change. Flow
 node identity is one row of the chunk; Host identity is (source_dataset,
 IP), aggregated within that mini-graph only — it never persists across
 mini-graphs, splits, or tasks. Protocol/L7_PROTO node identity uses the
@@ -61,7 +64,7 @@ import yaml
 from torch_geometric.data import HeteroData
 
 from trench_ids.labels import BENIGN, canonical_classes
-from trench_ids.vocab import build_vocab, save_vocab
+from trench_ids.vocab import build_vocab, save_vocab, vocab_key
 
 # Fixed global class -> index mapping for Flow node labels (graph["flow"].y),
 # same order/meaning in every mini-graph across every task/split/graph_size/
@@ -170,8 +173,8 @@ def build_task_graph(
     service_idx, service_values = _index_categorical(frame["L7_PROTO"])
     port_idx, port_values = _index_categorical(frame["L4_DST_PORT"])
 
-    protocol_vocab_ids = [vocab["PROTOCOL"][str(v)] for v in protocol_values]
-    service_vocab_ids = [vocab["L7_PROTO"][str(v)] for v in service_values]
+    protocol_vocab_ids = [vocab["PROTOCOL"][vocab_key(v)] for v in protocol_values]
+    service_vocab_ids = [vocab["L7_PROTO"][vocab_key(v)] for v in service_values]
 
     y = frame["canonical_label"].map(LABEL_LOOKUP).to_numpy(dtype=np.int64)
 
@@ -280,25 +283,73 @@ def build_task_graph(
 
 def _select_benign(
     attack_rows: pd.DataFrame, benign_rows: pd.DataFrame, benign_ratio: float, seed: int
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, float]:
     """Subsample benign_rows to hit attack:benign == benign_ratio:1.
 
-    Samples without replacement when the pool covers the target; falls back
-    to sampling with replacement when the ratio demands more benign rows
-    than the pool holds (an uncapped task's attack count can now far exceed
-    Step 1's fixed benign_per_task pool -- see
-    docs/superpowers/specs/2026-07-13-dataset-task-respec-design.md §3a).
-    Returns an empty frame if there are no attack rows or no benign pool.
+    **Sampling with replacement was removed 2026-08-16.** The old fallback
+    repeated benign rows whenever the ratio demanded more than the pool
+    held, which at the previous Step 1 sizing meant every benign flow
+    appeared 54-158 times: benign is ~25% of every pooled metric, so a
+    quarter of every reported number rested on ~7,200 distinct flows, and a
+    model could memorise them. Step 1's quota planner now sizes each task's
+    benign pool so this branch is unnecessary
+    (``benign_per_task * benign_ratio == attack_per_task`` exactly); if a
+    pool still falls short, the shortfall is taken honestly (all available
+    rows, each used once) and surfaced in the report as a realised ratio
+    that differs from the requested one, rather than being papered over
+    with duplicates.
+
+    Returns (selected_benign_rows, realised_attack_to_benign_ratio).
     """
     n_attack = len(attack_rows)
     if n_attack == 0 or benign_rows.empty:
-        return benign_rows.iloc[0:0]
+        return benign_rows.iloc[0:0], float("inf")
     target = max(1, round(n_attack / benign_ratio))
     if target <= len(benign_rows):
-        return benign_rows.sample(n=target, random_state=seed).reset_index(drop=True)
-    reps = -(-target // len(benign_rows))  # ceil division
-    pool = pd.concat([benign_rows] * reps, ignore_index=True)
-    return pool.sample(n=target, random_state=seed).reset_index(drop=True)
+        selected = benign_rows.sample(n=target, random_state=seed).reset_index(drop=True)
+    else:
+        selected = benign_rows.reset_index(drop=True)
+    return selected, n_attack / max(len(selected), 1)
+
+
+def _capture_order(frame: pd.DataFrame) -> pd.DataFrame:
+    """Order rows the way the traffic was actually captured.
+
+    Sorts by ``(source_dataset, source_row)`` -- the row's 0-indexed line
+    number in its own raw CSV, which for these captures is acquisition
+    order. Two consequences, both of which the previous global
+    ``frame.sample(frac=1)`` shuffle destroyed:
+
+    * **Mini-graph windows become time-local.** A 300-flow chunk now spans a
+      contiguous stretch of one capture instead of being drawn uniformly
+      from the whole task. Everything the graph is supposed to contribute
+      over per-flow features depends on this: a Host node's aggregate
+      degree/port-spread and a Port node's in-degree only mean "burst" if
+      the window is a real interval. Under a global shuffle they instead
+      estimate the *task-wide average rate*, which carries far less signal
+      about what is happening right now, and which per-flow features
+      partially encode anyway.
+    * **Mini-graphs stop mixing datasets.** Sorting by dataset first keeps
+      each window inside a single capture, so a graph no longer splices two
+      unrelated testbeds' hosts into one "network" -- physically meaningless
+      topology that the model was nonetheless asked to aggregate over. Only
+      the one chunk straddling each dataset boundary is mixed.
+
+    Class mixing, the reason the shuffle existed, survives: the raw CSVs
+    interleave attack and benign traffic, so capture-order windows are
+    still multi-class (measured on real data: 2-3 distinct classes per
+    300-flow window in T3, versus the near-single-class windows that
+    chunking the class-ordered Parquet directly would give).
+    """
+    if "source_row" not in frame.columns:
+        raise KeyError(
+            "capture-order chunking needs the 'source_row' column written by "
+            "Step 1 (trench_ids.preprocess). Re-run Step 1 -- Parquet files "
+            "produced before 2026-08-16 do not have it."
+        )
+    return frame.sort_values(["source_dataset", "source_row"], kind="stable").reset_index(
+        drop=True
+    )
 
 
 def build_split_graphs(
@@ -313,29 +364,35 @@ def build_split_graphs(
 
     Benign rows are first subsampled to hit `benign_ratio` (attack:benign,
     see _select_benign) -- attack rows are always kept in full; only benign
-    rows are ever removed (or repeated). Rows are then shuffled (seeded)
-    before chunking: the source Parquet is ordered by canonical_label (Step
-    1 samples per class, then concatenates), so chunking without shuffling
-    first would produce mini-graphs that are almost entirely one class
-    instead of a representative mix.
+    rows are ever dropped, never repeated. The combined rows are then put
+    back into **capture order** (see :func:`_capture_order`) before
+    chunking, so each mini-graph is a contiguous window of one dataset's
+    traffic rather than a uniform random sample of the whole task.
     """
     is_benign = frame["canonical_label"] == BENIGN
     attack_rows = frame[~is_benign].reset_index(drop=True)
     benign_rows = frame[is_benign].reset_index(drop=True)
-    benign_selected = _select_benign(attack_rows, benign_rows, benign_ratio, seed)
+    benign_selected, realised_ratio = _select_benign(
+        attack_rows, benign_rows, benign_ratio, seed
+    )
 
     frame = pd.concat([attack_rows, benign_selected], ignore_index=True)
-    frame = frame.sample(frac=1, random_state=seed).reset_index(drop=True)
+    frame = _capture_order(frame)
     chunks = _chunk_frame(frame, graph_size)
     graphs: list[HeteroData] = []
     flow_counts: list[int] = []
     host_degree_maxes: list[float] = []
+    host_counts: list[int] = []
+    capture_spans: list[float] = []
     class_counts: dict[str, int] = {}
     for chunk in chunks:
         graph, counts = build_task_graph(chunk, features, vocab)
         graphs.append(graph)
         flow_counts.append(counts["node_counts"]["flow"])
+        host_counts.append(counts["node_counts"]["host"])
         host_degree_maxes.append(counts["host_degree"]["max"])
+        rows = chunk["source_row"].to_numpy()
+        capture_spans.append(float(rows.max() - rows.min()) if rows.size else 0.0)
         for label, n in counts["flow_class_counts"].items():
             class_counts[label] = class_counts.get(label, 0) + n
 
@@ -347,6 +404,14 @@ def build_split_graphs(
             "mean": float(np.mean(flow_counts)) if flow_counts else 0.0,
         },
         "host_degree_max_mean": float(np.mean(host_degree_maxes)) if host_degree_maxes else 0.0,
+        "hosts_per_graph_mean": float(np.mean(host_counts)) if host_counts else 0.0,
+        # Mean (max - min) source_row inside a mini-graph: how wide a slice
+        # of the original capture one window covers. Small relative to the
+        # task's total row span == time-local windows; under the old global
+        # shuffle this equalled the whole capture by construction.
+        "capture_span_mean": float(np.mean(capture_spans)) if capture_spans else 0.0,
+        "benign_unique_rows": int(len(benign_selected)),
+        "realised_attack_benign_ratio": realised_ratio,
         "class_counts": class_counts,
     }
     return graphs, split_report

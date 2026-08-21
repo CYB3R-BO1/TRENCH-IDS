@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json as _json
 
+import pytest
 import torch
 from torch_geometric.data import HeteroData
 
@@ -20,6 +21,7 @@ from trench_ids.cl.inference_unseen import (
 )
 from trench_ids.cl.memory_bank import save_memory_bank
 from trench_ids.cl.train import save_checkpoint
+from trench_ids.model.flat import FlatFlowEncoder
 from trench_ids.model.rhgnn import FLOW_FEATURE_DIM, HOST_FEATURE_DIM, RelationSpecificHeteroGNN
 
 
@@ -97,7 +99,9 @@ def test_compute_class_relation_means_returns_one_vector_per_relation() -> None:
 
     means = compute_class_relation_means(model, [g, g], device, batch_size=2)
 
-    assert set(means.keys()) == {"originates", "terminated_by", "targeted_by", "protocol_of", "service_of"}
+    assert set(means.keys()) == {
+        "originates", "terminated_by", "targeted_by", "protocol_of", "service_of",
+    }
     for vec in means.values():
         assert vec.shape == (8,)
 
@@ -205,3 +209,47 @@ def test_run_writes_dataset_a_and_dataset_b_outputs(tmp_path) -> None:
     assert result["dataset_b_similarity"]["ToN_backdoor"]["canonical_label"] == "Backdoor"
     assert result["dataset_b_predictions"]["ToN_backdoor"][0]["canonical_label"] == "Backdoor"
     assert result["dataset_b_confidence"]["ToN_backdoor"]["canonical_label"] == "Backdoor"
+
+
+def test_run_rejects_a_non_gnn_checkpoint(tmp_path) -> None:
+    """Dataset B's pipeline (compute_class_relation_means, then the
+    similarity report) needs per-relation Flow embeddings, which only
+    RelationSpecificHeteroGNN produces -- FlatFlowEncoder.forward always
+    returns relations={"flow": {}}. Pointing this at a flat checkpoint must
+    raise clearly rather than silently degrading to empty means and empty
+    (but successfully-written) similarity files."""
+    device = torch.device("cpu")
+    g = _tiny_graph()
+    label_names = ["Benign", "DoS"]
+    model = FlatFlowEncoder(
+        hidden_dim=8, protocol_vocab_size=1, service_vocab_size=1,
+        flow_feature_dim=FLOW_FEATURE_DIM, host_feature_dim=HOST_FEATURE_DIM,
+    ).to(device)
+    classifier = torch.nn.Linear(8, len(label_names)).to(device)
+    config = {
+        "hidden_dim": 8, "protocol_vocab_size": 1, "service_vocab_size": 1,
+        "port_tail_buckets": 32, "label_names": label_names, "model_type": "flat",
+    }
+
+    graphs_dir = tmp_path / "graphs"
+    graphs_dir.mkdir()
+    torch.save([g], graphs_dir / "task_1_train.pt")
+    checkpoint_path = tmp_path / "checkpoint_task_6.pt"
+    save_checkpoint(
+        checkpoint_path, task_id=6, epochs_per_task=1, warmup_epochs=0, seed=42,
+        model=model, classifier=classifier, config=config,
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(_json.dumps({"classes": {}}))
+
+    with pytest.raises(ValueError, match="model_type"):
+        run_inference_unseen(
+            checkpoint_path=checkpoint_path,
+            graphs_dir_for_schema=graphs_dir,
+            unseen_graphs_dir=tmp_path,
+            unseen_manifest_path=manifest_path,
+            memory_bank_path=tmp_path / "memory_bank.pt",
+            out_dir=tmp_path / "out",
+            device=device,
+            batch_size=4,
+        )

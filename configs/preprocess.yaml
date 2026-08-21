@@ -18,24 +18,46 @@ datasets:
   NF-BoT-IoT-v2: BoT
 
 sampling:
-  # NOTE: attack_per_class_cap is intentionally REMOVED. Every attack row
-  # that passes trench_ids.labels.CLASS_DATASETS' per-dataset restriction
-  # and isn't in EXCLUDED_CLASSES is kept, in full -- no pre-graph sampling
-  # cap. See docs/superpowers/specs/2026-07-13-dataset-task-respec-design.md
-  # §3. Any class-level balancing now happens after Step 2 graph
-  # construction, on constructed graphs, not here.
+  # QUOTA-BASED SAMPLING (rewritten 2026-08-16, replacing "keep every attack
+  # row in full, subsample benign to a small fixed pool").
+  #
+  # Why the previous design was replaced -- three measured defects, all
+  # traceable to the same root cause (attack volume was uncapped while the
+  # benign pool was fixed and tiny):
+  #
+  #   1. Benign duplication. Step 2's benign selector had to sample WITH
+  #      REPLACEMENT to reach benign_ratio, replicating ~5,600 unique train
+  #      flows 54-158x. Benign is ~25% of every pooled metric, so a quarter
+  #      of every headline number rested on a few thousand distinct flows.
+  #   2. Cross-task benign leakage. Tasks drew benign independently from
+  #      shared pools, so 47-72 flow_ids appeared in one task's train split
+  #      and another task's test split -- train/test contamination on the
+  #      benchmark's largest class.
+  #   3. Task-size and class-size imbalance. Largest:smallest task was 2.9x,
+  #      and within T3 the DDoS:Infiltration ratio was ~30:1, leaving
+  #      Infiltration at ~0.5% of the training signal (its F1 never rose
+  #      above 0.28 in any run). Per-class forgetting was not measurable for
+  #      the rare classes at all.
+  #
+  # The quota planner (preprocess.compute_quotas) fixes all three: every
+  # task gets the SAME budget, waterfilled evenly across its classes and
+  # their source datasets, and each task's benign slice is disjoint from
+  # every other task's.
 
-  # Benign pool retained per dataset during the streaming pass. Tasks draw
-  # their benign quota from these pools (fresh per task, from the task's own
-  # datasets). Kept as a runtime/memory safeguard -- not part of the
-  # attack-cap removal.
-  benign_per_dataset_cap: 60000
+  # Attack rows per task, split as evenly as availability allows across that
+  # task's classes (a class short of its even share saturates and the
+  # remainder is redistributed). 390,000 is set by the binding constraint
+  # below: it is 3 x benign_per_task, so Step 2's benign_ratio=3.0 is exactly
+  # satisfiable with no sampling-with-replacement anywhere.
+  attack_per_task: 390000
 
-  # Benign flows added to each task (split across that task's contributing
-  # datasets). This is a Step 1 pool-size safeguard, not the final
-  # attack:benign ratio a task's graphs see -- Step 2's benign_ratio
-  # (configs/graph.yaml) controls that. See design spec §3a.
-  benign_per_task: 8000
+  # Benign rows per task, drawn disjointly across tasks from that task's own
+  # contributing datasets. The ceiling is NF-BoT-IoT-v2: T2 (Reconnaissance)
+  # can only draw benign from BoT-IoT, which holds just 135,037 benign rows
+  # in total (verified against the raw CSV). 130,000 leaves headroom under
+  # that hard ceiling while keeping every task identical in size. ToN
+  # (6,099,469) and CSE (16,635,567) are nowhere near binding.
+  benign_per_task: 130000
 
   # CSV read chunk size (rows). Files are up to 6 GB — never read whole.
   chunk_size: 500000

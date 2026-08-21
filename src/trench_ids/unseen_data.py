@@ -90,11 +90,41 @@ def _reservoir_update(
         if len(winners):
             winner_js = js[winners]
             winner_records = remaining.iloc[winners].to_dict("records")
-            for j, rec in zip(winner_js.tolist(), winner_records):
+            for j, rec in zip(winner_js.tolist(), winner_records, strict=True):
                 reservoir[j] = rec
         seen += r
 
     return seen
+
+
+def _integral_target_dtypes(frame: pd.DataFrame) -> pd.Series:
+    """``frame.dtypes``, with any float64 column downcast to int64 in the
+    *reported* target if every value in ``frame`` is integral.
+
+    Guards a specific failure this module's dtype-restoration mechanism
+    otherwise has: ``reservoir_dtypes`` (below) captures its target from the
+    *first* clean chunk, but pandas infers a whole chunk's dtype before
+    ``_drop_corrupted_rows`` runs -- so if that first chunk had even one
+    blank/NaN value anywhere in an otherwise-integer column (e.g.
+    PROTOCOL), the whole column parses as float64 for that chunk, and stays
+    float64 for the surviving rows even after the NaN-carrying row is
+    dropped. Capturing that as the target makes ``_restore_dtypes`` a no-op
+    -- it "restores" the frame to the same wrong dtype it already has,
+    leaving e.g. PROTOCOL as ``6.0`` instead of ``6``, which then fails
+    ``unseen_graphs.drop_vocab_gaps``'s ``str(int)`` vocab lookup and
+    silently drops the whole class as a spurious "vocab gap". Recovering
+    the column's true integer-ness here, from the data that actually
+    survived filtering rather than from the chunk's raw parse, closes that
+    gap regardless of which chunk happens to be "first".
+    """
+    dtypes = frame.dtypes.copy()
+    for col in frame.columns:
+        if dtypes[col] != np.float64:
+            continue
+        values = frame[col]
+        if values.notna().all() and (values % 1 == 0).all():
+            dtypes[col] = np.dtype("int64")
+    return dtypes
 
 
 def _restore_dtypes(frame: pd.DataFrame, target_dtypes: pd.Series) -> pd.DataFrame:
@@ -106,8 +136,11 @@ def _restore_dtypes(frame: pd.DataFrame, target_dtypes: pd.Series) -> pd.DataFra
     chunks -- possible on a 45-column, many-chunk real CSV even though it
     doesn't happen in this module's own test fixtures) is left as pandas
     inferred it rather than raising and losing an otherwise-complete,
-    multi-minute extraction.
+    multi-minute extraction. Works on a copy -- callers pass filtered
+    slices, and assigning into a view would only raise SettingWithCopy
+    warnings (or silently not persist).
     """
+    frame = frame.copy()
     for col, dtype in target_dtypes.items():
         if frame[col].dtype == dtype:
             continue
@@ -154,15 +187,25 @@ def extract_unseen_class(
     rows_found_total = 0
     corrupted_dropped_total = 0
     clean_seen_total = 0
-    # Dtypes of the first clean matched chunk -- reservoir rows pass through
-    # a Python-dict round trip (DataFrame.to_dict("records") / from_records),
+    # Dtypes of the first clean matched chunk. Reservoir rows pass through a
+    # Python-dict round trip (DataFrame.to_dict("records") / from_records),
     # which can silently up-cast columns (e.g. an int PROTOCOL column
-    # becoming float64 if any dict along the way had a missing/NaN key).
-    # Restoring the original dtypes at the end keeps downstream consumers
-    # (e.g. unseen_graphs.drop_vocab_gaps's str(int) vocab lookup) working
-    # the same as the non-reservoir (sample_cap=None) path, which never
-    # leaves DataFrame-land and so never has this problem.
-    reservoir_dtypes: pd.Series | None = None
+    # becoming float64 if any dict along the way had a missing/NaN key);
+    # the sample_cap=None concat path has the mirror-image problem: pandas
+    # infers a whole chunk's dtype before _drop_corrupted_rows runs, so one
+    # NaN in an otherwise-integer column leaves the surviving rows float64
+    # ("6.0" not "6") in the concatenated parquet -- where it fails
+    # unseen_graphs.drop_vocab_gaps's str(int) vocab lookup and silently
+    # drops the whole class as a spurious "vocab gap". Restoring the
+    # original dtypes in both paths keeps downstream consumers working.
+    # Captured via _integral_target_dtypes, not clean.dtypes directly: the
+    # *chunk* this "first clean" frame came from may itself have had an
+    # unrelated NaN in the same column (later dropped by
+    # _drop_corrupted_rows), which pandas would already have coerced to
+    # float64 for the whole chunk -- see _integral_target_dtypes's
+    # docstring for why capturing that coercion as the target makes the
+    # restoration below a no-op.
+    target_dtypes: pd.Series | None = None
 
     for chunk in pd.read_csv(csv_path, chunksize=chunk_size):
         # Pre-filter to only rows with raw Attack labels in RAW_TO_CANONICAL
@@ -186,11 +229,12 @@ def extract_unseen_class(
         if clean.empty:
             continue
 
+        if target_dtypes is None:
+            target_dtypes = _integral_target_dtypes(clean)
+
         if sample_cap is None:
-            parts.append(clean)
+            parts.append(_restore_dtypes(clean, target_dtypes))
         else:
-            if reservoir_dtypes is None:
-                reservoir_dtypes = clean.dtypes
             clean_seen_total = _reservoir_update(
                 reservoir, clean_seen_total, clean, sample_cap, rng
             )
@@ -204,8 +248,7 @@ def extract_unseen_class(
     else:
         if reservoir:
             frame = pd.DataFrame.from_records(reservoir, columns=all_cols)
-            if reservoir_dtypes is not None:
-                frame = _restore_dtypes(frame, reservoir_dtypes)
+            frame = _restore_dtypes(frame, target_dtypes)
         else:
             frame = pd.DataFrame(columns=all_cols)
         sampled = clean_seen_total > sample_cap

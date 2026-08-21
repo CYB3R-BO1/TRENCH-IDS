@@ -10,7 +10,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from trench_ids.preprocess import _drop_corrupted_rows, pass1_counts, pass2_sample
+from trench_ids.preprocess import (
+    _drop_corrupted_rows,
+    _waterfill,
+    compute_quotas,
+    pass1_counts,
+    pass2_sample,
+)
 
 
 def _write_csv(root: Path, dir_name: str, rows: list[tuple[int, str]]) -> None:
@@ -27,7 +33,7 @@ def _cfg(root: Path) -> dict:
         "paths": {"raw_dir": str(root), "out_dir": str(root / "out")},
         "datasets": {"NF-ToN-IoT-v2": "ToN", "NF-BoT-IoT-v2": "BoT"},
         "sampling": {
-            "benign_per_dataset_cap": 100,
+            "attack_per_task": 100,
             "benign_per_task": 100,
             "chunk_size": 2,
         },
@@ -60,17 +66,22 @@ def test_pass1_counts_drops_disallowed_dataset_class_combo(two_dataset_root: Pat
     attack_counts, benign_counts, original_cols = pass1_counts(cfg)
 
     # BoT-IoT's 2 DDoS rows are NOT counted -- DDoS is ToN/CSE-only.
-    assert attack_counts == Counter({"DDoS": 2, "Scanning": 1, "Reconnaissance": 1})
+    # Counts are keyed by (class, dataset) so compute_quotas can split a
+    # multi-source class's quota by per-source availability.
+    assert attack_counts == Counter(
+        {("DDoS", "ToN"): 2, ("Scanning", "ToN"): 1, ("Reconnaissance", "BoT"): 1}
+    )
     assert benign_counts == Counter({"ToN": 1, "BoT": 1})
     assert original_cols == ["IN_BYTES", "Attack"]
 
 
 def test_pass2_sample_drops_disallowed_and_assigns_flow_id(two_dataset_root: Path) -> None:
     cfg = _cfg(two_dataset_root)
-    _, benign_counts, _ = pass1_counts(cfg)
+    attack_counts, benign_counts, _ = pass1_counts(cfg)
     rng = np.random.default_rng(cfg["seed"])
+    quotas = compute_quotas(attack_counts, benign_counts, 100, 100)
 
-    attacks, benign_pools = pass2_sample(cfg, benign_counts, rng)
+    attacks, benign_pools = pass2_sample(cfg, attack_counts, benign_counts, quotas, rng)
 
     # 4 kept attack rows: ToN ddos x2 + ToN scanning x1 + BoT reconnaissance
     # x1. BoT's 2 DDoS rows are dropped entirely -- a hard class-dataset
@@ -94,16 +105,79 @@ def test_pass2_sample_drops_disallowed_and_assigns_flow_id(two_dataset_root: Pat
     assert len(benign_pools["BoT"]) == 1
 
 
-def test_pass2_sample_keeps_every_allowed_attack_row_no_cap(two_dataset_root: Path) -> None:
-    """No attack_per_class_cap anywhere in cfg -- pass2_sample must not need one."""
+def test_pass2_sample_keeps_every_allowed_row_when_quota_exceeds_supply(
+    two_dataset_root: Path,
+) -> None:
+    """A quota larger than the data keeps everything allowed, and no more."""
     cfg = _cfg(two_dataset_root)
-    assert "attack_per_class_cap" not in cfg["sampling"]
-    _, benign_counts, _ = pass1_counts(cfg)
+    attack_counts, benign_counts, _ = pass1_counts(cfg)
     rng = np.random.default_rng(cfg["seed"])
+    quotas = compute_quotas(attack_counts, benign_counts, 100, 100)
 
-    attacks, _ = pass2_sample(cfg, benign_counts, rng)
+    attacks, _ = pass2_sample(cfg, attack_counts, benign_counts, quotas, rng)
 
     assert (attacks["canonical_label"] == "DDoS").sum() == 2
+
+
+def test_pass2_sample_honours_a_binding_quota_exactly(two_dataset_root: Path) -> None:
+    """A quota below the available supply is met exactly, not approximately.
+
+    Selection is planned from Pass 1's counts rather than drawn per row, so
+    realised counts cannot drift off the plan -- which is what keeps every
+    task the same size.
+    """
+    cfg = _cfg(two_dataset_root)
+    attack_counts, benign_counts, _ = pass1_counts(cfg)
+    rng = np.random.default_rng(cfg["seed"])
+    quotas = compute_quotas(attack_counts, benign_counts, attack_per_task=1, benign_per_task=1)
+
+    attacks, benign_pools = pass2_sample(cfg, attack_counts, benign_counts, quotas, rng)
+
+    # Task 3 (DDoS + Infiltration) gets 1 attack row total; only DDoS exists
+    # in this fixture, so DDoS supplies it.
+    assert (attacks["canonical_label"] == "DDoS").sum() == 1
+    # T1 draws 1 benign from ToN, T2 draws 1 from BoT.
+    assert len(benign_pools["ToN"]) == 1
+    assert len(benign_pools["BoT"]) == 1
+
+
+def test_waterfill_saturates_short_keys_and_redistributes() -> None:
+    assert _waterfill({"rare": 5, "common": 1000}, 100) == {"rare": 5, "common": 95}
+    assert _waterfill({"a": 3, "b": 3}, 100) == {"a": 3, "b": 3}
+    assert sum(_waterfill({"a": 100, "b": 100, "c": 100}, 10).values()) == 10
+
+
+def test_compute_quotas_gives_every_task_the_same_budget() -> None:
+    attack_counts = Counter(
+        {
+            ("Scanning", "ToN"): 3_781_419,
+            ("Reconnaissance", "BoT"): 2_620_999,
+            ("DDoS", "ToN"): 2_030_232,
+            ("DDoS", "CSE"): 1_386_220,
+            ("Infiltration", "CSE"): 116_361,
+            ("DoS", "ToN"): 712_609,
+            ("DoS", "CSE"): 483_999,
+            ("Injection", "ToN"): 684_897,
+            ("Injection", "CSE"): 68_280,
+            ("Password", "ToN"): 1_153_323,
+            ("Bot", "CSE"): 143_097,
+            ("XSS", "ToN"): 2_455_020,
+            ("BruteForce", "CSE"): 120_912,
+        }
+    )
+    benign_counts = Counter({"ToN": 6_099_469, "CSE": 16_635_567, "BoT": 135_037})
+
+    quotas = compute_quotas(attack_counts, benign_counts, 390_000, 130_000)
+
+    for task, by_class in quotas["attack_per_task_by_class"].items():
+        assert sum(by_class.values()) == 390_000, task
+        assert sum(quotas["benign_alloc"][task].values()) == 130_000, task
+    # The rare classes are taken in full rather than sampled at their natural
+    # (~30:1) proportion, which is the point of the waterfill.
+    assert quotas["attack_per_task_by_class"][3]["Infiltration"] == 116_361
+    assert quotas["attack_per_task_by_class"][6]["BruteForce"] == 120_912
+    # BoT-IoT's whole benign supply is the binding constraint on T2.
+    assert quotas["benign_alloc"][2] == {"BoT": 130_000}
 
 
 def test_drop_corrupted_rows_removes_overflow_and_nonfinite_values() -> None:

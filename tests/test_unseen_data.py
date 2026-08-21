@@ -249,6 +249,41 @@ def test_extract_unseen_class_reservoir_sampling_preserves_dtypes(tmp_path: Path
     assert (frame["PROTOCOL"] == 6).all()
 
 
+def test_extract_unseen_class_preserves_dtypes_when_the_first_chunk_has_the_nan(
+    tmp_path: Path,
+) -> None:
+    # Companion to the test above, with the blank moved into the *first*
+    # clean chunk instead of a later one. reservoir_dtypes captures its
+    # target from the first clean chunk (_integral_target_dtypes), and that
+    # chunk's PROTOCOL column parses as float64 for pandas' whole read of it
+    # once any row is blank -- even after _drop_corrupted_rows removes that
+    # one row, the surviving rows' dtype stays float64. Capturing that as
+    # the restoration target (rather than recovering the column's true
+    # integer-ness, which _integral_target_dtypes exists to do) would make
+    # _restore_dtypes a no-op that "restores" the frame to the dtype it
+    # already has -- the same "6.0" vocab-lookup failure as the test above,
+    # but not caught by it, since there the NaN was in a later chunk.
+    root = tmp_path / "raw"
+    data_dir = root / "NF-BoT-IoT-v2" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    lines = ["IN_BYTES,PROTOCOL,Attack"]
+    lines.append("0.0,,ddos")  # chunk 1: blank PROTOCOL -> whole chunk parsed as float64
+    lines += [f"{float(i)},6,ddos" for i in range(1, 5)]  # chunk 1: rest, still clean
+    lines += [f"{float(100 + i)},6,ddos" for i in range(4)]  # chunk 2: clean, int PROTOCOL
+    (data_dir / "NF-BoT-IoT-v2.csv").write_text("\n".join(lines) + "\n")
+    rng = np.random.default_rng(3)
+
+    frame, manifest_entry = extract_unseen_class(
+        root, "NF-BoT-IoT-v2", "BoT", "DDoS",
+        chunk_size=5, sample_cap=20, rng=rng,
+    )
+
+    assert len(frame) == 8  # 9 rows total, 1 dropped for blank/non-finite PROTOCOL
+    assert manifest_entry["corrupted_rows_dropped"] == 1
+    assert frame["PROTOCOL"].dtype == np.int64
+    assert (frame["PROTOCOL"] == 6).all()
+
+
 def test_run_writes_parquet_and_manifest(tmp_path: Path) -> None:
     root = tmp_path / "raw"
     _write_csv(root, "NF-ToN-IoT-v2", _rows("backdoor", 3) + _rows("Benign", 2))

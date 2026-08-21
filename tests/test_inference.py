@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import pytest
 import torch
 from torch_geometric.data import HeteroData
 
 from trench_ids.cl.inference import load_checkpoint, predict
 from trench_ids.cl.train import save_checkpoint
 from trench_ids.model.rhgnn import FLOW_FEATURE_DIM, HOST_FEATURE_DIM, RelationSpecificHeteroGNN
+from trench_ids.vocab import save_vocab, vocab_fingerprint
 
 
 def _tiny_graph() -> HeteroData:
@@ -110,7 +112,85 @@ def test_load_checkpoint_rejects_unsupported_version(tmp_path) -> None:
     checkpoint_path = tmp_path / "checkpoint_bad.pt"
     torch.save({"checkpoint_version": 999, "config": {}}, checkpoint_path)
 
-    import pytest
-
     with pytest.raises(ValueError, match="checkpoint_version"):
         load_checkpoint(checkpoint_path, graphs_dir, torch.device("cpu"))
+
+
+def _checkpoint_with_vocab(tmp_path, vocab_for_fingerprint, vocab_on_disk):
+    device = torch.device("cpu")
+    g = _tiny_graph()
+    model = RelationSpecificHeteroGNN.from_graph(
+        g, hidden_dim=8, protocol_vocab_size=2, service_vocab_size=2, num_layers=1,
+    ).to(device)
+    classifier = torch.nn.Linear(8, 2).to(device)
+    config = {
+        "hidden_dim": 8, "num_layers": 1, "attn_dim": 128, "port_tail_buckets": 32,
+        "protocol_vocab_size": 2, "service_vocab_size": 2, "label_names": ["a", "b"],
+        "vocab_fingerprint": vocab_fingerprint(vocab_for_fingerprint),
+    }
+
+    graphs_dir = tmp_path / "graphs"
+    graphs_dir.mkdir()
+    torch.save([g, g], graphs_dir / "task_1_train.pt")
+    save_vocab(vocab_on_disk, graphs_dir / "vocab.json")
+
+    checkpoint_path = tmp_path / "checkpoint_task_1.pt"
+    save_checkpoint(
+        checkpoint_path, task_id=1, epochs_per_task=1, warmup_epochs=0, seed=42,
+        model=model, classifier=classifier, config=config,
+    )
+    return checkpoint_path, graphs_dir, device
+
+
+def test_load_checkpoint_accepts_a_matching_vocab_fingerprint(tmp_path) -> None:
+    vocab = {"PROTOCOL": {"6": 0, "17": 1}, "L7_PROTO": {"1": 0, "2": 1}}
+    checkpoint_path, graphs_dir, device = _checkpoint_with_vocab(tmp_path, vocab, vocab)
+
+    load_checkpoint(checkpoint_path, graphs_dir, device)  # must not raise
+
+
+def test_load_checkpoint_rejects_a_renumbered_vocab(tmp_path) -> None:
+    """The exact scenario this exists to catch: rebuilding Step 1/2
+    renumbers vocab.json's ids (build_vocab assigns by sorted position), so
+    a checkpoint trained against the old numbering must not load silently
+    against a rebuilt one -- same columns, same size, different mapping."""
+    trained_vocab = {"PROTOCOL": {"6": 0, "17": 1}, "L7_PROTO": {"1": 0, "2": 1}}
+    # A rebuild inserted "1" into PROTOCOL, shifting "6" and "17" up by one.
+    rebuilt_vocab = {"PROTOCOL": {"1": 0, "6": 1, "17": 2}, "L7_PROTO": {"1": 0, "2": 1}}
+    checkpoint_path, graphs_dir, device = _checkpoint_with_vocab(
+        tmp_path, trained_vocab, rebuilt_vocab
+    )
+
+    with pytest.raises(ValueError, match="vocab_fingerprint"):
+        load_checkpoint(checkpoint_path, graphs_dir, device)
+
+
+def test_load_checkpoint_skips_the_vocab_check_for_checkpoints_without_a_fingerprint(
+    tmp_path,
+) -> None:
+    """Checkpoints written before this check existed carry no
+    vocab_fingerprint key; they must keep loading exactly as before."""
+    device = torch.device("cpu")
+    g = _tiny_graph()
+    model = RelationSpecificHeteroGNN.from_graph(
+        g, hidden_dim=8, protocol_vocab_size=2, service_vocab_size=2, num_layers=1,
+    ).to(device)
+    classifier = torch.nn.Linear(8, 2).to(device)
+    config = {
+        "hidden_dim": 8, "num_layers": 1, "attn_dim": 128, "port_tail_buckets": 32,
+        "protocol_vocab_size": 2, "service_vocab_size": 2, "label_names": ["a", "b"],
+    }
+
+    graphs_dir = tmp_path / "graphs"
+    graphs_dir.mkdir()
+    torch.save([g, g], graphs_dir / "task_1_train.pt")
+    # Deliberately no vocab.json on disk -- the check must never look for it
+    # when the checkpoint carries no fingerprint to compare against.
+
+    checkpoint_path = tmp_path / "checkpoint_task_1.pt"
+    save_checkpoint(
+        checkpoint_path, task_id=1, epochs_per_task=1, warmup_epochs=0, seed=42,
+        model=model, classifier=classifier, config=config,
+    )
+
+    load_checkpoint(checkpoint_path, graphs_dir, device)  # must not raise

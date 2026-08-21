@@ -10,6 +10,16 @@ model:
   attn_dim: 128
   num_layers: 1
   port_tail_buckets: 32
+  # How a node type's per-relation embeddings are merged.
+  #   attention  HAN-style convex combination (softmax weights, sums to 1).
+  #              The project default throughout; kept as the default so every
+  #              earlier result stays reproducible from this config.
+  #   concat     concatenate then project. Tests whether the convex
+  #              combination -- which compresses R x hidden_dim to hidden_dim
+  #              before anything reads it -- is what puts the GNN behind the
+  #              non-graph Flat+Host baseline (0.749 vs 0.854 mean final
+  #              accuracy at matched parameters). See ConcatFusion.
+  fusion: attention
 
 optim:
   name: adam
@@ -69,6 +79,43 @@ replay:
   # already-banked classes. Task 1 always uses uniform regardless of this
   # setting (no transferability signal exists yet).
   selection: uniform
+
+# Transferability-weighted relation distillation (TRD) -- the replacement
+# for relation-aware EWC above, which a Fisher-mass audit showed could only
+# ever modulate 2.2% of its own penalty (see
+# src/trench_ids/cl/distillation.py for the full diagnosis). Disabled by
+# default so every pre-existing run config reproduces unchanged.
+distill:
+  enabled: false
+  # Weight on L_TRD relative to L_cls. The penalty is a mean cosine distance
+  # in [0, 2] and the relation weights sum to 1, so lambda_d is directly
+  # comparable to the cross-entropy scale -- unlike the EWC lambdas, whose
+  # useful range depended on the Fisher magnitudes.
+  lambda_d: 1.0
+  # uniform | transfer | inverse -- see distillation.WEIGHTING_MODES. These
+  # three form the ablation that tests the project's actual hypothesis:
+  # "transfer" is the proposed method, "uniform" the preserve-everything
+  # control, "inverse" the sign control.
+  weighting: transfer
+  # Softmax temperature turning S_r into w_r. Lower = more selective.
+  # Measured on real runs: S_r spans roughly 0.0-0.85 across relations, so
+  # 0.1 comes out nearly one-hot -- it collapsed "transfer" to "regularise
+  # service_of alone", and service_of happens to be the relation that drifts
+  # least across a task boundary (0.05 cosine, versus 0.60 for
+  # terminated_by), making the penalty near-inert. 0.3 preserves a clear
+  # ordering while leaving every relation a non-negligible share.
+  temperature: 0.3
+  # cosine | logit | both -- see distillation.OBJECTIVES. "cosine" matches
+  # the relation embeddings, "logit" matches what each relation says about
+  # the classes (through the frozen old head), "both" sums them. Default
+  # "both": the two failure modes -- representation drift and decision-
+  # boundary drift -- are independent, and this benchmark exhibits both.
+  objective: both
+  # Softmax temperature for the logit term (Hinton et al. 2015). 2.0 softens
+  # the target enough to carry inter-class similarity structure rather than
+  # just the argmax; the term is rescaled by tau^2 so this does not act as a
+  # second lambda.
+  logit_temperature: 2.0
 
 paths:
   graphs_dir: data/graphs

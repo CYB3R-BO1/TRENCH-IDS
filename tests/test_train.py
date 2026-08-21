@@ -263,7 +263,7 @@ def test_train_one_task_disabled_weighting_fixes_w_r_and_skips_importance_mlp_gr
         "attack_a": {relation: torch.randn(8) for relation in FLOW_RELATIONS},
     }
 
-    _, final_w_r = train_one_task(
+    _, final_w_r, _ = train_one_task(
         model,
         classifier,
         [g, g],
@@ -348,7 +348,7 @@ def test_train_one_task_writes_loss_components_log_when_path_given(tmp_path) -> 
         assert record["epoch"] == i
         assert set(record.keys()) == {
             "epoch", "l_cls", "shared_raw", "flow_raw", "other_raw",
-            "total_weighted", "loss_total",
+            "total_weighted", "loss_total", "distill",
         }
 
 
@@ -480,7 +480,7 @@ def test_train_one_task_fixed_w_r_mode_uses_sigmoid_of_s_r_and_skips_mlp_grad() 
         "attack_a": {relation: torch.randn(8) for relation in FLOW_RELATIONS},
     }
 
-    _, final_w_r = train_one_task(
+    _, final_w_r, _ = train_one_task(
         model,
         classifier,
         [g, g],
@@ -539,7 +539,7 @@ def test_train_one_task_fixed_w_r_mode_matches_sigmoid_of_cached_s_r() -> None:
     )
     optimizer = torch.optim.Adam(trainable_params, lr=1e-3)
 
-    _, final_w_r = train_one_task(
+    _, final_w_r, _ = train_one_task(
         model,
         classifier,
         [g, g],
@@ -589,7 +589,7 @@ def test_train_one_task_w_r_mode_disabled_matches_disable_learned_weighting() ->
         "attack_a": {relation: torch.randn(8) for relation in FLOW_RELATIONS},
     }
 
-    _, final_w_r = train_one_task(
+    _, final_w_r, _ = train_one_task(
         model,
         classifier,
         [g, g],
@@ -654,3 +654,32 @@ def test_save_checkpoint_writes_loadable_state(tmp_path: Path) -> None:
 
     fresh_classifier = torch.nn.Linear(8, 2)
     fresh_classifier.load_state_dict(checkpoint["classifier_state_dict"])  # no error
+
+
+def test_sample_graphs_is_a_seeded_random_subsample_not_a_prefix() -> None:
+    """Mini-graphs are chunked in capture order, so a prefix slice samples one
+    early-capture window; sample_graphs must draw uniformly instead, and the
+    same seed must reproduce the same draw."""
+    from trench_ids.cl.train import sample_graphs
+
+    graphs = [object() for _ in range(50)]
+    picked = sample_graphs(graphs, 10, seed="test:task_1")
+    again = sample_graphs(graphs, 10, seed="test:task_1")
+    other = sample_graphs(graphs, 10, seed="test:task_2")
+
+    assert len(picked) == 10
+    assert picked == again
+    assert picked != other
+    # Uniform draw: indices spread beyond any single contiguous window.
+    indices = sorted(graphs.index(g) for g in picked)
+    assert indices[-1] - indices[0] > 9
+
+
+def test_sample_graphs_returns_everything_when_cap_is_zero_or_larger() -> None:
+    from trench_ids.cl.train import sample_graphs
+
+    graphs = [object() for _ in range(5)]
+
+    assert sample_graphs(graphs, 0) is graphs
+    assert sample_graphs(graphs, 5) is graphs
+    assert sample_graphs(graphs, 99) is graphs

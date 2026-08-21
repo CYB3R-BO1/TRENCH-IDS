@@ -4,7 +4,7 @@ import pytest
 import torch
 from torch_geometric.data import HeteroData
 
-from trench_ids.model.attention_fusion import SemanticAttention
+from trench_ids.model.attention_fusion import ConcatFusion, SemanticAttention
 from trench_ids.model.relation_conv import RelationSpecificConv
 from trench_ids.model.rhgnn import (
     NodeFeatureEncoders,
@@ -336,3 +336,188 @@ def test_relation_specific_hetero_gnn_from_graph_matches_metadata() -> None:
     expected_keys = {"__".join(et) for et in edge_types}
     assert conv_edge_keys == expected_keys
     assert set(model.layers[0].fusion.keys()) == set(node_types)
+
+
+def test_concat_fusion_is_not_a_convex_combination() -> None:
+    """The distinguishing property. SemanticAttention's output is a weighted
+    average of its inputs, so it lands inside their convex hull and R x
+    hidden_dim values are compressed to hidden_dim before anything reads
+    them. ConcatFusion's projection is under no such constraint -- which is
+    the whole reason for it."""
+    torch.manual_seed(0)
+    embeddings = [torch.zeros(3, 4) + i for i in range(1, 4)]  # constants 1, 2, 3
+
+    attention_out, _ = SemanticAttention(4, 8)(embeddings)
+    concat_out, _ = ConcatFusion(4, 3)(embeddings)
+
+    # A convex combination of the constants 1..3 must lie within [1, 3].
+    assert attention_out.min() >= 1.0 - 1e-5
+    assert attention_out.max() <= 3.0 + 1e-5
+    # The projection is free of that bound; with random init it essentially
+    # never satisfies it, and that freedom is the point.
+    assert concat_out.min() < 1.0 - 1e-5 or concat_out.max() > 3.0 + 1e-5
+
+
+def test_concat_fusion_preserves_information_attention_destroys() -> None:
+    """Two different relation orderings that share the same *mean* are
+    indistinguishable to a symmetric weighted average once the weights are
+    equal, but remain distinguishable after concatenation. This is the
+    information loss stated in ConcatFusion's docstring, as a test."""
+    torch.manual_seed(0)
+    a = [torch.full((2, 4), 1.0), torch.full((2, 4), 3.0)]
+    b = [torch.full((2, 4), 3.0), torch.full((2, 4), 1.0)]
+    fusion = ConcatFusion(4, 2)
+
+    assert not torch.allclose(fusion(a)[0], fusion(b)[0])
+
+
+def test_concat_fusion_single_relation_allocates_no_projection() -> None:
+    """The num_relations=1 case never calls self.project (see the identity
+    test below), so building it at all would inflate model.parameters()
+    with weights the loss can never reach -- the same "counted but
+    gradient-unreachable" defect already diagnosed for attention fusion's
+    six dead non-Flow relations, reproduced by a different mechanism if this
+    regresses."""
+    fusion = ConcatFusion(4, 1)
+
+    assert fusion.project is None
+    assert sum(p.numel() for p in fusion.parameters()) == 0
+
+
+def test_concat_fusion_single_relation_is_identity() -> None:
+    """Matches SemanticAttention's behaviour so node types with one incoming
+    relation (Protocol, Service, Port) are unaffected by the mode."""
+    embedding = torch.randn(3, 4)
+
+    fused, beta = ConcatFusion(4, 1)([embedding])
+
+    assert torch.equal(fused, embedding)
+    assert beta.tolist() == [1.0]
+
+
+def test_concat_fusion_rejects_a_relation_count_it_was_not_built_for() -> None:
+    """The projection is sized at construction, so a mismatch is a build
+    error rather than something to paper over at forward time."""
+    fusion = ConcatFusion(4, 3)
+
+    with pytest.raises(ValueError, match="built for 3 relations"):
+        fusion([torch.randn(2, 4), torch.randn(2, 4)])
+
+
+def test_both_fusion_modes_produce_the_same_output_contract() -> None:
+    """Every consumer (train.evaluate_accuracy, inference.predict, TRD's
+    penalty) reads fused["flow"] and relations["flow"], so the two modes have
+    to be interchangeable from the outside."""
+    graph = _synthetic_graph()
+    outputs = {}
+    for mode in ("attention", "concat"):
+        model = RelationSpecificHeteroGNN.from_graph(
+            graph,
+            hidden_dim=8,
+            protocol_vocab_size=5,
+            service_vocab_size=10,
+            num_layers=1,
+            fusion=mode,
+        )
+        model.encoders = NodeFeatureEncoders(
+            8, protocol_vocab_size=5, service_vocab_size=10,
+            flow_feature_dim=FLOW_DIM, host_feature_dim=HOST_DIM,
+        )
+        outputs[mode] = model(graph)
+
+    for mode, out in outputs.items():
+        assert out.fused["flow"].shape == (6, 8), mode
+        # TRD distils the per-relation embeddings, so losing them would
+        # silently disable the mechanism rather than raise.
+        assert len(out.relations["flow"]) == 5, mode
+
+
+def test_concat_fusion_gradients_reach_every_relation() -> None:
+    """A relation whose gradient is None is a parameter the loss cannot
+    train -- the failure that made six of this schema's relations dead under
+    EWC. Concat fusion must not reintroduce it."""
+    graph = _synthetic_graph()
+    model = RelationSpecificHeteroGNN.from_graph(
+        graph, hidden_dim=8, protocol_vocab_size=5, service_vocab_size=10,
+        num_layers=1, fusion="concat",
+    )
+    model.encoders = NodeFeatureEncoders(
+        8, protocol_vocab_size=5, service_vocab_size=10,
+        flow_feature_dim=FLOW_DIM, host_feature_dim=HOST_DIM,
+    )
+
+    model(graph).fused["flow"].sum().backward()
+
+    fusion = model.layers[0].fusion["flow"]
+    assert fusion.project.weight.grad is not None
+    assert fusion.project.weight.grad.abs().sum() > 0
+
+
+def test_an_invalid_fusion_mode_fails_at_build_time() -> None:
+    with pytest.raises(ValueError, match="fusion must be one of"):
+        RelationSpecificLayer([], ["flow"], 8, fusion="bogus")
+
+
+def test_concat_layer_zero_fills_a_relation_whose_edges_are_empty() -> None:
+    """RelationSpecificConv skips edge types with no edges in a batch; concat
+    fusion's projection is sized at construction, so the layer must restore
+    the missing relation (as the conv would have emitted it for zero
+    messages) instead of crashing mid-run. Regression guard for graphs
+    (e.g. unseen-attack graphs) that don't guarantee every relation is
+    populated."""
+    g = _synthetic_graph()
+    node_types, edge_types = g.metadata()
+    hidden = 16
+    encoders = NodeFeatureEncoders(
+        hidden,
+        protocol_vocab_size=5,
+        service_vocab_size=10,
+        flow_feature_dim=FLOW_DIM,
+        host_feature_dim=HOST_DIM,
+    )
+    x_dict = encoders(g)
+    layer = RelationSpecificLayer(edge_types, node_types, hidden, fusion="concat")
+
+    # Drop one of Flow's five incoming relations entirely.
+    emptied = dict(g.edge_index_dict)
+    emptied[("service", "service_of", "flow")] = torch.empty(2, 0, dtype=torch.long)
+    output = layer(x_dict, emptied)
+
+    assert output.fused["flow"].shape == (6, hidden)
+    assert set(output.relations["flow"]) >= {"service_of"}
+
+    # The restored embedding equals combine_lin(CONCAT(x_flow, 0)) -- exactly
+    # what scatter-mean over zero edges produces.
+    expected = layer.conv.combine_lins["service__service_of__flow"](
+        torch.cat([x_dict["flow"], torch.zeros(6, hidden)], dim=-1)
+    )
+    assert torch.allclose(output.relations["flow"]["service_of"], expected)
+
+    output.fused["flow"].sum().backward()
+    assert layer.conv.combine_lins["service__service_of__flow"].weight.grad is not None
+
+
+def test_concat_layer_output_is_invariant_to_a_relations_presence_when_it_has_no_edges() -> None:
+    """A relation with zero edges carries no information, so zero-filling it
+    must give exactly the fused output of a schema without it -- up to the
+    projection seeing the same columns in the same order."""
+    g = _synthetic_graph()
+    node_types, edge_types = g.metadata()
+    hidden = 16
+    encoders = NodeFeatureEncoders(
+        hidden,
+        protocol_vocab_size=5,
+        service_vocab_size=10,
+        flow_feature_dim=FLOW_DIM,
+        host_feature_dim=HOST_DIM,
+    )
+    x_dict = encoders(g)
+    layer = RelationSpecificLayer(edge_types, node_types, hidden, fusion="concat")
+
+    emptied = dict(g.edge_index_dict)
+    emptied[("service", "service_of", "flow")] = torch.empty(2, 0, dtype=torch.long)
+    with_empty = layer(x_dict, emptied)
+    with_absent = layer(x_dict, {k: v for k, v in g.edge_index_dict.items()
+                                 if k != ("service", "service_of", "flow")})
+
+    assert torch.allclose(with_empty.fused["flow"], with_absent.fused["flow"])

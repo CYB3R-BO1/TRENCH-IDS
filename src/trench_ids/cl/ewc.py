@@ -170,6 +170,18 @@ class OnlineEWCManager:
             group_name: OnlineEWCState(names, gamma) for group_name, names in self.groups.items()
         }
 
+    def any_lambda_nonzero(self) -> bool:
+        """Whether this manager contributes anything to the loss at all.
+
+        Callers use it to skip work whose only consumer is the EWC penalty
+        -- the Fisher update and the temporary-prototype pass -- when every
+        lambda is zero. Both cost a full sweep over the task's training set,
+        and most arms in the experiment matrix deliberately run with EWC off,
+        so doing them unconditionally spends real hours computing numbers no
+        loss reads.
+        """
+        return bool(self.lambda_r or self.lambda_s or self.lambda_u)
+
     def loss(
         self, model: nn.Module, classifier: nn.Module, w_r: dict[str, torch.Tensor]
     ) -> torch.Tensor:

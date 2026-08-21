@@ -157,6 +157,21 @@ def run(
     model, classifier, checkpoint = load_checkpoint(
         Path(checkpoint_path), Path(graphs_dir_for_schema), device
     )
+    # Dataset B's whole pipeline (compute_class_relation_means, then
+    # similarity_report/estimate_transferability) depends on per-relation
+    # Flow embeddings, which only RelationSpecificHeteroGNN produces --
+    # FlatFlowEncoder.forward always returns relations={"flow": {}} by
+    # design (model/flat.py), so pointing this at a train_flat.py checkpoint
+    # would otherwise degrade silently: compute_class_relation_means's inner
+    # loop runs zero times, dataset_b_means and every downstream similarity
+    # file come out empty, and nothing raises.
+    model_type = checkpoint["config"].get("model_type", "rhgnn")
+    if model_type != "rhgnn":
+        raise ValueError(
+            f"inference_unseen needs a RelationSpecificHeteroGNN checkpoint (per-relation "
+            f"embeddings for Dataset B's similarity report), but {checkpoint_path} has "
+            f"model_type={model_type!r}. Point --checkpoint at a GNN run instead."
+        )
     label_names = checkpoint["config"]["label_names"]
 
     dataset_a: list[dict[str, Any]] = []

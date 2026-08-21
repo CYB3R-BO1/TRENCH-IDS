@@ -57,8 +57,8 @@ import torch
 from torch import nn
 from torch_geometric.data import HeteroData
 
-from trench_ids.model.attention_fusion import SemanticAttention
-from trench_ids.model.relation_conv import RelationSpecificConv
+from trench_ids.model.attention_fusion import ConcatFusion, SemanticAttention
+from trench_ids.model.relation_conv import RelationSpecificConv, edge_type_key
 
 FLOW_FEATURE_DIM = 37  # len(configs/graph.yaml: features)
 HOST_FEATURE_DIM = 4  # total_flows, avg_bytes_as_src, avg_bytes_as_dst, unique_ports_contacted
@@ -176,8 +176,18 @@ class RelationSpecificOutput:
     attention: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
+FUSION_MODES = ("attention", "concat")
+
+
 class RelationSpecificLayer(nn.Module):
-    """One round of relation-specific message passing + semantic attention fusion."""
+    """One round of relation-specific message passing + cross-relation fusion.
+
+    ``fusion`` selects how a node type's per-relation embeddings are merged:
+    ``"attention"`` is the HAN-style convex combination this project has used
+    throughout; ``"concat"`` concatenates and projects instead. See
+    ``ConcatFusion``'s docstring for why the choice turned out to matter more
+    than the message passing it wraps.
+    """
 
     def __init__(
         self,
@@ -185,12 +195,84 @@ class RelationSpecificLayer(nn.Module):
         node_types: list[str],
         hidden_dim: int,
         attn_dim: int = 128,
+        fusion: str = "attention",
     ) -> None:
         super().__init__()
+        if fusion not in FUSION_MODES:
+            raise ValueError(f"fusion must be one of {FUSION_MODES}, got {fusion!r}")
         self.conv = RelationSpecificConv(edge_types, hidden_dim)
-        self.fusion = nn.ModuleDict(
-            {node_type: SemanticAttention(hidden_dim, attn_dim) for node_type in node_types}
-        )
+        self.fusion_mode = fusion
+        if fusion == "attention":
+            self.fusion = nn.ModuleDict(
+                {node_type: SemanticAttention(hidden_dim, attn_dim) for node_type in node_types}
+            )
+        else:
+            # ConcatFusion's projection is sized from the relation count, so
+            # it has to be derived from the schema here rather than inferred
+            # on the first forward pass -- a lazily-built layer would not be
+            # registered before the optimiser is constructed. The incoming
+            # edge types are kept per node type (schema order) so ``forward``
+            # can zero-fill a relation whose edges are absent from a given
+            # batch instead of handing ConcatFusion a count it was not built
+            # for -- RelationSpecificConv silently skips empty edge types,
+            # which would otherwise crash concat-mode training mid-run on
+            # any graph missing one of a node type's incoming relations.
+            incoming: dict[str, list[tuple[str, str, str]]] = {
+                node_type: [] for node_type in node_types
+            }
+            for edge_type in edge_types:
+                dst = edge_type[2]
+                if dst in incoming:
+                    incoming[dst].append(edge_type)
+            self._concat_incoming = incoming
+            self.fusion = nn.ModuleDict(
+                {
+                    node_type: ConcatFusion(hidden_dim, max(len(edge_ts), 1))
+                    for node_type, edge_ts in incoming.items()
+                }
+            )
+
+    def _zero_fill_missing(
+        self,
+        relation_embeds: dict[str, dict[str, torch.Tensor]],
+        x_dict: dict[str, torch.Tensor],
+    ) -> dict[str, dict[str, torch.Tensor]]:
+        """Restore every schema relation a batch's empty edge types skipped.
+
+        ``RelationSpecificConv.forward`` silently drops edge types with no
+        edges in the batch; concat fusion cannot absorb that (its projection
+        is sized at construction), so each missing relation is recomputed
+        exactly as the conv would have emitted it for zero messages:
+        ``combine_lin(CONCAT(dst's own embedding, 0))`` -- the same value
+        scatter-mean produces for destinations with no incoming edges. This
+        keeps column order aligned with the schema and gives the layer real,
+        non-crashing behaviour on graphs (e.g. unseen-attack graphs) that
+        don't guarantee every relation is populated.
+        """
+        filled: dict[str, dict[str, torch.Tensor]] = {}
+        for node_type, per_relation in relation_embeds.items():
+            expected = self._concat_incoming.get(node_type, [])
+            if not expected or len(per_relation) == len(expected):
+                filled[node_type] = per_relation
+                continue
+            x_dst = x_dict[node_type]
+            per_relation = dict(per_relation)
+            for edge_type in expected:
+                relation = edge_type[1]
+                if relation in per_relation:
+                    continue
+                zeros = torch.zeros(
+                    x_dst.size(0),
+                    self.conv.hidden_dim,
+                    dtype=x_dst.dtype,
+                    device=x_dst.device,
+                )
+                combined = torch.cat([x_dst, zeros], dim=-1)
+                per_relation[relation] = self.conv.combine_lins[edge_type_key(edge_type)](
+                    combined
+                )
+            filled[node_type] = per_relation
+        return filled
 
     def forward(
         self,
@@ -198,6 +280,8 @@ class RelationSpecificLayer(nn.Module):
         edge_index_dict: dict[tuple[str, str, str], torch.Tensor],
     ) -> RelationSpecificOutput:
         relation_embeds = self.conv(x_dict, edge_index_dict)
+        if self.fusion_mode == "concat":
+            relation_embeds = self._zero_fill_missing(relation_embeds, x_dict)
         fused: dict[str, torch.Tensor] = {}
         attention: dict[str, dict[str, float]] = {}
         for node_type, per_relation in relation_embeds.items():
@@ -237,14 +321,16 @@ class RelationSpecificHeteroGNN(nn.Module):
         num_layers: int = 1,
         attn_dim: int = 128,
         port_tail_buckets: int = 32,
+        fusion: str = "attention",
     ) -> None:
         super().__init__()
+        self.fusion_mode = fusion
         self.encoders = NodeFeatureEncoders(
             hidden_dim, protocol_vocab_size, service_vocab_size, port_tail_buckets=port_tail_buckets
         )
         self.layers = nn.ModuleList(
             [
-                RelationSpecificLayer(edge_types, node_types, hidden_dim, attn_dim)
+                RelationSpecificLayer(edge_types, node_types, hidden_dim, attn_dim, fusion=fusion)
                 for _ in range(num_layers)
             ]
         )
@@ -259,6 +345,7 @@ class RelationSpecificHeteroGNN(nn.Module):
         num_layers: int = 1,
         attn_dim: int = 128,
         port_tail_buckets: int = 32,
+        fusion: str = "attention",
     ) -> RelationSpecificHeteroGNN:
         """Build a model whose relation-specific weights match `sample_graph`'s
         metadata exactly -- metadata is fixed at construction time since
@@ -274,6 +361,7 @@ class RelationSpecificHeteroGNN(nn.Module):
             num_layers,
             attn_dim,
             port_tail_buckets,
+            fusion=fusion,
         )
 
     def forward(self, graph: HeteroData) -> RelationSpecificOutput:
