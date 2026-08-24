@@ -103,6 +103,16 @@ from trench_ids.model.rhgnn import (
 # protocol_vocab_size=5, service_vocab_size=216 -- data/graphs/vocab.json),
 # where the GNN encoder has 263,378 parameters.
 #
+# ⚠️ SUPERSEDED as a fairness control (2026-08-17 audit): 263,378 is the
+# GNN's *nominal* count, but ~40.9% of those parameters (108,288) receive
+# zero/None gradient from the classification loss -- the 6 non-Flow relations
+# plus 4 unused fusion modules, computed every forward pass but never
+# consumed since training reads only output.fused["flow"]. Matching against
+# the nominal count compared ~157K trainable params against ~263K (1.7x).
+# The corrected control is flathost_small_replay (mlp_hidden=123 -> 156,577
+# vs the GNN's 156,562 *reachable* parameters); these defaults are kept only
+# for backward compatibility with the recorded runs.
+#
 # Cost shared by both arms (LayerNorm 74 + Linear(37->64) 2,432 + port
 # 1,056x64 + protocol 5x64 + service 216x64) = 84,234.
 #
@@ -201,6 +211,11 @@ class FlatFlowEncoder(nn.Module):
         self.protocol = nn.Embedding(protocol_vocab_size, hidden_dim)
         self.service = nn.Embedding(service_vocab_size, hidden_dim)
         self.port = nn.Embedding(port_embedding_size(port_tail_buckets), hidden_dim)
+        # Scaled init, matching NodeFeatureEncoders: the default N(0,1)
+        # embedding rows would numerically dominate the LayerNorm -> Linear
+        # flow/host channels after concatenation.
+        for embedding in (self.protocol, self.service, self.port):
+            nn.init.normal_(embedding.weight, std=0.02)
         self.port_tail_buckets = port_tail_buckets
 
         num_channels = 4

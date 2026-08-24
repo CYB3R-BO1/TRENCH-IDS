@@ -9,10 +9,11 @@ moved (1 - cosine similarity).
 The measurement pays for itself twice over.
 
 **It sizes the problem the regulariser is aimed at.** On the rebuilt
-benchmark the relations differ by an order of magnitude -- ``service_of``
-moves 0.05 across the T5->T6 boundary while ``terminated_by`` moves 0.60 --
-so "the encoder drifts" is not one phenomenon but five, and a penalty
-weighted uniformly over them is not doing what the words suggest.
+benchmark the relations differ by several-fold -- on ``gnn_trd_transfer_s42``
+(5-boundary mean, seeded-random subsample) ``protocol_of`` moves only 0.031
+while ``originates`` moves 0.188 -- so "the encoder drifts" is not one
+phenomenon but five, and a penalty weighted uniformly over them is not doing
+what the words suggest.
 
 **It exposes a confound in the method's own hypothesis.** The relations that
 score highest on transferability (``S_r``) turn out to be the ones that drift
@@ -38,6 +39,7 @@ import torch.nn.functional as F
 from scipy.stats import pearsonr, spearmanr
 from torch_geometric.loader import DataLoader
 
+from trench_ids.cl.device import resolve_device
 from trench_ids.cl.ewc import FLOW_RELATIONS
 from trench_ids.cl.inference import load_checkpoint
 from trench_ids.cl.train import load_split, sample_graphs
@@ -64,39 +66,58 @@ def boundary_drift(
     different fixes, and an accuracy drop alone cannot tell them apart.
     """
     sums: dict[str, float] = {relation: 0.0 for relation in FLOW_RELATIONS}
+    weights: dict[str, int] = {relation: 0 for relation in FLOW_RELATIONS}
     fused_sum = 0.0
+    fused_n = 0
     agree_sum = 0.0
     kl_sum = 0.0
-    batches = 0
+    agree_kl_n = 0
     for batch in DataLoader(graphs, batch_size=batch_size):
         batch = batch.to(device)
+        n_flows = batch["flow"].y.numel()
         before, after = earlier_model(batch), later_model(batch)
         for relation in FLOW_RELATIONS:
             a = before.relations["flow"].get(relation)
             b = after.relations["flow"].get(relation)
             if a is None or b is None:
                 continue
-            sums[relation] += float(F.cosine_similarity(a, b, dim=-1).mean())
-        fused_sum += float(
-            F.cosine_similarity(before.fused["flow"], after.fused["flow"], dim=-1).mean()
-        )
+            sums[relation] += float(F.cosine_similarity(a, b, dim=-1).mean()) * n_flows
+            weights[relation] += n_flows
+        if before.fused.get("flow") is not None and after.fused.get("flow") is not None:
+            fused_sum += float(
+                F.cosine_similarity(before.fused["flow"], after.fused["flow"], dim=-1).mean()
+            ) * n_flows
+            fused_n += n_flows
         before_logits = earlier_classifier(before.fused["flow"])
         after_logits = later_classifier(after.fused["flow"])
-        agree_sum += float((before_logits.argmax(-1) == after_logits.argmax(-1)).float().mean())
+        agree_sum += float(
+            (before_logits.argmax(-1) == after_logits.argmax(-1)).float().mean()
+        ) * n_flows
         kl_sum += float(
             F.kl_div(
                 F.log_softmax(after_logits, dim=-1),
                 F.softmax(before_logits, dim=-1),
                 reduction="batchmean",
             )
-        )
-        batches += 1
-    if not batches:
+        ) * n_flows
+        agree_kl_n += n_flows
+    if not agree_kl_n:
         return {}
-    result = {f"drift_{relation}": 1.0 - sums[relation] / batches for relation in FLOW_RELATIONS}
-    result["drift_fused"] = 1.0 - fused_sum / batches
-    result["prediction_agreement"] = agree_sum / batches
-    result["logit_kl"] = kl_sum / batches
+    # Weight each per-batch mean by its flow count: the last (typically
+    # smaller) batch of a split otherwise gets equal say to full ones.
+    result = {
+        f"drift_{relation}": (
+            1.0 - sums[relation] / weights[relation] if weights[relation] else None
+        )
+        for relation in FLOW_RELATIONS
+    }
+    # A relation absent from every batch (e.g. a checkpoint whose encoder
+    # does not emit it) must read as "not measured", not as maximal drift.
+    result = {k: v for k, v in result.items() if v is not None}
+    if fused_n:
+        result["drift_fused"] = 1.0 - fused_sum / fused_n
+    result["prediction_agreement"] = agree_sum / agree_kl_n
+    result["logit_kl"] = kl_sum / agree_kl_n
     return result
 
 
@@ -210,11 +231,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    device = (
-        torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if args.device == "auto"
-        else torch.device(args.device)
-    )
+    device = resolve_device(args.device)
     report = run(
         Path(args.run_dir), Path(args.graphs_dir), device, args.batch_size, args.max_graphs,
         seed=args.seed,

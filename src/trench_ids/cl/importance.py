@@ -1,5 +1,15 @@
 """Step 7 — relation importance learning.
 
+**SUPERSEDED / NEGATIVE RESULT -- not part of the active method
+(2026-08-23 marker).** The learned ``w_r`` path was shown to collapse toward
+zero from task 2 onward (``project-metrics.md`` §16.2): minimizing the
+combined loss gives gradient descent a direct, unconditional incentive to
+shrink its own penalty term, and nothing in the per-task local objective
+rewards keeping it large. Every production run uses ``w_r_mode="fixed"``/
+``"disabled"`` or the distillation weights (``cl/distillation.py``) instead.
+Kept, unmodified, so the weighting ablation and its negative result remain
+reproducible; do not build new work on it.
+
 A single shared-weight MLP (input dim 1, output dim 1) applied
 independently to each Flow relation's aggregated transferability score
 ``S_r``, producing ``w_r = sigma(MLP(S_r))`` (design §3). Sharing one

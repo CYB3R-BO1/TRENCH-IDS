@@ -65,14 +65,34 @@ def test_the_three_weightings_differ_only_in_the_weighting_flag() -> None:
 
 def test_the_lambda_sweep_holds_temperature_fixed() -> None:
     """A lambda selected under one temperature does not transfer to another,
-    so the sweep and the final arms have to agree on it."""
+    so the sweep and the S_r-weighted arms have to agree on it. The drift arm
+    is deliberately exempt: its scores (live D_r) span roughly 3x the spread
+    of S_r, so sharing T=0.3 collapsed its weights nearly one-hot (measured,
+    seed 42 task 2: w_originates=0.748) -- it runs at T=1.0 instead. The
+    caveat that buys the exemption: drift inherits lambda_d=0.25 selected on
+    the S_r scale, which is a known, stated approximation rather than a
+    hidden confound."""
     runs = build_matrix(lambda_d=1.0)
     sweep = [r for r in runs if r.group == "lambda"]
-    final = [r for r in runs if "trd" in r.name and r.group == "method"]
+    s_r_arms = [
+        r
+        for r in runs
+        if r.group == "method" and "trd" in r.name and "drift" not in r.name
+    ]
+    drift_arms = [r for r in runs if r.name.startswith("gnn_trd_drift")]
 
-    assert sweep and final
-    temperatures = {o for r in sweep + final for o in r.overrides if "temperature" in o}
-    assert len(temperatures) == 1
+    assert sweep and s_r_arms and drift_arms
+    s_r_temperatures = {
+        o
+        for r in sweep + s_r_arms
+        for o in r.overrides
+        if "temperature" in o and "logit" not in o
+    }
+    assert s_r_temperatures == {"distill.temperature=0.3"}
+    drift_temperatures = {
+        o for r in drift_arms for o in r.overrides if "distill.temperature" in o
+    }
+    assert drift_temperatures == {"distill.temperature=1.0"}
 
 
 def test_every_seed_appears_in_every_multi_seed_arm() -> None:

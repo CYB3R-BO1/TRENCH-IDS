@@ -14,11 +14,13 @@ Groups, and what each is for:
              just observed. This is the question the project had never asked:
              every earlier experiment compared GNN variants to other GNN
              variants.
-``method``   Fine-tuning / EWC / replay / the three TRD weightings, all on
+``method``   Fine-tuning / EWC / replay / the four TRD weightings, all on
              the GNN. Establishes what actually mitigates forgetting, and
              whether weighting the distillation by measured transferability
-             beats weighting it uniformly (the project's actual hypothesis)
-             or inversely (the sign control).
+             beats weighting it uniformly (the project's actual hypothesis),
+             inversely (the sign control), or by measured drift itself (the
+             reformulation the transferability-vs-drift anti-correlation
+             motivates).
 ``lambda``   λ_d selection for TRD, scored on the **validation** split. Every
              selection decision before 2026-08-16 was made on test numbers;
              the val split existed but was never read by any code.
@@ -108,6 +110,18 @@ SHORT_WARMUP = ("train.warmup_epochs=1",)
 # needed and came out effectively inert. 0.3 keeps a clear ordering while
 # leaving every relation a non-negligible share.
 TEMPERATURE = ("distill.temperature=0.3",)
+
+# Drift scores live on a different scale than transferability, so the drift
+# arm gets its own temperature. The first drift runs used the shared T=0.3
+# and it degenerated them: measured post-warm-up D_r spans ~0.1-1.25 across
+# relations and tasks -- roughly 3x S_r's ~0.5 spread -- so at T=0.3 the
+# softmax came out nearly one-hot on `originates` (seed 42 task 2: w=0.748,
+# everything else <=0.09), the exact "one relation carries the whole penalty"
+# failure documented for transfer@T=0.1 above. Those runs are kept as
+# evidence under runs/_superseded_drift_T03/. T=1.0 matches the softmax to
+# D_r's actual spread: ordered like `inverse` predicts (the anti-correlation)
+# without collapsing onto a single relation.
+DRIFT_TEMPERATURE = ("distill.temperature=1.0",)
 
 
 # Replay memory budgets, in graphs retained per task. The standing default
@@ -359,7 +373,15 @@ def build_matrix(lambda_d: float, seeds: tuple[int, ...] = SEEDS) -> list[Run]:
         # replay, TRD scored 0.707 accuracy / 0.226 forgetting against plain
         # replay's 0.764 / 0.202, with the penalty term substantial
         # (0.12-0.23 against a cross-entropy of ~0.4) rather than inert.
-        for weighting in ("uniform", "transfer", "inverse"):
+        # "drift" is the reformulation the drift.py measurement motivates:
+        # transferability is anti-correlated with per-relation drift (r =
+        # -0.909 on the unbiased 5-boundary numbers), so softmax(S_r)
+        # concentrates the penalty where there is least to preserve, and
+        # "inverse" -- which won the first weighting comparison -- was only
+        # ever a proxy for weighting by D_r directly. Same live-measurement
+        # cost as every other TRD arm plus two no-grad forward passes over
+        # <=60 graphs per task.
+        for weighting in ("uniform", "transfer", "inverse", "drift"):
             runs.append(
                 _gnn(
                     f"gnn_trd_{weighting}",
@@ -368,7 +390,9 @@ def build_matrix(lambda_d: float, seeds: tuple[int, ...] = SEEDS) -> list[Run]:
                         "replay.enabled=false",
                         *NO_EWC,
                         *SHORT_WARMUP,
-                        *TEMPERATURE,
+                        # Temperature must match the signal's scale, not be
+                        # identical across modes -- see DRIFT_TEMPERATURE.
+                        *(DRIFT_TEMPERATURE if weighting == "drift" else TEMPERATURE),
                         "distill.enabled=true",
                         f"distill.weighting={weighting}",
                         f"distill.lambda_d={lambda_d}",

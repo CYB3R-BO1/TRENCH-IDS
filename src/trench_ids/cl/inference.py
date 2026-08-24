@@ -21,6 +21,7 @@ import torch.nn.functional as F
 from torch_geometric.data import HeteroData
 from torch_geometric.loader import DataLoader
 
+from trench_ids.cl.device import resolve_device
 from trench_ids.cl.train import load_split
 from trench_ids.model.flat import FlatFlowEncoder
 from trench_ids.model.rhgnn import RelationSpecificHeteroGNN
@@ -60,6 +61,7 @@ def build_model(
             # would not silently degrade accuracy, it would fail to load:
             # the two modes have different parameter sets.
             fusion=config.get("fusion", "attention"),
+            use_residual=config.get("use_residual", False),
         ).to(device)
     if model_type == "flat":
         use_host_features = config.get("use_host_features", False)
@@ -174,11 +176,7 @@ def main() -> None:
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()
 
-    device = (
-        torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if args.device == "auto"
-        else torch.device(args.device)
-    )
+    device = resolve_device(args.device)
     graphs_dir = Path(args.graphs_dir)
     model, classifier, checkpoint = load_checkpoint(Path(args.checkpoint), graphs_dir, device)
     graphs = load_split(graphs_dir, args.task, args.split)

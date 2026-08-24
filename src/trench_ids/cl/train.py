@@ -40,7 +40,10 @@ from omegaconf import DictConfig
 from torch_geometric.data import HeteroData
 from torch_geometric.loader import DataLoader
 
-from trench_ids.cl.distillation import RelationDistiller
+from trench_ids.cl.device import (
+    resolve_device,  # re-exported: train_flat/train_joint import it from here
+)
+from trench_ids.cl.distillation import RelationDistiller, boundary_relation_drift
 from trench_ids.cl.ewc import FLOW_RELATIONS, OnlineEWCManager
 from trench_ids.cl.importance import ImportanceMLP
 from trench_ids.cl.memory_bank import RelationMeanAccumulator, merge_into_bank, save_memory_bank
@@ -58,12 +61,6 @@ from trench_ids.labels import (
 )
 from trench_ids.model.rhgnn import RelationSpecificHeteroGNN
 from trench_ids.vocab import load_vocab, vocab_fingerprint
-
-
-def resolve_device(device_cfg: str) -> torch.device:
-    if device_cfg == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(device_cfg)
 
 
 def seed_everything(seed: int) -> None:
@@ -313,6 +310,9 @@ def train_one_task(
     w_r_mode: str = "learned",
     epoch_log_path: Path | None = None,
     distiller: RelationDistiller | None = None,
+    task_id: int = 0,
+    seed: int = 0,
+    drift_max_graphs: int = 60,
 ) -> tuple[float, dict[str, float], dict[str, Any]]:
     """Runs one task's full warm-up + full-loss training (design §5, steps
     1-5). Returns ``(final_epoch_mean_loss, final_w_r, distill_report)``.
@@ -321,9 +321,15 @@ def train_one_task(
     ``distiller``, when given, adds the transferability-weighted relation
     distillation penalty of ``trench_ids.cl.distillation`` to the full-loss
     epochs; its weights are set here (not by the caller) because they depend
-    on ``S_r``, which is only known after the warm-up pass. ``distill_report``
-    carries that task's realised weights and per-relation distances for the
-    run record, and is empty when no distiller is in use."""
+    on ``S_r``, which is only known after the warm-up pass -- or, for the
+    ``drift`` weighting mode, on live per-relation drift ``D_r`` between the
+    teacher and the post-warm-up student (measured here on a seeded
+    subsample of at most ``drift_max_graphs`` of this task's graphs, since
+    before training starts the student *is* the teacher and every D_r is
+    trivially zero; after warm-up it is exactly "what this task's adaptation
+    is moving"). ``distill_report`` carries that task's realised weights and
+    per-relation distances for the run record, and is empty when no
+    distiller is in use."""
     loader = DataLoader(graphs, batch_size=batch_size, shuffle=True)
 
     # Step 1: warm-up, plain classification loss only, every task.
@@ -382,7 +388,15 @@ def train_one_task(
 
     distill_report: dict[str, Any] = {}
     if distiller is not None:
-        distill_report["weights"] = distiller.set_weights(s_r)
+        if distiller.weighting == "drift" and distiller.active:
+            drift_sample = sample_graphs(
+                graphs, drift_max_graphs, seed=f"{seed}:distill-drift:task_{task_id}"
+            )
+            d_r = boundary_relation_drift(distiller.teacher, model, drift_sample, device)
+            distill_report["d_r"] = d_r
+            distill_report["weights"] = distiller.set_weights(d_r)
+        else:
+            distill_report["weights"] = distiller.set_weights(s_r)
         distill_report["s_r"] = {relation: float(v) for relation, v in s_r.items()}
         distill_report["active"] = distiller.active
 
@@ -484,6 +498,7 @@ def main(cfg: DictConfig) -> None:
         attn_dim=cfg.model.attn_dim,
         port_tail_buckets=cfg.model.port_tail_buckets,
         fusion=cfg.model.get("fusion", "attention"),
+        use_residual=cfg.model.get("use_residual", False),
     ).to(device)
     classifier = torch.nn.Linear(cfg.model.hidden_dim, len(label_names)).to(device)
 
@@ -567,6 +582,9 @@ def main(cfg: DictConfig) -> None:
             w_r_mode=cfg.ewc.w_r_mode,
             epoch_log_path=epoch_log_path,
             distiller=distiller,
+            task_id=task,
+            seed=cfg.train.seed,
+            drift_max_graphs=cfg.distill.get("drift_max_graphs", 60),
         )
         print(f"[train] task {task}: final epoch mean loss = {final_loss:.4f}")
         # Mirrors train_one_task's own needs_s_r check: when neither EWC nor
@@ -696,6 +714,7 @@ def main(cfg: DictConfig) -> None:
                 # checkpoints written before this key existed, which were all
                 # attention-fusion runs -- hence build_model's default.
                 "fusion": cfg.model.get("fusion", "attention"),
+                "use_residual": cfg.model.get("use_residual", False),
                 "protocol_vocab_size": protocol_vocab_size,
                 "service_vocab_size": service_vocab_size,
                 # Re-checked by inference.load_checkpoint against whatever

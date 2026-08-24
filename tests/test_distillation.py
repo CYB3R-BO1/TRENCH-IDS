@@ -15,6 +15,7 @@ from torch_geometric.data import HeteroData
 
 from trench_ids.cl.distillation import (
     RelationDistiller,
+    boundary_relation_drift,
     penalty_attribution,
     transferability_weights,
 )
@@ -108,12 +109,36 @@ def test_inverse_weighting_is_the_exact_mirror_of_transfer() -> None:
     assert sum(inverse.values()) == pytest.approx(1.0)
 
 
+def test_drift_weighting_favours_the_most_drifted_relation() -> None:
+    """The reformulation drift.py motivates: transferability is anti-
+    correlated with per-relation drift, so weight by drift directly. The
+    scores here are D_r values (bigger = moved more), weighted positively."""
+    d_r = {"still": 0.03, "moving": 0.19, "mid": 0.08}
+
+    weights = transferability_weights(d_r, mode="drift", temperature=0.1)
+
+    assert weights["moving"] > weights["mid"] > weights["still"]
+    assert sum(weights.values()) == pytest.approx(1.0)
+
+
+def test_drift_mode_is_not_the_mirror_of_anything() -> None:
+    """Drift's hypothesis is one-sided -- preserve what moves -- so it must
+    weight positively even for scores that would flip under ``inverse``."""
+    d_r = {"low": 0.03, "high": 0.19}
+
+    drift = transferability_weights(d_r, mode="drift", temperature=1.0)
+    inverse = transferability_weights(d_r, mode="inverse", temperature=1.0)
+
+    assert drift["high"] > drift["low"]
+    assert inverse["high"] < inverse["low"]
+
+
 def test_every_mode_applies_the_same_total_regularisation_pressure() -> None:
     """Weights are a softmax, so mode changes *where* the pressure goes, never
     *how much* there is -- which is what makes the ablation interpretable."""
     s_r = {r: (i - 2) * 0.3 for i, r in enumerate(FLOW_RELATIONS)}
 
-    for mode in ("uniform", "transfer", "inverse"):
+    for mode in ("uniform", "transfer", "inverse", "drift"):
         assert sum(transferability_weights(s_r, mode=mode).values()) == pytest.approx(1.0)
 
 
@@ -269,6 +294,67 @@ def test_set_weights_restricts_to_the_distiller_s_relations() -> None:
     )
 
     assert set(weights) == {"originates", "protocol_of"}
+    assert sum(weights.values()) == pytest.approx(1.0)
+
+
+def test_boundary_relation_drift_is_zero_for_an_unchanged_student() -> None:
+    """At a task boundary *before any training*, the student is byte-for-byte
+    the teacher -- so every D_r must read zero, not noise."""
+    graph = _tiny_graph()
+    model = _tiny_model(graph)
+    distiller = RelationDistiller(FLOW_RELATIONS)
+    distiller.snapshot(model)
+
+    d_r = boundary_relation_drift(distiller.teacher, model, [graph], torch.device("cpu"))
+
+    assert set(d_r) == set(FLOW_RELATIONS)
+    assert all(value == pytest.approx(0.0, abs=1e-6) for value in d_r.values())
+
+
+def test_boundary_relation_drift_grows_when_the_student_moves() -> None:
+    graph = _tiny_graph()
+    model = _tiny_model(graph)
+    distiller = RelationDistiller(FLOW_RELATIONS)
+    distiller.snapshot(model)
+    with torch.no_grad():
+        for param in model.parameters():
+            param.add_(torch.randn_like(param) * 0.5)
+
+    d_r = boundary_relation_drift(distiller.teacher, model, [graph], torch.device("cpu"))
+
+    assert len(d_r) == len(FLOW_RELATIONS)
+    assert all(value > 1e-4 for value in d_r.values())
+
+
+def test_boundary_relation_drift_restores_the_student_s_training_mode() -> None:
+    """The measurement runs under eval (dropout would measure stochasticity,
+    not drift); a training loop calling it mid-task must get its train-mode
+    student back."""
+    graph = _tiny_graph()
+    model = _tiny_model(graph)
+    model.train()
+    teacher = _tiny_model(graph)
+
+    boundary_relation_drift(teacher, model, [graph], torch.device("cpu"))
+
+    assert model.training
+
+
+def test_a_drift_weighted_distiller_sets_its_weights_from_measured_d_r() -> None:
+    """End-to-end shape of the new arm: snapshot -> student moves -> live
+    measurement -> softmax weights, agreeing with the pure-function path."""
+    graph = _tiny_graph()
+    model = _tiny_model(graph)
+    distiller = RelationDistiller(FLOW_RELATIONS, weighting="drift", temperature=0.3)
+    distiller.snapshot(model)
+    with torch.no_grad():
+        for param in model.parameters():
+            param.add_(torch.randn_like(param) * 0.5)
+
+    d_r = boundary_relation_drift(distiller.teacher, model, [graph], torch.device("cpu"))
+    weights = distiller.set_weights(d_r)
+
+    assert weights == transferability_weights(d_r, mode="drift", temperature=0.3)
     assert sum(weights.values()) == pytest.approx(1.0)
 
 

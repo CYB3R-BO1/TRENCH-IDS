@@ -1,5 +1,16 @@
 """Steps 6-8 — relation-aware Online EWC (Schwarz et al. 2018).
 
+**SUPERSEDED / NEGATIVE RESULT -- not part of the active method
+(2026-08-23 marker).** A Fisher-mass audit showed this mechanism could only
+ever modulate 2.2% of its own penalty, and the full experiment matrix
+(``docs/results.md``, generated from ``run_matrix.py``) found no EWC arm --
+uniform or relation-weighted, ``num_layers`` 1 or 2 -- reduces forgetting on
+this benchmark. The active forgetting-mitigation mechanisms are experience
+replay (``train.py``'s replay buffer) and transferability-weighted relation
+distillation (``cl/distillation.py``). This module is kept, unmodified, so
+the EWC arms of the experiment matrix and their negative results remain
+reproducible; do not build new work on it.
+
 Three parameter-group categories, per
 ``docs/superpowers/specs/2026-07-21-relation-aware-ewc-design.md`` §1:
 "shared" modules (NodeFeatureEncoders, SemanticAttention fusion, the
@@ -19,7 +30,9 @@ import torch.nn.functional as F
 from torch import nn
 from torch_geometric.loader import DataLoader
 
-FLOW_RELATIONS = ["originates", "terminated_by", "targeted_by", "protocol_of", "service_of"]
+# Re-exported: drift.py, novelty.py, and train.py import FLOW_RELATIONS from
+# here; trench_ids.constants is the single source of truth.
+from trench_ids.constants import FLOW_RELATIONS as FLOW_RELATIONS
 
 _REL_PARAM_RE = re.compile(r"^layers\.\d+\.conv\.(?:rel_lins|combine_lins)\.([^.]+)\.")
 

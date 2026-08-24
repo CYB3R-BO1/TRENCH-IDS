@@ -39,6 +39,7 @@ import torch
 from torch_geometric.data import HeteroData
 from torch_geometric.loader import DataLoader
 
+from trench_ids.cl.device import resolve_device
 from trench_ids.cl.evaluate import compute_metrics, pool_predictions
 from trench_ids.cl.inference import load_checkpoint, predict
 from trench_ids.cl.memory_bank import load_memory_bank
@@ -300,11 +301,7 @@ def main() -> None:
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()
 
-    device = (
-        torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if args.device == "auto"
-        else torch.device(args.device)
-    )
+    device = resolve_device(args.device)
 
     run(
         checkpoint_path=Path(args.checkpoint),

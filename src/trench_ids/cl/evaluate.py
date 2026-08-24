@@ -25,6 +25,7 @@ from typing import Any
 import torch
 from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_fscore_support
 
+from trench_ids.cl.device import resolve_device
 from trench_ids.cl.inference import load_checkpoint, predict
 from trench_ids.cl.train import load_split
 from trench_ids.labels import NUM_TASKS
@@ -287,11 +288,7 @@ def main() -> None:
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()
 
-    device = (
-        torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if args.device == "auto"
-        else torch.device(args.device)
-    )
+    device = resolve_device(args.device)
     run_dir = Path(args.run_dir)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

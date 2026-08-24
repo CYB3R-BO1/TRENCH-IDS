@@ -17,10 +17,13 @@ questions and pairing them all against one arm would be meaningless:
                  same table as the stronger reference point, but they change
                  the training data too, so pairing the regularisers against
                  them would confound mechanism with regime.
-  weighting      TRD-transfer and TRD-inverse against TRD-uniform. Baseline:
-                 TRD-uniform. This is the one that tests the project's
-                 hypothesis: does weighting by measured transferability beat
-                 weighting everything equally?
+  weighting      TRD-transfer / TRD-inverse / TRD-drift against TRD-uniform.
+                  Baseline: TRD-uniform. This is the one that tests the
+                  project's hypothesis: does weighting by measured
+                  transferability beat weighting everything equally -- and,
+                  after drift.py measured transferability anti-correlated
+                  with per-relation drift, does weighting by drift directly
+                  beat weighting by a signal anti-correlated with it?
 
 Run:  python -m trench_ids.cl.report --out docs/results.md
 """
@@ -81,10 +84,11 @@ COMPARISONS: dict[str, dict[str, Any]] = {
             "TRD-uniform": "gnn_trd_uniform",
             "TRD-transfer": "gnn_trd_transfer",
             "TRD-inverse": "gnn_trd_inverse",
+            "TRD-drift": "gnn_trd_drift",
             "Replay+TRD": "gnn_replay_trd",
         },
         "question": (
-            "What mitigates forgetting? Fine-tuning, EWC and the three TRD arms all run "
+            "What mitigates forgetting? Fine-tuning, EWC and the four TRD arms all run "
             "without replay, so TRD is compared to EWC like-for-like; Replay and "
             "Replay+TRD show whether the regulariser adds anything on top of the "
             "strongest simple baseline."
@@ -96,10 +100,13 @@ COMPARISONS: dict[str, dict[str, Any]] = {
             "TRD-uniform": "gnn_trd_uniform",
             "TRD-transfer": "gnn_trd_transfer",
             "TRD-inverse": "gnn_trd_inverse",
+            "TRD-drift": "gnn_trd_drift",
         },
         "question": (
             "Does weighting the penalty by measured transferability beat weighting "
-            "every relation equally?"
+            "every relation equally -- and does weighting by measured drift (the "
+            "quantity transferability is anti-correlated with, so 'inverse' was a "
+            "proxy for it) beat both?"
         ),
     },
 }

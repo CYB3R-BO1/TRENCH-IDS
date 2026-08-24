@@ -60,18 +60,30 @@ heterogeneous graph and weighting the relations by an independently measured
 transferability signal -- which is the project's actual hypothesis, now
 attached to a mechanism that can express it.
 
-``weighting`` selects how ``S_r`` becomes ``w_r``, and the three modes form
-the ablation ladder the hypothesis needs:
+``weighting`` selects how the per-relation signal becomes ``w_r``, and the
+four modes form the ablation ladder the hypothesis needs:
 
   ``uniform``      every relation weighted equally -- plain per-relation
                    distillation, the "preserve everything" control.
-  ``transfer``     ``softmax(S_r / temperature)`` -- the proposed method:
-                   preserve the relations whose representations were
+  ``transfer``     ``softmax(S_r / temperature)`` -- the originally proposed
+                   method: preserve the relations whose representations were
                    measured to transfer.
   ``inverse``      ``softmax(-S_r / temperature)`` -- the sign control. If
                    ``transfer`` and ``inverse`` score the same, the
                    transferability signal is not what is doing the work and
                    the hypothesis fails even if the mechanism helps.
+  ``drift``        ``softmax(+D_r / temperature)`` -- the reformulation the
+                   measured transferability-vs-drift anti-correlation
+                   motivates (drift.py: Pearson r = -0.909 across relations
+                   on the unbiased 5-boundary measurement). ``transfer``
+                   regularises hardest exactly where there is least drift to
+                   prevent; this mode reads the drift itself, measured live
+                   at each task boundary (see ``boundary_relation_drift``),
+                   and concentrates the penalty on the relations that are
+                   actually moving. ``inverse`` is only a proxy for this --
+                   it orders the relations the same way but through a
+                   signal (S_r) that is a noisy, task-dependent stand-in for
+                   D_r rather than D_r itself.
 """
 
 from __future__ import annotations
@@ -82,8 +94,9 @@ from collections.abc import Iterable, Sequence
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch_geometric.loader import DataLoader
 
-WEIGHTING_MODES = ("uniform", "transfer", "inverse")
+WEIGHTING_MODES = ("uniform", "transfer", "inverse", "drift")
 
 # What the per-relation penalty compares.
 #
@@ -110,7 +123,14 @@ def transferability_weights(
     mode: str = "transfer",
     temperature: float = 1.0,
 ) -> dict[str, float]:
-    """Turn per-relation transferability scores into distillation weights.
+    """Turn per-relation scores into distillation weights.
+
+    For ``transfer``/``inverse`` the scores are transferability values
+    ``S_r``; for ``drift`` they are per-relation drift values ``D_r``
+    (1 - cosine, from ``boundary_relation_drift``), weighted positively --
+    regularise what is actually moving. The name keeps ``s_r`` for
+    backwards-compatibility with every existing call site; the dict it
+    receives is just "one scalar per relation" either way.
 
     The weights are a softmax over relations, so they always sum to 1.0 and
     the total regularisation pressure is identical across modes -- only its
@@ -130,7 +150,10 @@ def transferability_weights(
         return {}
     if mode == "uniform":
         return {relation: 1.0 / len(relations) for relation in relations}
-    sign = 1.0 if mode == "transfer" else -1.0
+    # "transfer" and "drift" both weight positively; "inverse" is the sign
+    # control over transferability. Drift never gets a negated variant: its
+    # hypothesis is one-sided by construction (preserve what moves).
+    sign = -1.0 if mode == "inverse" else 1.0
 
     def as_scalar(value: torch.Tensor | float) -> float:
         # S_r arrives straight off the transferability pass and can still be
@@ -145,6 +168,50 @@ def transferability_weights(
     )
     weights = torch.softmax(scores / temperature, dim=0)
     return {relation: float(w) for relation, w in zip(relations, weights, strict=True)}
+
+
+@torch.no_grad()
+def boundary_relation_drift(
+    teacher: nn.Module,
+    student: nn.Module,
+    graphs: Sequence,
+    device: torch.device,
+    batch_size: int = 8,
+) -> dict[str, float]:
+    """Per-relation drift ``D_r`` between the frozen teacher and the live
+    student, measured on the same flows -- the quantity the ``drift``
+    weighting mode reads.
+
+    Flow-count-weighted mean of ``1 - cos(h_r(v), h̃_r(v))`` per relation,
+    matching drift.py's offline measurement exactly (same statistic, same
+    weighting) so the live values a run trains from are directly comparable
+    to the post-hoc drift report. Relations absent from either forward pass
+    are omitted rather than reported as maximal drift. The student is put in
+    eval mode for the measurement and restored afterwards: dropout active
+    here would measure stochasticity, not drift.
+    """
+    if not graphs:
+        return {}
+    was_training = student.training
+    student.eval()
+    try:
+        sums: dict[str, float] = {}
+        counts: dict[str, int] = {}
+        for batch in DataLoader(graphs, batch_size=batch_size):
+            batch = batch.to(device)
+            n = batch["flow"].y.numel()
+            teacher_relations = teacher(batch).relations["flow"]
+            student_relations = student(batch).relations["flow"]
+            for relation in sorted(set(teacher_relations) & set(student_relations)):
+                distance = 1.0 - F.cosine_similarity(
+                    student_relations[relation], teacher_relations[relation], dim=-1
+                )
+                sums[relation] = sums.get(relation, 0.0) + float(distance.mean()) * n
+                counts[relation] = counts.get(relation, 0) + n
+    finally:
+        if was_training:
+            student.train()
+    return {relation: sums[relation] / counts[relation] for relation in sums if counts[relation]}
 
 
 class RelationDistiller:
@@ -217,7 +284,8 @@ class RelationDistiller:
         self.old_class_index = torch.as_tensor(sorted(set(class_indices)), dtype=torch.long)
 
     def set_weights(self, s_r: dict[str, torch.Tensor | float]) -> dict[str, float]:
-        """Recompute ``w_r`` from this task's transferability scores."""
+        """Recompute ``w_r`` from this task's per-relation scores (S_r for
+        transfer/inverse modes, live drift D_r for the drift mode)."""
         restricted = {r: s_r[r] for r in self.relations if r in s_r}
         self.weights = transferability_weights(
             restricted, mode=self.weighting, temperature=self.temperature

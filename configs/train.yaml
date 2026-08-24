@@ -20,6 +20,10 @@ model:
   #              non-graph Flat+Host baseline (0.749 vs 0.854 mean final
   #              accuracy at matched parameters). See ConcatFusion.
   fusion: attention
+  # Residual connections after each relation-specific layer's fusion step.
+  # Enables deeper message passing (num_layers > 1) by preserving gradient
+  # flow through the layer stack. Off by default for backward compatibility.
+  use_residual: false
 
 optim:
   name: adam
@@ -35,8 +39,16 @@ train:
   # across machines with and without a CUDA device.
   device: auto
 
-# Relation-aware Online EWC (Steps 6-8) -- placeholder defaults, tuned
-# experimentally, not methodology-derived values.
+# Relation-aware Online EWC (Steps 6-8) -- SUPERSEDED / ARCHIVED (2026-08-23).
+# This mechanism is a characterized negative result: the full experiment
+# matrix (docs/results.md) found no EWC arm reduces forgetting on this
+# benchmark, and a Fisher-mass audit showed the relation weighting could
+# only ever modulate 2.2% of its own penalty (see
+# src/trench_ids/cl/ewc.py for the full diagnosis). The active
+# forgetting-mitigation mechanisms are `replay` and `distill` below. These
+# keys are kept -- values untouched -- so the EWC arms of the experiment
+# matrix and their negative results remain reproducible from this config.
+# Do not build new work on them.
 ewc:
   lambda_r: 1.0
   lambda_s: 1.0
@@ -65,10 +77,19 @@ ewc:
 
 # Experience replay baseline (2026-07-23 design,
 # docs/superpowers/specs/2026-07-23-replay-baseline-design.md). Disabled by
-# default so existing EWC runs are unaffected.
+# default so existing runs are unaffected. This is one of the two ACTIVE
+# forgetting-mitigation mechanisms (with `distill` below); it is the paper's
+# strongest positive result.
 replay:
   enabled: false
-  buffer_size_per_task: 200 # ~2.5% of one task's ~8135 train graphs
+  # NOTE (2026-08-18 budget sweep): the 200 default predates the benchmark
+  # rebuild and its "~2.5% of ~8135 train graphs" comment is stale -- each
+  # task now has 1,214 train graphs, so 200 stores 16.5%. The sweep
+  # (group `budget` in run_matrix.py) selected 100 for Flat+Host (8.2%) and
+  # 25 for the GNN; nothing justified 200 for either encoder. The value here
+  # stays 200 only so pre-sweep run configs reproduce unchanged -- pass
+  # train.replay.buffer_size_per_task explicitly for new runs.
+  buffer_size_per_task: 200
   replay_fraction: 0.3 # target share of each task's combined training pool
   # Transferability-guided buffer selection (2026-07-29 design,
   # docs/superpowers/specs/2026-07-29-transferability-followup-design.md):
@@ -80,11 +101,13 @@ replay:
   # setting (no transferability signal exists yet).
   selection: uniform
 
-# Transferability-weighted relation distillation (TRD) -- the replacement
-# for relation-aware EWC above, which a Fisher-mass audit showed could only
-# ever modulate 2.2% of its own penalty (see
+# Transferability-weighted relation distillation (TRD) -- the ACTIVE
+# regularizer that replaced relation-aware EWC above (which a Fisher-mass
+# audit showed could only ever modulate 2.2% of its own penalty; see
 # src/trench_ids/cl/distillation.py for the full diagnosis). Disabled by
-# default so every pre-existing run config reproduces unchanged.
+# default so every pre-existing run config reproduces unchanged. Matrix
+# result: TRD beats fine-tuning and EWC without replay; with replay,
+# plain replay alone measured better than Replay+TRD.
 distill:
   enabled: false
   # Weight on L_TRD relative to L_cls. The penalty is a mean cosine distance
@@ -92,10 +115,15 @@ distill:
   # comparable to the cross-entropy scale -- unlike the EWC lambdas, whose
   # useful range depended on the Fisher magnitudes.
   lambda_d: 1.0
-  # uniform | transfer | inverse -- see distillation.WEIGHTING_MODES. These
-  # three form the ablation that tests the project's actual hypothesis:
-  # "transfer" is the proposed method, "uniform" the preserve-everything
-  # control, "inverse" the sign control.
+  # uniform | transfer | inverse | drift -- see distillation.WEIGHTING_MODES.
+  # These form the ablation that tests the project's hypothesis:
+  # "transfer" is the originally proposed method, "uniform" the
+  # preserve-everything control, "inverse" the sign control, and "drift"
+  # (w_r = softmax(+D_r/T), D_r measured live at each task boundary) the
+  # reformulation the measured transferability-vs-drift anti-correlation
+  # motivates -- "transfer" regularises hardest exactly where there is least
+  # drift to prevent, so weight by drift directly instead of by a signal
+  # anti-correlated with it.
   weighting: transfer
   # Softmax temperature turning S_r into w_r. Lower = more selective.
   # Measured on real runs: S_r spans roughly 0.0-0.85 across relations, so
@@ -116,6 +144,11 @@ distill:
   # just the argmax; the term is rescaled by tau^2 so this does not act as a
   # second lambda.
   logit_temperature: 2.0
+  # Cap on the number of this task's graphs subsampled (seeded, per task)
+  # for the live D_r measurement when weighting: drift. The measurement is
+  # two no-grad forward passes per batch -- cheap next to a training epoch,
+  # but there is no reason to run it over the full ~1,214-graph train set.
+  drift_max_graphs: 60
 
 paths:
   graphs_dir: data/graphs

@@ -57,13 +57,18 @@ import torch
 from torch import nn
 from torch_geometric.data import HeteroData
 
+from trench_ids.constants import (
+    FLOW_FEATURE_DIM,
+    HOST_FEATURE_DIM,
+    WELL_KNOWN_PORT_MAX,
+)
 from trench_ids.model.attention_fusion import ConcatFusion, SemanticAttention
 from trench_ids.model.relation_conv import RelationSpecificConv, edge_type_key
 
-FLOW_FEATURE_DIM = 37  # len(configs/graph.yaml: features)
-HOST_FEATURE_DIM = 4  # total_flows, avg_bytes_as_src, avg_bytes_as_dst, unique_ports_contacted
-
-WELL_KNOWN_PORT_MAX = 1023  # inclusive upper bound of the IANA well-known port range
+# FLOW_FEATURE_DIM / HOST_FEATURE_DIM / WELL_KNOWN_PORT_MAX are imported
+# from trench_ids.constants (single source of truth) and remain importable
+# from this module for backward compatibility -- tests/ and flat.py import
+# them from here.
 
 
 def port_embedding_index(port_number: torch.Tensor, tail_buckets: int) -> torch.Tensor:
@@ -144,6 +149,12 @@ class NodeFeatureEncoders(nn.Module):
         self.protocol = nn.Embedding(protocol_vocab_size, hidden_dim)
         self.service = nn.Embedding(service_vocab_size, hidden_dim)
         self.port = nn.Embedding(port_embedding_size(port_tail_buckets), hidden_dim)
+        # Scaled init: nn.Embedding's default N(0,1) dwarfs the LayerNorm ->
+        # Linear flow/host channels (whose outputs have std well below 1),
+        # so at the start of training the categorical-identity channels
+        # numerically dominate the flow statistics after concat/aggregation.
+        for embedding in (self.protocol, self.service, self.port):
+            nn.init.normal_(embedding.weight, std=0.02)
         self.port_tail_buckets = port_tail_buckets
 
     def forward(self, graph: HeteroData) -> dict[str, torch.Tensor]:
@@ -187,6 +198,10 @@ class RelationSpecificLayer(nn.Module):
     throughout; ``"concat"`` concatenates and projects instead. See
     ``ConcatFusion``'s docstring for why the choice turned out to matter more
     than the message passing it wraps.
+
+    If ``use_residual`` is True, adds a residual connection per node type
+    after fusion: ``x_out = x_in + fused``. This enables deeper message
+    passing without gradient degradation.
     """
 
     def __init__(
@@ -196,10 +211,12 @@ class RelationSpecificLayer(nn.Module):
         hidden_dim: int,
         attn_dim: int = 128,
         fusion: str = "attention",
+        use_residual: bool = False,
     ) -> None:
         super().__init__()
         if fusion not in FUSION_MODES:
             raise ValueError(f"fusion must be one of {FUSION_MODES}, got {fusion!r}")
+        self.use_residual = use_residual
         self.conv = RelationSpecificConv(edge_types, hidden_dim)
         self.fusion_mode = fusion
         if fusion == "attention":
@@ -286,15 +303,14 @@ class RelationSpecificLayer(nn.Module):
         attention: dict[str, dict[str, float]] = {}
         for node_type, per_relation in relation_embeds.items():
             if not per_relation:
-                # No incoming relation this layer (shouldn't happen on the
-                # current schema) -- pass the node's embedding through
-                # unchanged rather than losing it.
                 fused[node_type] = x_dict[node_type]
                 attention[node_type] = {}
                 continue
             names = list(per_relation.keys())
             embeds = [per_relation[name] for name in names]
             fused_x, beta = self.fusion[node_type](embeds)
+            if self.use_residual:
+                fused_x = fused_x + x_dict[node_type]
             fused[node_type] = fused_x
             attention[node_type] = dict(zip(names, beta.tolist(), strict=True))
         return RelationSpecificOutput(relations=relation_embeds, fused=fused, attention=attention)
@@ -322,6 +338,7 @@ class RelationSpecificHeteroGNN(nn.Module):
         attn_dim: int = 128,
         port_tail_buckets: int = 32,
         fusion: str = "attention",
+        use_residual: bool = False,
     ) -> None:
         super().__init__()
         self.fusion_mode = fusion
@@ -330,7 +347,7 @@ class RelationSpecificHeteroGNN(nn.Module):
         )
         self.layers = nn.ModuleList(
             [
-                RelationSpecificLayer(edge_types, node_types, hidden_dim, attn_dim, fusion=fusion)
+                RelationSpecificLayer(edge_types, node_types, hidden_dim, attn_dim, fusion=fusion, use_residual=use_residual)
                 for _ in range(num_layers)
             ]
         )
@@ -346,6 +363,7 @@ class RelationSpecificHeteroGNN(nn.Module):
         attn_dim: int = 128,
         port_tail_buckets: int = 32,
         fusion: str = "attention",
+        use_residual: bool = False,
     ) -> RelationSpecificHeteroGNN:
         """Build a model whose relation-specific weights match `sample_graph`'s
         metadata exactly -- metadata is fixed at construction time since
@@ -362,6 +380,7 @@ class RelationSpecificHeteroGNN(nn.Module):
             attn_dim,
             port_tail_buckets,
             fusion=fusion,
+            use_residual=use_residual,
         )
 
     def forward(self, graph: HeteroData) -> RelationSpecificOutput:

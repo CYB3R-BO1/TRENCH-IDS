@@ -177,11 +177,18 @@ def compare_to_raw_feature_similarity(
         pearson_r = float("nan")
         spearman_r = float("nan")
 
-    top_agreements = sorted(
-        (m for m in matched if m["raw_cosine"] > 0),
-        key=lambda m: m["learned_mean"],
-        reverse=True,
-    )[:5]
+    # "Agreement" means the two scores are close for that pair -- the exact
+    # complement of top_disagreements' largest-|difference| ranking. (The
+    # previous version ranked by learned score alone among positively-similar
+    # pairs, which measures nothing about agreement: the ordering would be
+    # identical for any raw matrix.)
+    def _agreement_gap(m: dict[str, Any]) -> float:
+        return abs(m["raw_cosine"] - m["learned_mean"])
+
+    top_agreements = [
+        {**m, "gap": _agreement_gap(m)}
+        for m in sorted(matched, key=_agreement_gap)[:5]
+    ]
 
     def _tag(m: dict[str, Any]) -> str:
         if m["raw_cosine"] > m["learned_mean"]:

@@ -479,18 +479,28 @@ def _drop_corrupted_rows(
     frame: pd.DataFrame, original_cols: list[str]
 ) -> tuple[pd.DataFrame, int]:
     """Drop rows with a non-finite numeric value, or a finite value that
-    would overflow float32 at Step 2's feature cast.
+    would overflow float32 at Step 2's feature cast -- plus rows with a
+    missing categorical value.
 
     Checks every numeric column among ``original_cols`` (the original
     NetFlow schema, not the metadata columns added by this pipeline) --
     not just the specific column(s) observed to be corrupted in practice --
     since the same failure mode could in principle affect any of them.
+    Missing values in non-numeric columns (PROTOCOL, L7_PROTO, IP addresses)
+    are dropped too: left alone they reach Step 2 as either a literal
+    ``"nan"`` category/node or crash ``sorted()`` when a float NaN mixes
+    with strings inside ``graphs._index_categorical`` / ``vocab.build_vocab``.
     Returns (clean_frame, dropped_count).
     """
     numeric_cols = frame[original_cols].select_dtypes(include="number").columns
     values = frame[numeric_cols].to_numpy(dtype=np.float64)
-    bad_row = ~np.isfinite(values) | (np.abs(values) > FLOAT32_MAX)
-    bad = bad_row.any(axis=1)
+    # Reduce to a 1D row mask before OR-ing in the categorical checks --
+    # with k numeric columns the 2D form broadcasts badly against each
+    # column's 1D isna() when k != len(object_cols).
+    bad = (~np.isfinite(values) | (np.abs(values) > FLOAT32_MAX)).any(axis=1)
+    object_cols = frame[original_cols].select_dtypes(include=["object", "category"]).columns
+    for col in object_cols:
+        bad |= frame[col].isna().to_numpy()
     dropped = int(bad.sum())
     clean = frame.loc[~bad]
     # Equivalent to .reset_index(drop=True), but reassigning .index directly

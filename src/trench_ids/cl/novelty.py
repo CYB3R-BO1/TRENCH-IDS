@@ -50,6 +50,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 from torch_geometric.data import HeteroData
 from torch_geometric.loader import DataLoader
 
+from trench_ids.cl.device import resolve_device
 from trench_ids.cl.ewc import FLOW_RELATIONS
 from trench_ids.cl.inference import load_checkpoint
 from trench_ids.cl.memory_bank import RelationMeanAccumulator, load_memory_bank
@@ -420,11 +421,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    device = (
-        torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if args.device == "auto"
-        else torch.device(args.device)
-    )
+    device = resolve_device(args.device)
     run_dir = Path(args.run_dir)
     report = run(
         run_dir=run_dir,

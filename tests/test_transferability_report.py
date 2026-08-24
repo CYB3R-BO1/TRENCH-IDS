@@ -8,6 +8,7 @@ import json
 import math
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -167,7 +168,33 @@ def test_compare_to_raw_feature_similarity_computes_pearson_and_spearman():
     # increasing together -> perfect rank agreement.
     assert result["spearman_r"] == pytest.approx(1.0)
     assert result["pearson_r"] > 0.9
-    assert result["top_agreements"][0]["class_a"] == "A"
+    # Agreement = smallest raw-vs-learned gap: (C,D) at 0.05, then (A,B) and
+    # (E,F) tied at 0.1.
+    assert result["top_agreements"][0]["class_a"] == "C"
+    assert result["top_agreements"][0]["gap"] == pytest.approx(0.05)
+    assert {row["class_a"] for row in result["top_agreements"][:3]} == {"A", "C", "E"}
+
+
+def test_top_agreements_ranks_by_raw_learned_closeness_not_learned_score():
+    """The old implementation ranked by learned score alone among positively-
+    similar pairs, which measures nothing about agreement."""
+    pair_summary = {
+        ("High", "Learned"): {"mean_across_relations": 0.9},
+        ("Close", "Pair"): {"mean_across_relations": 0.5},
+    }
+    for key in pair_summary:
+        pair_summary[key].update(
+            {"per_relation": {}, "best_relation": "r", "worst_relation": "r",
+             "new_class": key[0], "bank_class": key[1]}
+        )
+    classes = ["High", "Learned", "Close", "Pair"]
+    raw_matrix = pd.DataFrame(np.eye(4), index=classes, columns=classes)
+    raw_matrix.loc["High", "Learned"] = raw_matrix.loc["Learned", "High"] = 0.1
+    raw_matrix.loc["Close", "Pair"] = raw_matrix.loc["Pair", "Close"] = 0.55
+
+    result = compare_to_raw_feature_similarity(pair_summary, raw_matrix)
+
+    assert result["top_agreements"][0]["class_a"] == "Close"
 
 
 def test_compare_to_raw_feature_similarity_flags_top_disagreement():

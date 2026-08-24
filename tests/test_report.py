@@ -145,11 +145,12 @@ def test_the_weighting_comparison_is_baselined_on_uniform() -> None:
         "TRD-uniform",
         "TRD-transfer",
         "TRD-inverse",
+        "TRD-drift",
     }
 
 
 def test_the_method_comparison_is_baselined_on_plain_finetuning() -> None:
-    """Every regularised arm (EWC, the three TRD weightings) runs without
+    """Every regularised arm (EWC, the four TRD weightings) runs without
     replay, so the shared reference point they all differ from by exactly one
     thing is plain fine-tuning. Replay and Replay+TRD sit in the same table
     to show the stronger baseline and whether TRD adds on top of it, but they

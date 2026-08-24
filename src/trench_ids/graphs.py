@@ -417,6 +417,67 @@ def build_split_graphs(
     return graphs, split_report
 
 
+def _resampled_split_report(graphs: list[HeteroData]) -> dict[str, Any]:
+    """Recompute a split report from a downsampled graph list.
+
+    ``_downsample_tasks`` subsaves the .pt files, so every field describing
+    the split's composition must be recomputed from the surviving graphs or
+    it silently keeps describing the pre-trim set (graph_counts.json is
+    written afterwards and would misstate trimmed tasks). One exception:
+    ``capture_span_mean`` needs the raw ``source_row`` column, which is not
+    stored on saved graphs -- it is reported as None rather than left
+    carrying a stale number.
+    """
+    flow_counts: list[int] = []
+    class_counts: dict[str, int] = {}
+    benign_flows = 0
+    attack_flows = 0
+    host_counts: list[int] = []
+    host_degrees: list[float] = []
+    for g in graphs:
+        # Real Step 2 graphs carry y/label_names/host.x; minimal fixtures may
+        # not -- degrade to what each graph actually has rather than crash
+        # the (rarely-triggered) trim path. Key membership, not hasattr:
+        # PyG's attribute fallback would happily return an inferred None.
+        flow = g["flow"]
+        if "y" in flow:
+            n = int(flow.y.numel())
+            flow_counts.append(n)
+            labels, per_class = flow.y.unique(return_counts=True)
+            for label, count in zip(labels.tolist(), per_class.tolist(), strict=True):
+                name = LABEL_NAMES[label]
+                class_counts[name] = class_counts.get(name, 0) + int(count)
+                if name == BENIGN:
+                    benign_flows += int(count)
+                else:
+                    attack_flows += int(count)
+        elif "x" in flow:
+            flow_counts.append(int(flow.x.shape[0]))
+        host = g["host"]
+        if "num_nodes" in host:
+            host_counts.append(int(host.num_nodes))
+        if "x" in host:
+            host_degrees.append(float(host.x[:, 0].max()))
+    return {
+        "num_graphs": len(graphs),
+        "flows_per_graph": {
+            "min": min(flow_counts) if flow_counts else 0,
+            "max": max(flow_counts) if flow_counts else 0,
+            "mean": float(np.mean(flow_counts)) if flow_counts else 0.0,
+        },
+        "hosts_per_graph_mean": float(np.mean(host_counts)) if host_counts else 0.0,
+        "host_degree_max_mean": float(np.mean(host_degrees)) if host_degrees else 0.0,
+        # Not derivable from saved graphs (needs source_row); None marks
+        # "unknown after trimming" instead of a stale pre-trim value.
+        "capture_span_mean": None,
+        "benign_unique_rows": benign_flows,
+        "realised_attack_benign_ratio": (
+            round(attack_flows / benign_flows, 4) if benign_flows else None
+        ),
+        "class_counts": class_counts,
+    }
+
+
 def _downsample_tasks(
     out_dir: Path, report: dict[str, Any], max_task_ratio: float, seed: int
 ) -> dict[str, Any]:
@@ -426,9 +487,10 @@ def _downsample_tasks(
     A task exceeding the cap has its train/val/test lists each randomly
     subsampled by the same shrink factor (preserving existing split
     proportions), re-saved to the same task_{t}_{split}.pt paths, and
-    report[t][split]["num_graphs"] updated to match. Tasks within the cap
-    are untouched (file and report both). Returns a JSON-able summary; an
-    empty "trimmed" dict means the cap never triggered.
+    report[t][split] recomputed from the surviving graphs (see
+    ``_resampled_split_report``). Tasks within the cap are untouched (file
+    and report both). Returns a JSON-able summary; an empty "trimmed" dict
+    means the cap never triggered.
     """
     task_keys = [k for k in report if k not in ("graph_size", "benign_ratio")]
     totals = {
@@ -458,7 +520,10 @@ def _downsample_tasks(
                 idx = sorted(rng.choice(len(graphs), size=target, replace=False))
                 graphs = [graphs[i] for i in idx]
                 torch.save(graphs, path)
-            report[k][split]["num_graphs"] = len(graphs)
+            report[k][split] = {
+                **report[k][split],
+                **_resampled_split_report(graphs),
+            }
             after_total += len(graphs)
         summary["trimmed"][k] = {"before_total": totals[k], "after_total": after_total}
     return summary
