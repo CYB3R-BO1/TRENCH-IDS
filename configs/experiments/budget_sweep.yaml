@@ -1,0 +1,48 @@
+# Replay budget sweep
+# Tests different buffer sizes per task for both GNN and Flat+Host
+# replay_fraction fixed at 0.3 (constant compute, varying distinct graphs)
+# Selection on validation accuracy with parsimony rule
+# Seeds: 42, 1, 2
+#
+# Run: python -m trench_ids.cl.train --config-name=experiments/budget_sweep_gnn replay.buffer_size_per_task=100 train.seed=42
+#      python -m trench_ids.cl.train_flat --config-name=experiments/budget_sweep_flathost replay.buffer_size_per_task=100 train.seed=42
+
+defaults:
+  - /train
+
+model:
+  hidden_dim: 64
+  attn_dim: 128
+  num_layers: 3
+  port_tail_buckets: 32
+  fusion: attention
+  use_residual: true
+
+replay:
+  enabled: true
+  buffer_size_per_task: 200  # override on CLI
+  replay_fraction: 0.3
+  selection: uniform
+
+ewc:
+  lambda_r: 0
+  lambda_s: 0
+  lambda_u: 0
+  gamma: 0.9
+
+distill:
+  enabled: false
+
+paths:
+  graphs_dir: data/graphs
+  out_dir: ${oc.env:OUT_DIR,runs/budget_sweep}
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.out_dir}/hydra
+
+# Budgets tested: 25, 50, 100, 200, 400
+# For GNN: selected 25 (bottom, boundary-flagged null result)
+# For Flat+Host: selected 100 (8.2%, beats 200 on val)

@@ -1,0 +1,37 @@
+# Canonical Flat+Host + replay baseline
+# Reproduces the paper's non-graph baseline:
+#   Forgetting: 0.105 ± 0.017
+#   Accuracy:   0.872 ± 0.016
+#   Seeds: 42, 1, 2
+#
+# Run: python -m trench_ids.cl.train_flat --config-name=experiments/final_flathost train.seed=42
+#      python -m trench_ids.cl.train_flat --config-name=experiments/final_flathost train.seed=1
+#      python -m trench_ids.cl.train_flat --config-name=experiments/final_flathost train.seed=2
+
+defaults:
+  - /train_flat
+
+model:
+  hidden_dim: 64
+  port_tail_buckets: 32
+  use_host_features: true
+  mlp_hidden: 254
+
+reference_model:
+  num_layers: 1
+  attn_dim: 128
+
+replay:
+  enabled: true
+  buffer_size_per_task: 100
+  replay_fraction: 0.3
+
+paths:
+  graphs_dir: data/graphs
+  out_dir: ${oc.env:OUT_DIR,runs/final_flathost}
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.out_dir}/hydra

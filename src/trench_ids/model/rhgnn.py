@@ -347,7 +347,14 @@ class RelationSpecificHeteroGNN(nn.Module):
         )
         self.layers = nn.ModuleList(
             [
-                RelationSpecificLayer(edge_types, node_types, hidden_dim, attn_dim, fusion=fusion, use_residual=use_residual)
+                RelationSpecificLayer(
+                    edge_types,
+                    node_types,
+                    hidden_dim,
+                    attn_dim,
+                    fusion=fusion,
+                    use_residual=use_residual,
+                )
                 for _ in range(num_layers)
             ]
         )

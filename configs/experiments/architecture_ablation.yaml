@@ -1,0 +1,64 @@
+# Architecture ablation ladder
+# Compares: 1-layer GNN, 2-layer residual GNN, 3-layer residual GNN, Flat+Host
+# All with replay, parameter-matched where applicable
+# Seeds: 42, 1, 2
+#
+# Run each arm individually, e.g.:
+#   python -m trench_ids.cl.train --config-name=experiments/arch_1layer_gnn train.seed=42
+#   python -m trench_ids.cl.train --config-name=experiments/arch_2layer_gnn train.seed=42
+#   python -m trench_ids.cl.train --config-name=experiments/arch_3layer_gnn train.seed=42
+#   python -m trench_ids.cl.train_flat --config-name=experiments/arch_flathost train.seed=42
+
+defaults:
+  - /train
+
+model:
+  hidden_dim: 64
+  attn_dim: 128
+  port_tail_buckets: 32
+  fusion: attention
+
+replay:
+  enabled: true
+  buffer_size_per_task: 200
+  replay_fraction: 0.3
+  selection: uniform
+
+ewc:
+  lambda_r: 0
+  lambda_s: 0
+  lambda_u: 0
+  gamma: 0.9
+
+distill:
+  enabled: false
+
+paths:
+  graphs_dir: data/graphs
+  out_dir: ${oc.env:OUT_DIR,runs/arch_ablation}
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.out_dir}/hydra
+
+# --- Arm-specific overrides (uncomment one per run) ---
+
+# 1-layer GNN (baseline, dead gradients)
+# model:
+#   num_layers: 1
+#   use_residual: false
+
+# 2-layer GNN + residual
+# model:
+#   num_layers: 2
+#   use_residual: true
+
+# 3-layer GNN + residual (canonical final)
+# model:
+#   num_layers: 3
+#   use_residual: true
+
+# Flat+Host (non-graph baseline, use train_flat config instead)
+# See configs/experiments/final_flathost.yaml

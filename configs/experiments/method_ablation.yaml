@@ -1,0 +1,116 @@
+# Method comparison ablation (no replay)
+# Compares: Fine-tuning, EWC, TRD variants
+# Seeds: 42, 1, 2
+# lambda_d = 0.25 (selected on validation)
+#
+# Run each arm individually, e.g.:
+#   python -m trench_ids.cl.train --config-name=experiments/method_finetune train.seed=42
+#   python -m trench_ids.cl.train --config-name=experiments/method_ewc train.seed=42
+#   python -m trench_ids.cl.train --config-name=experiments/method_trd_uniform train.seed=42
+#   etc.
+
+defaults:
+  - /train
+
+model:
+  hidden_dim: 64
+  attn_dim: 128
+  num_layers: 1
+  port_tail_buckets: 32
+  fusion: attention
+  use_residual: false
+
+replay:
+  enabled: false
+
+ewc:
+  lambda_r: 0
+  lambda_s: 0
+  lambda_u: 0
+  gamma: 0.9
+  disable_learned_weighting: false
+  w_r_mode: learned
+
+distill:
+  enabled: false
+  lambda_d: 0.25
+  weighting: transfer
+  temperature: 0.3
+  objective: both
+  logit_temperature: 2.0
+  drift_max_graphs: 60
+
+paths:
+  graphs_dir: data/graphs
+  out_dir: ${oc.env:OUT_DIR,runs/method_ablation}
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.out_dir}/hydra
+
+# --- Arm-specific overrides (uncomment one per run) ---
+
+# Fine-tuning (anchor)
+# replay:
+#   enabled: false
+# ewc:
+#   lambda_r: 0
+#   lambda_s: 0
+#   lambda_u: 0
+# distill:
+#   enabled: false
+
+# EWC (relation-aware Online EWC)
+# ewc:
+#   lambda_r: 1.0
+#   lambda_s: 1.0
+#   lambda_u: 1.0
+#   gamma: 0.9
+# distill:
+#   enabled: false
+
+# TRD-uniform (preserve everything equally)
+# ewc:
+#   lambda_r: 0
+#   lambda_s: 0
+#   lambda_u: 0
+# distill:
+#   enabled: true
+#   weighting: uniform
+#   lambda_d: 0.25
+#   temperature: 0.3
+
+# TRD-transfer (proposed method)
+# ewc:
+#   lambda_r: 0
+#   lambda_s: 0
+#   lambda_u: 0
+# distill:
+#   enabled: true
+#   weighting: transfer
+#   lambda_d: 0.25
+#   temperature: 0.3
+
+# TRD-inverse (sign control - wins on this benchmark)
+# ewc:
+#   lambda_r: 0
+#   lambda_s: 0
+#   lambda_u: 0
+# distill:
+#   enabled: true
+#   weighting: inverse
+#   lambda_d: 0.25
+#   temperature: 0.3
+
+# TRD-drift (reformulation - null result)
+# ewc:
+#   lambda_r: 0
+#   lambda_s: 0
+#   lambda_u: 0
+# distill:
+#   enabled: true
+#   weighting: drift
+#   lambda_d: 0.25
+#   temperature: 1.0

@@ -265,11 +265,12 @@ Total: **65,378** graphs (~5.36 GB)
 | Flat+Host (matched reachable) | 0.145 ± 0.021 | 0.832 ± 0.020 | 0.809 | 156,577 |
 | GNN (1-layer, attention fusion) | 0.174 ± 0.032 | 0.774 ± 0.026 | 0.734 | 156,562* |
 | GNN (1-layer, concat fusion) | 0.251 ± 0.029 | 0.691 ± 0.022 | 0.624 | 156,562* |
+| GNN (2-layer, residual) | 0.115 ± 0.016 | 0.851 ± 0.015 | 0.812 | 389,218 |
 | **GNN (3-layer, residual)** | **0.081 ± 0.008** | **0.902 ± 0.005** | 0.867 | 515,058 |
 
 *\*1-layer GNN reachable params: 156,562 (40.9% of 264,850 nominal — 6 non-Flow relations + 4 fusion modules get zero gradient)*
 
-**Key finding:** Original 1-layer GNN loses to Flat+Host. **3-layer GNN with residual connections beats Flat+Host** consistently across all 3 seeds (paired diff: -0.025 forgetting, +0.030 accuracy, same sign on every seed).
+**Key finding:** Original 1-layer GNN loses to Flat+Host. 2-layer GNN with residual restores gradient flow but does **not** beat Flat+Host (forgetting 0.115 vs 0.105, accuracy 0.851 vs 0.872). **3-layer GNN with residual connections beats Flat+Host** consistently across all 3 seeds (paired diff: -0.025 forgetting, +0.030 accuracy, same sign on every seed). Depth matters: 2 layers restores gradient flow but isn't enough; 3 layers enables the full relational architecture to participate.
 
 ### 9.3 Per-seed breakdown (3-layer GNN + residual vs Flat+Host, both with replay)
 
@@ -279,6 +280,17 @@ Total: **65,378** graphs (~5.36 GB)
 | 1 | 0.082 | 0.095 | 0.904 | 0.879 | -0.013 | +0.024 |
 | 2 | 0.070 | 0.129 | 0.908 | 0.850 | -0.059 | +0.057 |
 | **Mean** | **0.081** | **0.105** | **0.902** | **0.872** | **-0.025** | **+0.030** |
+
+### 9.4 Per-seed breakdown (2-layer GNN + residual vs Flat+Host, both with replay)
+
+| Seed | GNN Forgetting | Flat+Host Forgetting | GNN Acc | Flat+Host Acc | Forget Diff | Acc Diff |
+|---|---:|---:|---:|---:|---:|---:|
+| 42 | 0.130 | 0.091 | 0.845 | 0.887 | +0.039 | -0.042 |
+| 1 | 0.093 | 0.095 | 0.872 | 0.879 | -0.002 | -0.007 |
+| 2 | 0.121 | 0.129 | 0.838 | 0.850 | -0.008 | -0.013 |
+| **Mean** | **0.115** | **0.105** | **0.851** | **0.872** | **+0.010** | **-0.021** |
+
+**Note:** 2-layer GNN + residual does not consistently beat Flat+Host — paired diffs are mixed across seeds. Only 3-layer + residual achieves consistent improvement.
 
 ---
 
@@ -340,6 +352,7 @@ Total: **65,378** graphs (~5.36 GB)
 | Run | Command | Seeds |
 |---|---|---|
 | 3-layer GNN + replay | `trench-train model.num_layers=3 model.use_residual=true replay.enabled=true ewc.lambda_r=0 ewc.lambda_s=0 ewc.lambda_u=0 train.warmup_epochs=1 paths.out_dir=runs/gnn_3layer_residual_s{seed}` | 42, 1, 2 |
+| 2-layer GNN + replay | `trench-train model.num_layers=2 model.use_residual=true replay.enabled=true ewc.lambda_r=0 ewc.lambda_s=0 ewc.lambda_u=0 train.warmup_epochs=1 paths.out_dir=runs/gnn_2layer_residual_s{seed}` | 42, 1, 2 |
 | Flat+Host + replay | `trench-train-flat replay.enabled=true model.use_host_features=true model.mlp_hidden=254 paths.out_dir=runs/flathost_replay_s{seed}` | 42, 1, 2 |
 | Fine-tuning (anchor) | `trench-train replay.enabled=false ewc.lambda_r=0 ewc.lambda_s=0 ewc.lambda_u=0` | 42, 1, 2 |
 | Joint training (upper bound) | `trench-train-joint` | 42 |
@@ -358,4 +371,4 @@ All results reproducible from run directories under `runs/`. `docs/results_final
 
 ---
 
-*Last updated: 2026-08-24 — reflects final experimental state after 3-layer residual GNN multi-seed validation.*
+*Last updated: 2026-08-24 — reflects final experimental state after 2/3-layer residual GNN multi-seed validation.*

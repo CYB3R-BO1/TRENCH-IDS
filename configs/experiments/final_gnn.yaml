@@ -1,0 +1,45 @@
+# Canonical final 3-layer GNN + replay experiment
+# Reproduces the paper's main result:
+#   Forgetting: 0.081 ± 0.008
+#   Accuracy:   0.902 ± 0.005
+#   Seeds: 42, 1, 2
+#
+# Run: python -m trench_ids.cl.train --config-name=experiments/final_gnn train.seed=42
+#      python -m trench_ids.cl.train --config-name=experiments/final_gnn train.seed=1
+#      python -m trench_ids.cl.train --config-name=experiments/final_gnn train.seed=2
+
+defaults:
+  - /train
+
+model:
+  hidden_dim: 64
+  attn_dim: 128
+  num_layers: 3
+  port_tail_buckets: 32
+  fusion: attention
+  use_residual: true
+
+replay:
+  enabled: true
+  buffer_size_per_task: 25
+  replay_fraction: 0.3
+  selection: uniform
+
+ewc:
+  lambda_r: 0
+  lambda_s: 0
+  lambda_u: 0
+  gamma: 0.9
+
+distill:
+  enabled: false
+
+paths:
+  graphs_dir: data/graphs
+  out_dir: ${oc.env:OUT_DIR,runs/final_gnn}
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.out_dir}/hydra
