@@ -295,8 +295,14 @@ class RelationSpecificLayer(nn.Module):
         self,
         x_dict: dict[str, torch.Tensor],
         edge_index_dict: dict[tuple[str, str, str], torch.Tensor],
+        ablate_relations: set[str] | None = None,
     ) -> RelationSpecificOutput:
         relation_embeds = self.conv(x_dict, edge_index_dict)
+        if ablate_relations:
+            for node_type, per_relation in relation_embeds.items():
+                for rel in ablate_relations:
+                    if rel in per_relation:
+                        per_relation[rel] = torch.zeros_like(per_relation[rel])
         if self.fusion_mode == "concat":
             relation_embeds = self._zero_fill_missing(relation_embeds, x_dict)
         fused: dict[str, torch.Tensor] = {}
@@ -390,10 +396,14 @@ class RelationSpecificHeteroGNN(nn.Module):
             use_residual=use_residual,
         )
 
-    def forward(self, graph: HeteroData) -> RelationSpecificOutput:
+    def forward(
+        self,
+        graph: HeteroData,
+        ablate_relations: set[str] | None = None,
+    ) -> RelationSpecificOutput:
         x_dict = self.encoders(graph)
         edge_index_dict = graph.edge_index_dict
         output = RelationSpecificOutput(fused=x_dict)
         for layer in self.layers:
-            output = layer(output.fused, edge_index_dict)
+            output = layer(output.fused, edge_index_dict, ablate_relations=ablate_relations)
         return output

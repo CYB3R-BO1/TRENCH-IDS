@@ -695,6 +695,11 @@ def main(cfg: DictConfig) -> None:
         for evaluated_task, acc in val_matrix[task].items():
             print(f"[eval] after task {task}, task {evaluated_task} val accuracy = {acc:.4f}")
 
+        # Save replay buffer and optimizer state for intervention experiments
+        (out_dir / f"replay_buffer_task_{task}.pt").write_text("")
+        torch.save(replay_buffer, out_dir / f"replay_buffer_task_{task}.pt")
+        torch.save(optimizer.state_dict(), out_dir / f"optimizer_task_{task}.pt")
+        
         save_checkpoint(
             out_dir / f"checkpoint_task_{task}.pt",
             task_id=task,
@@ -728,6 +733,10 @@ def main(cfg: DictConfig) -> None:
             },
         )
 
+    # Save final replay buffer and optimizer state for intervention experiments
+    torch.save(replay_buffer, out_dir / "replay_buffer.pt")
+    torch.save(optimizer.state_dict(), out_dir / "optimizer_final.pt")
+    
     save_memory_bank(memory_bank, out_dir / "memory_bank.pt")
     (out_dir / "forgetting_matrix.json").write_text(json.dumps(forgetting_matrix, indent=2))
     (out_dir / "val_matrix.json").write_text(json.dumps(val_matrix, indent=2))

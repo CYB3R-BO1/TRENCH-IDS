@@ -143,6 +143,7 @@ def predict(
     device: torch.device,
     batch_size: int,
     label_names: list[str],
+    ablate_relations: set[str] | None = None,
 ) -> dict:
     """No-grad forward pass over `graphs`. Returns y_true/y_pred (global
     class indices, trench_ids.labels.canonical_classes() order, matching
@@ -157,7 +158,10 @@ def predict(
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
-            output = model(batch)
+            if hasattr(model, "forward") and "ablate_relations" in model.forward.__code__.co_varnames:
+                output = model(batch, ablate_relations=ablate_relations)
+            else:
+                output = model(batch)
             logits = classifier(output.fused["flow"])
             probs = F.softmax(logits, dim=-1)
             y_true.extend(batch["flow"].y.tolist())
