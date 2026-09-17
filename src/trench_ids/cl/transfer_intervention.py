@@ -53,6 +53,12 @@ from trench_ids.cl.train import (
     seed_everything,
     split_warmup_and_full_loss_epochs,
 )
+from trench_ids.cl.stability import (
+    StabilityRegularizer,
+    extract_relation_parameters,
+    compute_parameter_change,
+    StabilityConfig,
+)
 from trench_ids.constants import FLOW_RELATIONS
 from trench_ids.labels import attack_classes_for_task, canonical_classes
 from trench_ids.model.rhgnn import RelationSpecificHeteroGNN
@@ -211,8 +217,13 @@ def continue_training(
     replay_fraction: float,
     replay_selection: str,
     track_per_epoch: bool = True,
+    stability_regularizer: StabilityRegularizer = None,
 ) -> dict:
-    """Continue training from task t to t+1, recording per-epoch metrics."""
+    """Continue training from task t to t+1, recording per-epoch metrics.
+    
+    Args:
+        stability_regularizer: Optional StabilityRegularizer to constrain parameter changes.
+    """
     model.train()
     classifier.train()
     
@@ -247,6 +258,12 @@ def continue_training(
             output = model(batch)
             logits = classifier(output.fused["flow"])
             loss = torch.nn.functional.cross_entropy(logits, batch["flow"].y)
+            
+            # Add stability regularization if provided
+            if stability_regularizer is not None:
+                stab_loss = stability_regularizer(model)
+                loss = loss + stab_loss
+            
             loss.backward()
             optimizer.step()
         
@@ -299,8 +316,17 @@ def run_intervention(
     learning_rate: float = 0.001,
     replay_fraction: float = 0.3,
     replay_selection: str = "uniform",
+    stability_mode: str = "none",
+    stability_lambda: float = 1.0,
+    stability_oracle_weights: dict[str, float] = None,
 ) -> dict:
-    """Run a single intervention experiment."""
+    """Run a single intervention experiment.
+    
+    Args:
+        stability_mode: "none", "uniform", "targeted_by", "oracle"
+        stability_lambda: Weight for stability regularization
+        stability_oracle_weights: For oracle mode, relation -> weight mapping
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     
     # Load checkpoint and config
@@ -339,8 +365,19 @@ def run_intervention(
     next_task_graphs = load_split(graphs_dir, task + 1, "train")
     task_graphs = load_split(graphs_dir, task, "train")
     
+    # Create stability regularizer if requested
+    stability_regularizer = None
+    if stability_mode != "none" and stability_lambda > 0:
+        stability_config = StabilityConfig(
+            enabled=True,
+            lambda_stability=stability_lambda,
+            mode=stability_mode,
+            oracle_weights=stability_oracle_weights,
+        )
+        stability_regularizer = StabilityRegularizer(model, stability_config, device)
+    
     # Apply intervention
-    intervention_info = {"mode": mode}
+    intervention_info = {"mode": mode, "stability_mode": stability_mode, "stability_lambda": stability_lambda}
     
     if mode == "reset_relation" and relation:
         modules = get_relation_modules(model, relation)
@@ -371,13 +408,14 @@ def run_intervention(
     elif mode != "normal":
         raise ValueError(f"Unknown mode: {mode}")
     
-# Run continuation
+    # Run continuation with stability regularizer
     results = continue_training(
         model, classifier, optimizer, replay_buffer,
         task_graphs, next_task_graphs, device,
         graphs_dir, task,
         epochs_per_task, warmup_epochs, batch_size, learning_rate,
-        replay_fraction, replay_selection, track_per_epoch=True
+        replay_fraction, replay_selection, track_per_epoch=True,
+        stability_regularizer=stability_regularizer,
     )
     
     # Compute AULC
@@ -421,6 +459,13 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, default=0.001)
     parser.add_argument("--replay-fraction", type=float, default=0.3)
     parser.add_argument("--replay-selection", type=str, default="uniform")
+    # Stability regularization parameters
+    parser.add_argument("--stability-mode", choices=["none", "uniform", "targeted_by", "oracle"], default="none",
+                        help="Stability regularization mode")
+    parser.add_argument("--stability-lambda", type=float, default=1.0,
+                        help="Stability regularization weight")
+    parser.add_argument("--stability-oracle-weights", type=str, default=None,
+                        help="JSON string for oracle weights, e.g., '{\"targeted_by\": 1.0, \"originates\": 0.5}'")
     args = parser.parse_args()
     
     device = resolve_device(args.device)
@@ -431,6 +476,12 @@ def main() -> None:
     # For structured random control, we need a reference relation to match structure
     if args.mode == "reset_random_structured" and not args.relation:
         args.relation = "targeted_by"  # default reference
+    
+    # Parse oracle weights if provided
+    oracle_weights = None
+    if args.stability_oracle_weights:
+        import json
+        oracle_weights = json.loads(args.stability_oracle_weights)
     
     summary = run_intervention(
         args.checkpoint,
@@ -448,6 +499,9 @@ def main() -> None:
         learning_rate=args.learning_rate,
         replay_fraction=args.replay_fraction,
         replay_selection=args.replay_selection,
+        stability_mode=args.stability_mode,
+        stability_lambda=args.stability_lambda,
+        stability_oracle_weights=oracle_weights,
     )
     
     print(f"[done] {args.mode} {args.relation or ''}: AULC F1={summary['aulc_macro_f1']:.4f}, Epoch1 F1={summary['epoch1_macro_f1']:.4f}, Final F1={summary['final_macro_f1']:.4f}")

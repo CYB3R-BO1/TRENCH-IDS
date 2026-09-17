@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from tests.test_flat_model import _tiny_graph
+from test_flat_model import _tiny_graph
 from trench_ids.cl.inference import DEFAULT_MODEL_TYPE, build_model, load_checkpoint, predict
 from trench_ids.cl.train import save_checkpoint, seed_everything
 from trench_ids.cl.train_flat import count_parameters, train_one_task

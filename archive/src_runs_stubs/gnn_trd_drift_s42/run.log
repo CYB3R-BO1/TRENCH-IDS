@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "C:\Users\cherr\AppData\Local\Programs\Python\Python310\lib\runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "C:\Users\cherr\AppData\Local\Programs\Python\Python310\lib\runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "C:\Users\cherr\Documents\PROJECTS\TRENCH-IDS\src\trench_ids\cl\train.py", line 35, in <module>
+    import hydra
+ModuleNotFoundError: No module named 'hydra'

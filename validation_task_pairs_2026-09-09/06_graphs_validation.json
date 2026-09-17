@@ -1,0 +1,348 @@
+{
+  "label_names": [
+    "Benign",
+    "Scanning",
+    "Reconnaissance",
+    "DDoS",
+    "Infiltration",
+    "DoS",
+    "Injection",
+    "Password",
+    "Bot",
+    "XSS",
+    "BruteForce"
+  ],
+  "locked": {
+    "1": [
+      "Scanning"
+    ],
+    "2": [
+      "Reconnaissance"
+    ],
+    "3": [
+      "DDoS",
+      "Infiltration"
+    ],
+    "4": [
+      "DoS",
+      "Injection"
+    ],
+    "5": [
+      "Bot",
+      "Password"
+    ],
+    "6": [
+      "BruteForce",
+      "XSS"
+    ]
+  },
+  "tasks": {
+    "1_train": {
+      "n_graphs": 1214,
+      "n_flows": 363999,
+      "classes": [
+        "Benign",
+        "Scanning"
+      ],
+      "attack_classes": [
+        "Scanning"
+      ],
+      "edge_types": [
+        "('flow', 'originated_by', 'host')",
+        "('flow', 'targets_port', 'port')",
+        "('flow', 'terminates_at', 'host')",
+        "('flow', 'uses_protocol', 'protocol')",
+        "('flow', 'uses_service', 'service')",
+        "('host', 'communicates_with', 'host')",
+        "('host', 'originates', 'flow')",
+        "('host', 'terminated_by', 'flow')",
+        "('port', 'targeted_by', 'flow')",
+        "('protocol', 'protocol_of', 'flow')",
+        "('service', 'service_of', 'flow')"
+      ],
+      "n_relations": 11
+    },
+    "1_val": {
+      "n_graphs": 260,
+      "n_flows": 78000,
+      "classes": [
+        "Benign",
+        "Scanning"
+      ],
+      "attack_classes": [
+        "Scanning"
+      ]
+    },
+    "1_test": {
+      "n_graphs": 260,
+      "n_flows": 78000,
+      "classes": [
+        "Benign",
+        "Scanning"
+      ],
+      "attack_classes": [
+        "Scanning"
+      ]
+    },
+    "2_train": {
+      "n_graphs": 1214,
+      "n_flows": 363992,
+      "classes": [
+        "Benign",
+        "Reconnaissance"
+      ],
+      "attack_classes": [
+        "Reconnaissance"
+      ],
+      "edge_types": [
+        "('flow', 'originated_by', 'host')",
+        "('flow', 'targets_port', 'port')",
+        "('flow', 'terminates_at', 'host')",
+        "('flow', 'uses_protocol', 'protocol')",
+        "('flow', 'uses_service', 'service')",
+        "('host', 'communicates_with', 'host')",
+        "('host', 'originates', 'flow')",
+        "('host', 'terminated_by', 'flow')",
+        "('port', 'targeted_by', 'flow')",
+        "('protocol', 'protocol_of', 'flow')",
+        "('service', 'service_of', 'flow')"
+      ],
+      "n_relations": 11
+    },
+    "2_val": {
+      "n_graphs": 260,
+      "n_flows": 77998,
+      "classes": [
+        "Benign",
+        "Reconnaissance"
+      ],
+      "attack_classes": [
+        "Reconnaissance"
+      ]
+    },
+    "2_test": {
+      "n_graphs": 260,
+      "n_flows": 77999,
+      "classes": [
+        "Benign",
+        "Reconnaissance"
+      ],
+      "attack_classes": [
+        "Reconnaissance"
+      ]
+    },
+    "3_train": {
+      "n_graphs": 1212,
+      "n_flows": 363477,
+      "classes": [
+        "Benign",
+        "DDoS",
+        "Infiltration"
+      ],
+      "attack_classes": [
+        "DDoS",
+        "Infiltration"
+      ],
+      "edge_types": [
+        "('flow', 'originated_by', 'host')",
+        "('flow', 'targets_port', 'port')",
+        "('flow', 'terminates_at', 'host')",
+        "('flow', 'uses_protocol', 'protocol')",
+        "('flow', 'uses_service', 'service')",
+        "('host', 'communicates_with', 'host')",
+        "('host', 'originates', 'flow')",
+        "('host', 'terminated_by', 'flow')",
+        "('port', 'targeted_by', 'flow')",
+        "('protocol', 'protocol_of', 'flow')",
+        "('service', 'service_of', 'flow')"
+      ],
+      "n_relations": 11
+    },
+    "3_val": {
+      "n_graphs": 260,
+      "n_flows": 77888,
+      "classes": [
+        "Benign",
+        "DDoS",
+        "Infiltration"
+      ],
+      "attack_classes": [
+        "DDoS",
+        "Infiltration"
+      ]
+    },
+    "3_test": {
+      "n_graphs": 260,
+      "n_flows": 77888,
+      "classes": [
+        "Benign",
+        "DDoS",
+        "Infiltration"
+      ],
+      "attack_classes": [
+        "DDoS",
+        "Infiltration"
+      ]
+    },
+    "4_train": {
+      "n_graphs": 1214,
+      "n_flows": 363996,
+      "classes": [
+        "Benign",
+        "DoS",
+        "Injection"
+      ],
+      "attack_classes": [
+        "DoS",
+        "Injection"
+      ],
+      "edge_types": [
+        "('flow', 'originated_by', 'host')",
+        "('flow', 'targets_port', 'port')",
+        "('flow', 'terminates_at', 'host')",
+        "('flow', 'uses_protocol', 'protocol')",
+        "('flow', 'uses_service', 'service')",
+        "('host', 'communicates_with', 'host')",
+        "('host', 'originates', 'flow')",
+        "('host', 'terminated_by', 'flow')",
+        "('port', 'targeted_by', 'flow')",
+        "('protocol', 'protocol_of', 'flow')",
+        "('service', 'service_of', 'flow')"
+      ],
+      "n_relations": 11
+    },
+    "4_val": {
+      "n_graphs": 260,
+      "n_flows": 77999,
+      "classes": [
+        "Benign",
+        "DoS",
+        "Injection"
+      ],
+      "attack_classes": [
+        "DoS",
+        "Injection"
+      ]
+    },
+    "4_test": {
+      "n_graphs": 260,
+      "n_flows": 78000,
+      "classes": [
+        "Benign",
+        "DoS",
+        "Injection"
+      ],
+      "attack_classes": [
+        "DoS",
+        "Injection"
+      ]
+    },
+    "5_train": {
+      "n_graphs": 1214,
+      "n_flows": 363999,
+      "classes": [
+        "Benign",
+        "Bot",
+        "Password"
+      ],
+      "attack_classes": [
+        "Bot",
+        "Password"
+      ],
+      "edge_types": [
+        "('flow', 'originated_by', 'host')",
+        "('flow', 'targets_port', 'port')",
+        "('flow', 'terminates_at', 'host')",
+        "('flow', 'uses_protocol', 'protocol')",
+        "('flow', 'uses_service', 'service')",
+        "('host', 'communicates_with', 'host')",
+        "('host', 'originates', 'flow')",
+        "('host', 'terminated_by', 'flow')",
+        "('port', 'targeted_by', 'flow')",
+        "('protocol', 'protocol_of', 'flow')",
+        "('service', 'service_of', 'flow')"
+      ],
+      "n_relations": 11
+    },
+    "5_val": {
+      "n_graphs": 260,
+      "n_flows": 78000,
+      "classes": [
+        "Benign",
+        "Bot",
+        "Password"
+      ],
+      "attack_classes": [
+        "Bot",
+        "Password"
+      ]
+    },
+    "5_test": {
+      "n_graphs": 260,
+      "n_flows": 78000,
+      "classes": [
+        "Benign",
+        "Bot",
+        "Password"
+      ],
+      "attack_classes": [
+        "Bot",
+        "Password"
+      ]
+    },
+    "6_train": {
+      "n_graphs": 1214,
+      "n_flows": 363998,
+      "classes": [
+        "Benign",
+        "BruteForce",
+        "XSS"
+      ],
+      "attack_classes": [
+        "BruteForce",
+        "XSS"
+      ],
+      "edge_types": [
+        "('flow', 'originated_by', 'host')",
+        "('flow', 'targets_port', 'port')",
+        "('flow', 'terminates_at', 'host')",
+        "('flow', 'uses_protocol', 'protocol')",
+        "('flow', 'uses_service', 'service')",
+        "('host', 'communicates_with', 'host')",
+        "('host', 'originates', 'flow')",
+        "('host', 'terminated_by', 'flow')",
+        "('port', 'targeted_by', 'flow')",
+        "('protocol', 'protocol_of', 'flow')",
+        "('service', 'service_of', 'flow')"
+      ],
+      "n_relations": 11
+    },
+    "6_val": {
+      "n_graphs": 260,
+      "n_flows": 78000,
+      "classes": [
+        "Benign",
+        "BruteForce",
+        "XSS"
+      ],
+      "attack_classes": [
+        "BruteForce",
+        "XSS"
+      ]
+    },
+    "6_test": {
+      "n_graphs": 260,
+      "n_flows": 77999,
+      "classes": [
+        "Benign",
+        "BruteForce",
+        "XSS"
+      ],
+      "attack_classes": [
+        "BruteForce",
+        "XSS"
+      ]
+    }
+  },
+  "mismatches": []
+}

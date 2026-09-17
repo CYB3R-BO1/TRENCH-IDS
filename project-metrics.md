@@ -4,7 +4,7 @@ This file is the single place to find every hard number about the project - data
 
 **Benchmark objective:** TRENCH-IDS is a benchmark for **task-incremental continual learning on heterogeneous, graph-structured network intrusion detection data** - 6 sequential tasks, each introducing new attack classes (plus a fresh Benign subset) built from real NetFlow v2 traffic, feeding into a relation-specific heterogeneous GNN trained under continual learning (full proposed pipeline: `CLAUDE.md` "Research goal").
 
-> ⚠️ **Every number recorded before 2026-08-17 was produced on a different benchmark and is not comparable to anything produced after it** — that includes all of `project-metrics.md` (repo root, not under `docs/`), `TRENCH-IDS_Full_Project_Documentation.md`, and `TRENCH-IDS_Project_Summary.pdf`. Never quote a figure from those next to a current one without saying which benchmark each came from. `docs/methodology-2026-08-17.md` is the current source of truth for the data pipeline and the continual-learning mechanism. The task design, dataset selection, and encoder architecture described below and in `docs/dataset-plan.md` are unchanged and still authoritative.
+> ⚠️ **Every number recorded before 2026-08-17 was produced on a different benchmark and is not comparable to anything produced after it.** `docs/methodology-2026-08-17.md` is the current source of truth for the data pipeline and the continual-learning mechanism. The task design, dataset selection, and encoder architecture described below and in `docs/dataset-plan.md` are unchanged and still authoritative.
 
 ### Benchmark at a glance (current benchmark, post-2026-08-17 rebuild)
 
@@ -13,8 +13,9 @@ This file is the single place to find every hard number about the project - data
 | Source datasets | 3 (NF-ToN-IoT-v2, NF-CSE-CIC-IDS2018-v2, NF-BoT-IoT-v2) |
 | Attack classes | 10 |
 | Continual-learning tasks | 6 |
-| Total attack rows (post corrupted-row filter) | 15,689,086 |
-| Total rows incl. benign (Step 1 output) | 15,736,524 |
+| Total attack rows sampled (quota 390K/task) | ~2,340,000 |
+| Total rows incl. benign (Step 1 output) | ~3,119,418 |
+| Raw CSV attack rows (pre-sampling, available) | 15,689,140 |
 | Node types | 5 (Flow, Host, Protocol, Service, Port) |
 | Relation types | 11 (6 original + 5 individually-named reverse relations, added 2026-07-19) |
 | Graph size (max flows/mini-graph) | 300 |
@@ -27,11 +28,15 @@ This file is the single place to find every hard number about the project - data
 
 | Method | Forgetting | Accuracy | Notes |
 |---|---:|---:|---|
-| **3-layer GNN + residual + replay** | **0.081 ± 0.008** | **0.902 ± 0.005** | Beats Flat+Host on all 3 seeds |
-| **Flat+Host + replay** | 0.105 ± 0.017 | 0.872 ± 0.016 | Non-graph baseline |
+| **3-layer GNN + residual + replay (CANONICAL)** | **0.081 ± 0.008** | **0.902 ± 0.005** | 3 seeds (42/1/2). Beats Flat+Host on all 3 seeds. |
+| Flat+Host + replay | 0.105 ± 0.017 | 0.872 ± 0.016 | Non-graph baseline |
 | Original 1-layer GNN + replay | 0.202 ± 0.015 | 0.764 ± 0.014 | 40.9% unreachable params |
 | Fine-tuning (no replay) | 0.693 ± 0.005 | 0.364 ± 0.001 | Anchor |
 | Joint-training upper bound | — | 0.876 | Non-continual ceiling |
+
+**Secondary single-seed configuration** (sensitivity check, not the headline):
+- `runs/strong_replay_baseline/` (seed 42, `warmup_epochs=2`): forgetting=0.0673, accuracy=0.9172.
+  Same architecture as the canonical 3-seed run; differs only in warmup schedule. The 3-seed mean above is the headline scientific result because it carries a variance estimate.
 
 ### Pipeline overview
 
@@ -112,7 +117,7 @@ Source: `configs/preprocess.yaml`, `src/trench_ids/labels.py`.
 
 ## 2. Candidate class pool (10 classes)
 
-Per-dataset restriction (`CLASS_DATASETS` in `src/trench_ids/labels.py`) and measured raw counts:
+Per-dataset restriction (`CLASS_DATASETS` in `src/trench_ids/labels.py`) and measured raw counts. **These are raw CSV counts (what's available), not what's sampled.** Under the quota-based design, each task draws `attack_per_task=390000` rows waterfilled across its classes.
 
 | Class | Allowed dataset(s) | Raw count (measured) |
 |---|---|---:|
@@ -127,7 +132,7 @@ Per-dataset restriction (`CLASS_DATASETS` in `src/trench_ids/labels.py`) and mea
 | BruteForce | CSE | 120,912 |
 | Infiltration | CSE | 116,361 |
 
-**Total candidate-pool raw attack rows: 15,689,140**. Excluded entirely (`EXCLUDED_CLASSES`): Backdoor, MITM, Ransomware, Web Attacks, Theft (2,431–16,809 rows each, all well below the 116K–3.8M candidate-pool range).
+**Total raw CSV attack rows in candidate pool: 15,689,140** (what's available). Sampled under quota: ~2.34M attack rows total (390K/task × 6 tasks, waterfilled). Excluded entirely (`EXCLUDED_CLASSES`): Backdoor, MITM, Ransomware, Web Attacks, Theft (2,431–16,809 rows each, all well below the 116K–3.8M candidate-pool range).
 
 ---
 
@@ -163,21 +168,25 @@ Isolate-and-bundle grouping on the 10-class pool, with a **size-aware tie-break*
 | T5 | Password + Bot | ToN, CSE | -0.046 |
 | T6 | XSS + BruteForce | ToN, CSE | -0.390 |
 
-Benign is present in every task (fresh per-task subset from that task's contributing dataset(s)). Task-size imbalance: **2.9× largest:smallest** (T1 3,789,419 vs. T5 1,304,420 rows) - down from 14× under the old pairing.
+Benign is present in every task (fresh per-task subset from that task's contributing dataset(s)). Task-size imbalance: **1.0×** (every task is ~520K rows under the quota-based design, down from 2.9× under the old pairing). T3's DDoS:Infiltration ratio went from ~30:1 to ~2.4:1 (Infiltration no longer starved).
 
 ---
 
-## 5. Step 1 output - `data/processed/` (real run, `seed=42`)
+## 5. Step 1 output - `data/processed/` (post-rebuild, `seed=42`)
 
-| Task | Theme | Rows (incl. benign) | Class counts | Dups dropped | Corrupted dropped | Train / Val / Test | Sources | File size |
-|---|---|---:|---|---:|---:|---|---|---:|
-| 1 | Scanning | 3,789,419 | Scanning 3,781,419 / Benign 8,000 | 0 | 0 | 2,652,593 / 568,413 / 568,413 | ToN 3,789,419 | 48.3 MB |
-| 2 | Reconnaissance | 2,628,994 | Reconnaissance 2,620,994 / Benign 8,000 | 5 | 0 | 1,840,296 / 394,349 / 394,349 | BoT 2,628,994 | 60.2 MB |
-| 3 | DDoS + Infiltration | 3,540,254 | DDoS 3,416,452 / Infiltration 115,804 / Benign 7,998 | 557 | 54 | 2,478,178 / 531,039 / 531,037 | ToN 2,030,232 / CSE 1,510,022 | 79.6 MB |
-| 4 | DoS + Injection | 1,889,505 | DoS 1,196,608 / Injection 684,897 / Benign 8,000 | 0 | 0 | 1,322,654 / 283,426 / 283,425 | ToN 1,401,074 / CSE 488,431 | 42.1 MB |
-| 5 | Password + Bot | 1,304,420 | Password 1,153,323 / Bot 143,097 / Benign 8,000 | 0 | 0 | 913,094 / 195,663 / 195,663 | ToN 1,157,323 / CSE 147,097 | 26.5 MB |
-| 6 | XSS + BruteForce | 2,583,932 | XSS 2,455,020 / BruteForce 120,912 / Benign 8,000 | 0 | 0 | 1,808,752 / 387,590 / 387,590 | ToN 2,459,020 / CSE 124,912 | 63.5 MB |
-| **Total** | | **15,736,524** | | **562** | **54** | | | **320 MB** |
+Quota-based: `attack_per_task=390000` + `benign_per_task=130000`, waterfilled. Disjoint benign per task. Split: 70/15/15. Every task is the same size (~520K rows).
+
+| Task | Theme | Rows (incl. benign) | Class counts | Dups dropped | Corrupted dropped | Train / Val / Test | Sources |
+|---|---|---:|---|---:|---:|---|---|
+| 1 | Scanning | 519,999 | Scanning 390,000 / Benign 129,999 | — | — | 364,000 / 78,000 / 78,000 | ToN |
+| 2 | Reconnaissance | 519,989 | Reconnaissance 390,000 / Benign 129,989 | — | — | 364,000 / 78,000 / 78,000 | BoT |
+| 3 | DDoS + Infiltration | 519,439 | DDoS 273,636 / Infiltration 115,804 / Benign 129,999 | — | — | 363,607 / 77,916 / 77,916 | ToN, CSE |
+| 4 | DoS + Injection | 519,995 | DoS 195,000 / Injection 195,000 / Benign 129,995 | — | — | 364,000 / 78,000 / 78,000 | ToN, CSE |
+| 5 | Password + Bot | 519,999 | Password 246,903 / Bot 143,097 / Benign 129,999 | — | — | 364,000 / 78,000 / 78,000 | ToN, CSE |
+| 6 | XSS + BruteForce | 519,997 | XSS 269,088 / BruteForce 120,912 / Benign 129,997 | — | — | 364,000 / 78,000 / 78,000 | ToN, CSE |
+| **Total** | | **3,119,418** | | | | | |
+
+Source: `configs/preprocess.yaml`, `docs/methodology-2026-08-17.md` §1.1. Largest:smallest task ratio: **1.0×** (was 2.9× under the old design). T3 DDoS:Infiltration ratio: **~2.4:1** (was ~30:1 under the old design).
 
 ---
 
@@ -307,7 +316,7 @@ Total: **65,378** graphs (~5.36 GB)
 **Conclusion:** Relation-aware EWC could only ever modulate 2.2% of its own penalty. Structural limitation, not tuning issue. 5-order λ sweep + `num_layers=2` ablation both confirmed null.
 
 ### 10.2 Transferability validation (corrected 3-layer GNN)
-
+ 
 | Relation | S_r(t) vs future forgetting correlation |
 |---|---:|
 | `targeted_by` | **-0.960** (strong: higher transferability → less forgetting) |
@@ -315,8 +324,71 @@ Total: **65,378** graphs (~5.36 GB)
 | `originates` | -0.381 |
 | `protocol_of` | -0.320 |
 | `service_of` | -0.069 |
-
+ 
 **Conclusion:** On corrected architecture, `targeted_by` transferability score strongly predicts future forgetting. Signal was noise on 1-layer GNN (all correlations weak).
+ 
+### 10.3 Stage A — Transfer Predictor (LOTO Validation)
+ 
+**Objective:** Can boundary-available features predict functional transfer T_r on unseen task transitions?
+ 
+**Dataset:** 50 observations (5 transitions × 5 relations × 2 seeds), T_r from counterfactual intervention.
+ 
+**Features:**
+- `S_r`: cosine similarity (post-hoc — requires trained encoder on new task)
+- `D_r`: representation drift (historical — from drift.py)
+- `G_r`: gradient alignment (boundary-available)
+- Task stats: n_classes_old, n_classes_new, class_imbalance
+- Relation stats: param_count, layer_count
+- Historical: mean/std/positive_rate of T_r from previous boundaries
+ 
+**Method:** Leave-One-Transition-Out (5 folds, held-out transition + both seeds as test)
+ 
+| Feature Set | Model | Mean Spearman ρ | Std ρ | Mean MAE | Mean Top-1 |
+|---|---|---:|---:|---:|---:|
+| boundary (G_r, task/rel/hist) | Constant | N/A | — | 0.0060 | 0.20 |
+| boundary | Ridge | -0.001 | 0.117 | 0.0121 | 0.20 |
+| boundary | Random Forest | **0.069** | 0.451 | **0.0061** | 0.00 |
+| boundary | Gradient Boosting | -0.154 | 0.343 | 0.0068 | 0.00 |
+| boundary | MLP | -0.040 | 0.226 | 0.2150 | 0.00 |
+| **all (incl. post-hoc S_r)** | Gradient Boosting | **0.188** | 0.219 | 0.0064 | 0.40 |
+ 
+**Per-transition (boundary features, RF):**
+| Held-out Transition | ρ | MAE | Top-1 |
+|---|---:|---:|---:|
+| T1→T2 | 0.503 | 0.0018 | 0.00 |
+| T2→T3 | 0.588 | 0.0072 | 0.00 |
+| T3→T4 | -0.055 | 0.0089 | 0.00 |
+| T4→T5 | -0.030 | 0.0088 | 0.00 |
+| T5→T6 | -0.661 | 0.0040 | 0.00 |
+ 
+**Conclusion:** Boundary-available features **do not generalize** across task transitions (mean ρ = 0.069, high variance ±0.45). Only post-hoc S_r improves prediction (ρ = 0.188), but it requires training on the new task — circular for prediction. **Stage A = NO-GO for deployable transfer predictor.**
+ 
+---
+ 
+### 10.4 Stage B — Causal Stability Intervention
+ 
+**Hypothesis:** `targeted_by` transfers because its parameters are stable during fine-tuning (low relative change). If we enforce stability, transfer should improve.
+ 
+**Experimental Design (T3→T4 boundary, seeds 42 & 1):**
+ 
+| Condition | Stability Policy | Seed 42 AULC | Seed 1 AULC | Δ from Normal (42) | Δ from Normal (1) |
+|---|---|---:|---:|---:|---:|
+| **Normal (replay only)** | None | **1.0453** | **1.0422** | — | — |
+| targeted_by stability | λ=1 on targeted_by only | 1.0462 | 1.0399 | +0.0009 | -0.0023 |
+| uniform stability | λ=1 on all 5 relations | 1.0410 | 1.0348 | -0.0042 | -0.0074 |
+| oracle stability | λ weighted by T_r | 1.0456 | 1.0337 | +0.0004 | -0.0085 |
+| reset targeted_by | Reinitialize targeted_by params | 1.0396 | 1.0226 | -0.0057 | -0.0196 |
+| reset + targeted_by stab | Reset + λ=1 on targeted_by | 1.0334 | 1.0232 | -0.0119 | -0.0190 |
+| reset + uniform stab | Reset + λ=1 on all 5 | 1.0322 | — | -0.0131 | — |
+| reset + oracle stab | Reset + λ weighted by T_r | 1.0318 | — | -0.0135 | — |
+ 
+**Key Finding:** Forcing parameter stability **does not improve** functional transfer. The targeted_by stability condition is marginally positive on seed 42 but negative on seed 1. Uniform/oracle stability consistently hurt. The reset intervention confirms transfer exists (large negative Δ), but stability regularization doesn't rescue it.
+ 
+**Conclusion:** The causal hypothesis that **parameter stability mediates functional transfer is not supported**. The correlation (stable params ↔ transfer) was observational; enforcing stability causally has no beneficial effect. The mechanism of `targeted_by` transfer remains unresolved.
+ 
+---
+ 
+### 10.5 Why replay beats EWC
 
 ### 10.3 Why replay beats EWC
 
@@ -371,4 +443,4 @@ All results reproducible from run directories under `runs/`. `docs/results_final
 
 ---
 
-*Last updated: 2026-08-24 — reflects final experimental state after 2/3-layer residual GNN multi-seed validation.*
+*Last updated: 2026-08-31 — reflects Stage A (transfer predictor LOTO validation: NO-GO) and Stage B (causal stability intervention: hypothesis not supported) added to final experimental state.*

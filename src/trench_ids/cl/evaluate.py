@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_fscore_support
 
 from trench_ids.cl.device import resolve_device
 from trench_ids.cl.inference import load_checkpoint, predict
@@ -39,6 +38,9 @@ def compute_metrics(y_true: list[int], y_pred: list[int], label_names: list[str]
     predicted, doesn't raise/warn -- the realistic case here, since the
     classifier always outputs over the full label space regardless of which
     classes a given task's test split actually contains."""
+    # Lazy import to avoid expensive sklearn load at module import time
+    from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_fscore_support
+    
     labels_idx = list(range(len(label_names)))
     accuracy = accuracy_score(y_true, y_pred) if y_true else 0.0
     precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(

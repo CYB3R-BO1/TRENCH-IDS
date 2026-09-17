@@ -1,0 +1,20 @@
+{
+  "device": "cuda",
+  "gpu": "NVIDIA GeForce RTX 3050 A Laptop GPU",
+  "fused_shape": [
+    300,
+    64
+  ],
+  "relations": [
+    "originates",
+    "protocol_of",
+    "service_of",
+    "targeted_by",
+    "terminated_by"
+  ],
+  "n_params_3layer": 622482,
+  "flat_shape": [
+    300,
+    64
+  ]
+}

@@ -1,0 +1,92 @@
+{
+  "device": "cuda",
+  "label_names": [
+    "Benign",
+    "Scanning",
+    "Reconnaissance",
+    "DDoS",
+    "Infiltration",
+    "DoS",
+    "Injection",
+    "Password",
+    "Bot",
+    "XSS",
+    "BruteForce"
+  ],
+  "per_task": {
+    "1": {
+      "accuracy": 0.9147820512820513,
+      "f1_macro": 0.1682352771160403,
+      "true_classes": [
+        "Benign",
+        "Scanning"
+      ],
+      "expected_attack": [
+        "Scanning"
+      ]
+    },
+    "2": {
+      "accuracy": 0.9437941512070668,
+      "f1_macro": 0.16740569689486237,
+      "true_classes": [
+        "Benign",
+        "Reconnaissance"
+      ],
+      "expected_attack": [
+        "Reconnaissance"
+      ]
+    },
+    "3": {
+      "accuracy": 0.816236133935908,
+      "f1_macro": 0.1983203017163249,
+      "true_classes": [
+        "Benign",
+        "DDoS",
+        "Infiltration"
+      ],
+      "expected_attack": [
+        "DDoS",
+        "Infiltration"
+      ]
+    },
+    "4": {
+      "accuracy": 0.7478846153846154,
+      "f1_macro": 0.22750761393043986,
+      "true_classes": [
+        "Benign",
+        "DoS",
+        "Injection"
+      ],
+      "expected_attack": [
+        "DoS",
+        "Injection"
+      ]
+    },
+    "5": {
+      "accuracy": 0.9616410256410256,
+      "f1_macro": 0.26617510863443317,
+      "true_classes": [
+        "Benign",
+        "Bot",
+        "Password"
+      ],
+      "expected_attack": [
+        "Bot",
+        "Password"
+      ]
+    },
+    "6": {
+      "accuracy": 0.990063975179169,
+      "f1_macro": 0.2709617332455418,
+      "true_classes": [
+        "Benign",
+        "BruteForce",
+        "XSS"
+      ],
+      "expected_attack": [
+        "BruteForce",
+        "XSS"
+      ]
+    }
+  }
+}

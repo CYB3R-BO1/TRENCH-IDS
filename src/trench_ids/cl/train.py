@@ -8,7 +8,7 @@ CLAUDE.md's Open Items, explicitly out of scope here). After each task, the
 shared classifier is evaluated on that task's test split *and* every
 previously-seen task's test split, building a forgetting matrix --
 CLAUDE.md flags this as a required Step 4 deliverable ("picking the winning
-benign_ratio ... awaits real continual-learning training/forgetting curves
+attack_benign_ratio ... awaits real continual-learning training/forgetting curves
 from Step 4"), not an optional nicety.
 
 Also builds the relation-specific memory bank (CLAUDE.md's proposed
@@ -48,6 +48,8 @@ from trench_ids.cl.ewc import FLOW_RELATIONS, OnlineEWCManager
 from trench_ids.cl.importance import ImportanceMLP
 from trench_ids.cl.memory_bank import RelationMeanAccumulator, merge_into_bank, save_memory_bank
 from trench_ids.cl.replay_selection import select_replay_graphs
+from trench_ids.rfr import effective_rank, logged_effective_rank, relation_aware_rfr_loss
+from trench_ids.cl.fact import fact_loss
 from trench_ids.cl.transferability import (
     aggregate_per_class_relation_scores,
     aggregate_transferability_scores,
@@ -105,34 +107,68 @@ def save_checkpoint(
     model: torch.nn.Module,
     classifier: torch.nn.Linear,
     config: dict,
+    optimizer: torch.optim.Optimizer | None = None,
 ) -> None:
-    """Saves an evaluation-only checkpoint -- no optimizer state, since
-    these are inference/evaluation artifacts, not resumable training
-    snapshots (design doc: "Optimizer state is intentionally omitted").
+    """Saves a checkpoint for resumable training.
 
-    ``model`` is typed as a plain ``nn.Module`` rather than
-    ``RelationSpecificHeteroGNN`` because the non-graph baseline
-    (``trench_ids.model.flat.FlatFlowEncoder``) checkpoints through this
-    same function. ``config`` should carry a ``model_type`` key so
-    ``trench_ids.cl.inference.load_checkpoint`` can rebuild the right class;
-    checkpoints written before that key existed are treated as
-    ``"rhgnn"``."""
+    Includes model, classifier, optimizer, and RNG states so training can be
+    resumed exactly. Checkpoint version 2 includes optimizer and RNG states.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "checkpoint_version": 1,
-            "task_id": task_id,
-            "epochs_per_task": epochs_per_task,
-            "warmup_epochs": warmup_epochs,
-            "random_seed": seed,
-            "git_commit": _git_commit(),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "model_state_dict": model.state_dict(),
-            "classifier_state_dict": classifier.state_dict(),
-            "config": config,
-        },
-        path,
-    )
+    checkpoint = {
+        "checkpoint_version": 2,
+        "task_id": task_id,
+        "epochs_per_task": epochs_per_task,
+        "warmup_epochs": warmup_epochs,
+        "random_seed": seed,
+        "git_commit": _git_commit(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "model_state_dict": model.state_dict(),
+        "classifier_state_dict": classifier.state_dict(),
+        "config": config,
+    }
+    if optimizer is not None:
+        checkpoint["optimizer_state_dict"] = optimizer.state_dict()
+    # Save RNG states for exact reproducibility on resume
+    checkpoint["rng_state"] = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+        "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
+    torch.save(checkpoint, path)
+
+
+def load_training_checkpoint(
+    path: Path,
+    model: torch.nn.Module,
+    classifier: torch.nn.Linear,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+) -> dict:
+    """Loads a training checkpoint and restores model, classifier, optimizer, and RNG states.
+
+    Returns the checkpoint dict with task_id and other metadata.
+    """
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    version = checkpoint.get("checkpoint_version", 1)
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    classifier.load_state_dict(checkpoint["classifier_state_dict"])
+
+    if "optimizer_state_dict" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    # Restore RNG states
+    if "rng_state" in checkpoint:
+        rng = checkpoint["rng_state"]
+        random.setstate(rng["python"])
+        np.random.set_state(rng["numpy"])
+        torch.set_rng_state(rng["torch"])
+        if rng["torch_cuda"] is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(rng["torch_cuda"])
+
+    return checkpoint
 
 
 def load_split(graphs_dir: Path, task: int, split: str) -> list[HeteroData]:
@@ -313,6 +349,18 @@ def train_one_task(
     task_id: int = 0,
     seed: int = 0,
     drift_max_graphs: int = 60,
+    # RFR parameters
+    rfr_enabled: bool = False,
+    rfr_lambda: float = 0.1,
+    rfr_apply_only_base: bool = True,
+    rfr_mode: str = "global",
+    # FACT parameters
+    fact_enabled: bool = False,
+    fact_lambda: float = 1.0,
+    fact_num_virtual: int = 10,
+    fact_temp: float = 2.0,
+    fact_alpha: float = 1.0,
+    fact_apply_only_base: bool = True,
 ) -> tuple[float, dict[str, float], dict[str, Any]]:
     """Runs one task's full warm-up + full-loss training (design §5, steps
     1-5). Returns ``(final_epoch_mean_loss, final_w_r, distill_report)``.
@@ -333,8 +381,21 @@ def train_one_task(
     loader = DataLoader(graphs, batch_size=batch_size, shuffle=True)
 
     # Step 1: warm-up, plain classification loss only, every task.
+    # For task 1 (T1, base session), optionally add RFR and/or FACT loss.
     model.train()
     classifier.train()
+    
+    # Initialize FACT module if enabled for base session
+    fact_module = None
+    if fact_enabled and task_id == 1 and fact_apply_only_base:
+        from trench_ids.cl.fact import FACT
+        fact_module = FACT(
+            feature_dim=64,
+            num_virtual_classes=fact_num_virtual,
+            temperature=fact_temp,
+            mixup_alpha=fact_alpha,
+        ).to(device)
+    
     for _epoch in range(warmup_epochs):
         for batch in loader:
             batch = batch.to(device)
@@ -342,6 +403,24 @@ def train_one_task(
             output = model(batch)
             logits = classifier(output.fused["flow"])
             loss = F.cross_entropy(logits, batch["flow"].y)
+            
+            # RFR: add effective rank loss during base session (T1)
+            if rfr_enabled and task_id == 1 and rfr_apply_only_base:
+                if rfr_mode == "relation":
+                    relation_embeds = output.relations["flow"]
+                    rfr_loss_val, per_rel_rfr = relation_aware_rfr_loss(relation_embeds)
+                    loss = loss + rfr_lambda * rfr_loss_val
+                else:
+                    fused_embeds = output.fused["flow"]
+                    rfr_loss_val = -logged_effective_rank(fused_embeds)
+                    loss = loss + rfr_lambda * rfr_loss_val
+            
+            # FACT: add virtual prototype + forecast loss during base session (T1)
+            if fact_module is not None:
+                fact_losses, fact_metrics = fact_loss(output, fact_module, task_id, is_base_session=True)
+                fact_loss_val = fact_losses['l_virtual'] + fact_losses['l_forecast']
+                loss = loss + fact_lambda * fact_loss_val
+            
             loss.backward()
             optimizer.step()
 
@@ -529,13 +608,146 @@ def main(cfg: DictConfig) -> None:
     )
     optimizer = torch.optim.Adam(trainable_params, lr=cfg.optim.learning_rate)
 
+    # --- Resume from checkpoint support ---
+    resume_from_task = cfg.train.get("resume_from_task", 0)
+    start_task = 1
     memory_bank: dict[str, dict[str, torch.Tensor]] = {}
     forgetting_matrix: dict[int, dict[int, float]] = {}
     val_matrix: dict[int, dict[int, float]] = {}
     replay_buffer: list[HeteroData] = []
     run_start = time.monotonic()
 
-    for task in range(1, NUM_TASKS + 1):
+    if resume_from_task > 0:
+        # Load checkpoint from previous task
+        checkpoint_path = out_dir / f"checkpoint_task_{resume_from_task}.pt"
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        print(f"[train] Resuming from task {resume_from_task} using {checkpoint_path}")
+        checkpoint = load_training_checkpoint(
+            out_dir / f"checkpoint_task_{resume_from_task}.pt",
+            model, classifier, optimizer, device
+        )
+        # Restore replay buffer
+        replay_buffer_path = out_dir / f"replay_buffer_task_{resume_from_task}.pt"
+        if replay_buffer_path.exists():
+            replay_buffer = torch.load(replay_buffer_path, weights_only=False)
+            print(f"[train] Loaded replay buffer with {len(replay_buffer)} graphs")
+        # Restore memory bank
+        memory_bank_path = out_dir / "memory_bank.pt"
+        if memory_bank_path.exists():
+            from trench_ids.cl.memory_bank import load_memory_bank
+            memory_bank = load_memory_bank(memory_bank_path)
+            print(f"[train] Loaded memory bank")
+        # Restore forgetting/val matrices
+        fm_path = out_dir / "forgetting_matrix.json"
+        if fm_path.exists():
+            forgetting_matrix = json.loads(fm_path.read_text())
+            # Convert string keys to int
+            forgetting_matrix = {int(k): {int(kk): vv for kk, vv in v.items()} for k, v in forgetting_matrix.items()}
+        vm_path = out_dir / "val_matrix.json"
+        if vm_path.exists():
+            val_matrix = json.loads(vm_path.read_text())
+            val_matrix = {int(k): {int(kk): vv for kk, vv in v.items()} for k, v in val_matrix.items()}
+        start_task = resume_from_task + 1
+        print(f"[train] Resuming from task {start_task}")
+    else:
+        # Fresh training
+        sample_graphs = load_split(graphs_dir, 1, "train")
+        model = RelationSpecificHeteroGNN.from_graph(
+            sample_graphs[0],
+            hidden_dim=cfg.model.hidden_dim,
+            protocol_vocab_size=protocol_vocab_size,
+            service_vocab_size=service_vocab_size,
+            num_layers=cfg.model.num_layers,
+            attn_dim=cfg.model.attn_dim,
+            port_tail_buckets=cfg.model.port_tail_buckets,
+            fusion=cfg.model.get("fusion", "attention"),
+            use_residual=cfg.model.get("use_residual", False),
+        ).to(device)
+        classifier = torch.nn.Linear(cfg.model.hidden_dim, len(label_names)).to(device)
+
+        ewc_manager = OnlineEWCManager(
+            model,
+            classifier,
+            FLOW_RELATIONS,
+            gamma=cfg.ewc.gamma,
+            lambda_r=cfg.ewc.lambda_r,
+            lambda_s=cfg.ewc.lambda_s,
+            lambda_u=cfg.ewc.lambda_u,
+        )
+        importance_mlp = ImportanceMLP().to(device)
+        distiller = (
+            RelationDistiller(
+                FLOW_RELATIONS,
+                lambda_d=cfg.distill.lambda_d,
+                weighting=cfg.distill.weighting,
+                temperature=cfg.distill.temperature,
+                objective=cfg.distill.objective,
+                logit_temperature=cfg.distill.logit_temperature,
+            )
+            if cfg.distill.enabled
+            else None
+        )
+        trainable_params = (
+            list(model.parameters()) + list(classifier.parameters()) + list(importance_mlp.parameters())
+        )
+        optimizer = torch.optim.Adam(trainable_params, lr=cfg.optim.learning_rate)
+
+        memory_bank: dict[str, dict[str, torch.Tensor]] = {}
+        forgetting_matrix: dict[int, dict[int, float]] = {}
+        val_matrix: dict[int, dict[int, float]] = {}
+        replay_buffer: list[HeteroData] = []
+        run_start = time.monotonic()
+        start_task = 1
+
+    # Load common components if not resumed (they're already loaded in resume path)
+    if resume_from_task == 0:
+        pass  # already initialized above
+    else:
+        # Need to load the already-initialized model/classifier/optimizer/ewc_manager/etc.
+        pass  # These are already in memory from checkpoint load
+
+    # For resume path, we need to re-initialize components that depend on model/classifier
+    if resume_from_task > 0:
+        ewc_manager = OnlineEWCManager(
+            model,
+            classifier,
+            FLOW_RELATIONS,
+            gamma=cfg.ewc.gamma,
+            lambda_r=cfg.ewc.lambda_r,
+            lambda_s=cfg.ewc.lambda_s,
+            lambda_u=cfg.ewc.lambda_u,
+        )
+        importance_mlp = ImportanceMLP().to(device)
+        distiller = (
+            RelationDistiller(
+                FLOW_RELATIONS,
+                lambda_d=cfg.distill.lambda_d,
+                weighting=cfg.distill.weighting,
+                temperature=cfg.distill.temperature,
+                objective=cfg.distill.objective,
+                logit_temperature=cfg.distill.logit_temperature,
+            )
+            if cfg.distill.enabled
+            else None
+        )
+    # else: already initialized in fresh training block
+
+    # Rebuild trainable_params and optimizer if resuming (optimizer already loaded from checkpoint)
+    if resume_from_task > 0:
+        trainable_params = (
+            list(model.parameters()) + list(classifier.parameters()) + list(importance_mlp.parameters())
+        )
+        # Optimizer already loaded from checkpoint, but we need to ensure param groups match
+        # The optimizer state was loaded, so we just need to verify it works
+
+    memory_bank: dict[str, dict[str, torch.Tensor]] = memory_bank if resume_from_task > 0 else {}
+    forgetting_matrix: dict[int, dict[int, float]] = forgetting_matrix if resume_from_task > 0 else {}
+    val_matrix: dict[int, dict[int, float]] = val_matrix if resume_from_task > 0 else {}
+    replay_buffer: list[HeteroData] = replay_buffer if resume_from_task > 0 else []
+    run_start = time.monotonic()
+
+    for task in range(start_task, NUM_TASKS + 1):
         train_graphs = sample_graphs if task == 1 else load_split(graphs_dir, task, "train")
         warmup_epochs, full_loss_epochs = split_warmup_and_full_loss_epochs(
             cfg.train.epochs_per_task, cfg.train.warmup_epochs
@@ -585,6 +797,18 @@ def main(cfg: DictConfig) -> None:
             task_id=task,
             seed=cfg.train.seed,
             drift_max_graphs=cfg.distill.get("drift_max_graphs", 60),
+            # RFR parameters
+            rfr_enabled=cfg.rfr.get("enabled", False),
+            rfr_lambda=cfg.rfr.get("lambda", 0.1),
+            rfr_apply_only_base=cfg.rfr.get("apply_only_base", True),
+            rfr_mode=cfg.rfr.get("mode", "global"),
+            # FACT parameters
+            fact_enabled=cfg.fact.get("enabled", False),
+            fact_lambda=cfg.fact.get("lambda", 1.0),
+            fact_num_virtual=cfg.fact.get("num_virtual", 10),
+            fact_temp=cfg.fact.get("temperature", 2.0),
+            fact_alpha=cfg.fact.get("alpha", 1.0),
+            fact_apply_only_base=cfg.fact.get("apply_only_base", True),
         )
         print(f"[train] task {task}: final epoch mean loss = {final_loss:.4f}")
         # Mirrors train_one_task's own needs_s_r check: when neither EWC nor

@@ -1,0 +1,82 @@
+# Step 4 — No-Cap training config.
+# Points to data/no-cap/graphs, writes to runs/no-cap/.
+# Hydra-composed; overrides via CLI per run.
+# ISOLATED from main benchmark.
+
+model:
+  hidden_dim: 64
+  attn_dim: 128
+  num_layers: 3
+  port_tail_buckets: 32
+  fusion: attention
+  use_residual: true
+
+optim:
+  name: adam
+  learning_rate: 0.001
+
+train:
+  epochs_per_task: 5
+  warmup_epochs: 1
+  batch_size: 8
+  seed: 42
+  device: auto
+  # Resume from a specific task checkpoint (0 = fresh training, N = resume after task N)
+  resume_from_task: 0
+
+# EWC — disabled by default (negative result on main benchmark).
+# Can be enabled via CLI: ewc.lambda_r=1 ewc.lambda_s=1 ewc.lambda_u=1
+ewc:
+  lambda_r: 0
+  lambda_s: 0
+  lambda_u: 0
+  gamma: 0.9
+  disable_learned_weighting: false
+  w_r_mode: learned
+  log_loss_components: false
+
+# Experience replay — PRIMARY positive result.
+# Fixed 200 graphs/task (same absolute memory as main benchmark).
+# Relative proportion drops from ~16.5% to ~1.2–3.4%.
+replay:
+  enabled: false
+  buffer_size_per_task: 200
+  replay_fraction: 0.3
+  selection: uniform
+
+# RFR — disabled by default.
+rfr:
+  enabled: false
+  lambda: 0.1
+  apply_only_base: true
+  mode: global
+
+# FACT — disabled by default.
+fact:
+  enabled: false
+  lambda: 1.0
+  num_virtual: 10
+  temperature: 2.0
+  alpha: 1.0
+  apply_only_base: true
+
+# Transferability-weighted relation distillation (TRD).
+# Disabled by default; enable via CLI.
+distill:
+  enabled: false
+  lambda_d: 0.25
+  weighting: transfer
+  temperature: 0.3
+  objective: both
+  logit_temperature: 2.0
+  drift_max_graphs: 60
+
+paths:
+  graphs_dir: data/no-cap/graphs
+  out_dir: runs/no-cap/step4
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.out_dir}/hydra

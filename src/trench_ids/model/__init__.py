@@ -15,6 +15,13 @@ from trench_ids.model.rhgnn import (
     port_embedding_index,
     port_embedding_size,
 )
+from trench_ids.model.transfer_adapter import (
+    TransferAdapter,
+    RandomTransferAdapter,
+    fuse_adapted,
+    LightweightClassifierHead,
+    create_classifier_head,
+)
 
 __all__ = [
     "SemanticAttention",
@@ -25,4 +32,9 @@ __all__ = [
     "RelationSpecificOutput",
     "port_embedding_index",
     "port_embedding_size",
+    "TransferAdapter",
+    "RandomTransferAdapter",
+    "fuse_adapted",
+    "LightweightClassifierHead",
+    "create_classifier_head",
 ]

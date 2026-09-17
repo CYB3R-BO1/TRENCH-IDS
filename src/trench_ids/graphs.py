@@ -68,7 +68,7 @@ from trench_ids.vocab import build_vocab, save_vocab, vocab_key
 
 # Fixed global class -> index mapping for Flow node labels (graph["flow"].y),
 # same order/meaning in every mini-graph across every task/split/graph_size/
-# benign_ratio set. Must NOT be built per mini-graph from that chunk's local
+# attack_benign_ratio set. Must NOT be built per mini-graph from that chunk's local
 # canonical_label.unique() -- a classifier trained across mini-graphs needs
 # one stable label space (index 4 always means the same class everywhere),
 # or CrossEntropyLoss gets contradictory supervision batch to batch.
@@ -282,9 +282,9 @@ def build_task_graph(
 
 
 def _select_benign(
-    attack_rows: pd.DataFrame, benign_rows: pd.DataFrame, benign_ratio: float, seed: int
+    attack_rows: pd.DataFrame, benign_rows: pd.DataFrame, attack_benign_ratio: float, seed: int
 ) -> tuple[pd.DataFrame, float]:
-    """Subsample benign_rows to hit attack:benign == benign_ratio:1.
+    """Subsample benign_rows to hit attack:benign == attack_benign_ratio:1.
 
     **Sampling with replacement was removed 2026-08-16.** The old fallback
     repeated benign rows whenever the ratio demanded more than the pool
@@ -293,7 +293,7 @@ def _select_benign(
     quarter of every reported number rested on ~7,200 distinct flows, and a
     model could memorise them. Step 1's quota planner now sizes each task's
     benign pool so this branch is unnecessary
-    (``benign_per_task * benign_ratio == attack_per_task`` exactly); if a
+    (``benign_per_task * attack_benign_ratio == attack_per_task`` exactly); if a
     pool still falls short, the shortfall is taken honestly (all available
     rows, each used once) and surfaced in the report as a realised ratio
     that differs from the requested one, rather than being papered over
@@ -304,7 +304,7 @@ def _select_benign(
     n_attack = len(attack_rows)
     if n_attack == 0 or benign_rows.empty:
         return benign_rows.iloc[0:0], float("inf")
-    target = max(1, round(n_attack / benign_ratio))
+    target = max(1, round(n_attack / attack_benign_ratio))
     if target <= len(benign_rows):
         selected = benign_rows.sample(n=target, random_state=seed).reset_index(drop=True)
     else:
@@ -358,11 +358,11 @@ def build_split_graphs(
     vocab: dict[str, dict[str, int]],
     graph_size: int,
     seed: int,
-    benign_ratio: float,
+    attack_benign_ratio: float,
 ) -> tuple[list[HeteroData], dict[str, Any]]:
     """Chunk one task/split's rows into mini-graphs of at most `graph_size` flows.
 
-    Benign rows are first subsampled to hit `benign_ratio` (attack:benign,
+    Benign rows are first subsampled to hit `attack_benign_ratio` (attack:benign,
     see _select_benign) -- attack rows are always kept in full; only benign
     rows are ever dropped, never repeated. The combined rows are then put
     back into **capture order** (see :func:`_capture_order`) before
@@ -373,7 +373,7 @@ def build_split_graphs(
     attack_rows = frame[~is_benign].reset_index(drop=True)
     benign_rows = frame[is_benign].reset_index(drop=True)
     benign_selected, realised_ratio = _select_benign(
-        attack_rows, benign_rows, benign_ratio, seed
+        attack_rows, benign_rows, attack_benign_ratio, seed
     )
 
     frame = pd.concat([attack_rows, benign_selected], ignore_index=True)
@@ -492,7 +492,8 @@ def _downsample_tasks(
     and report both). Returns a JSON-able summary; an empty "trimmed" dict
     means the cap never triggered.
     """
-    task_keys = [k for k in report if k not in ("graph_size", "benign_ratio")]
+    excluded = {"graph_size", "benign_ratio", "attack_benign_ratio", "downsampling"}
+    task_keys = [k for k in report if k not in excluded]
     totals = {
         k: sum(report[k][split]["num_graphs"] for split in ("train", "val", "test"))
         for k in task_keys
@@ -538,7 +539,7 @@ def run(config_path: str | Path) -> dict[str, Any]:
     features = cfg["features"]
     graph_size = cfg["graph_size"]
     seed = cfg["seed"]
-    benign_ratio = cfg["sampling"]["benign_ratio"]
+    attack_benign_ratio = cfg["sampling"]["attack_benign_ratio"]
     max_task_ratio = cfg["sampling"]["max_task_ratio"]
 
     task_paths = sorted(processed_dir.glob("task_*.parquet"))
@@ -549,7 +550,7 @@ def run(config_path: str | Path) -> dict[str, Any]:
     save_vocab(vocab, vocab_path)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    report: dict[str, Any] = {"graph_size": graph_size, "benign_ratio": benign_ratio}
+    report: dict[str, Any] = {"graph_size": graph_size, "attack_benign_ratio": attack_benign_ratio}
     for path in task_paths:
         task_id = int(path.stem.split("_")[1])
         frame = pd.read_parquet(path)
@@ -557,7 +558,7 @@ def run(config_path: str | Path) -> dict[str, Any]:
         for split in ("train", "val", "test"):
             split_frame = frame[frame["split"] == split].reset_index(drop=True)
             graphs, split_report = build_split_graphs(
-                split_frame, features, vocab, graph_size, seed, benign_ratio
+                split_frame, features, vocab, graph_size, seed, attack_benign_ratio
             )
             torch.save(graphs, out_dir / f"task_{task_id}_{split}.pt")
             task_report[split] = split_report
@@ -579,12 +580,12 @@ def run(config_path: str | Path) -> dict[str, Any]:
     final_total = sum(
         report[k][s]["num_graphs"]
         for k in report
-        if k not in ("graph_size", "benign_ratio", "downsampling")
+        if k not in ("graph_size", "attack_benign_ratio", "downsampling")
         for s in ("train", "val", "test")
     )
     print(
         f"[done] wrote {final_total} graphs (graph_size={graph_size}, "
-        f"benign_ratio={benign_ratio}) + graph_counts.json to {out_dir}"
+        f"attack_benign_ratio={attack_benign_ratio}) + graph_counts.json to {out_dir}"
     )
     if downsampling["trimmed"]:
         print(

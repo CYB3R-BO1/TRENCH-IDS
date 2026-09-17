@@ -38,6 +38,8 @@ train:
   # (torch.cuda.is_available()), never hardcoded here, since this repo runs
   # across machines with and without a CUDA device.
   device: auto
+  # Resume from a specific task checkpoint (0 = fresh training, N = resume after task N)
+  resume_from_task: 0
 
 # Relation-aware Online EWC (Steps 6-8) -- SUPERSEDED / ARCHIVED (2026-08-23).
 # This mechanism is a characterized negative result: the full experiment
@@ -100,6 +102,37 @@ replay:
   # already-banked classes. Task 1 always uses uniform regardless of this
   # setting (no transferability signal exists yet).
   selection: uniform
+
+# RFR (Effective-Rank based Feature Richness) -- Forward-compatible
+# representation learning (Kim et al., Neural Networks 2024).
+# Adds -log(erank) loss during base session (T1) to increase representation
+# effective rank, improving forward transfer to novel tasks.
+# Disabled by default so existing runs are unaffected.
+rfr:
+  enabled: false
+  # Weight on L_RFR relative to L_cls. Paper uses 0.1 as default.
+  lambda: 0.1
+  # Only apply during base session (T1). If false, applies to all tasks.
+  apply_only_base: true
+  # Mode: "global" (fused embeddings) or "relation" (per-relation)
+  mode: global
+
+# FACT (Forward Compatible Training) -- Virtual prototypes for future classes
+# (Zhou et al., CVPR 2022). Adds virtual prototype + forecast loss during
+# base session (T1) to reserve embedding space for future classes.
+# Disabled by default so existing runs are unaffected.
+fact:
+  enabled: false
+  # Weight on L_FACT relative to L_cls.
+  lambda: 1.0
+  # Number of virtual prototypes (reserved future classes)
+  num_virtual: 10
+  # Temperature for virtual prototype similarity
+  temperature: 2.0
+  # Mixup alpha for virtual instance generation
+  alpha: 1.0
+  # Only apply during base session (T1). If false, applies to all tasks.
+  apply_only_base: true
 
 # Transferability-weighted relation distillation (TRD) -- the ACTIVE
 # regularizer that replaced relation-aware EWC above (which a Fisher-mass

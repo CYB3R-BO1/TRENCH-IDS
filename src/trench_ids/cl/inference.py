@@ -27,7 +27,8 @@ from trench_ids.model.flat import FlatFlowEncoder
 from trench_ids.model.rhgnn import RelationSpecificHeteroGNN
 from trench_ids.vocab import load_vocab, vocab_fingerprint
 
-SUPPORTED_CHECKPOINT_VERSION = 1
+# Supported checkpoint versions: 1 (legacy, model+classifier only), 2 (training resume with optimizer+RNG)
+SUPPORTED_CHECKPOINT_VERSIONS = {1, 2}
 
 # Checkpoints written before the non-graph baseline existed carry no
 # "model_type" key; they are all RelationSpecificHeteroGNN runs.
@@ -97,11 +98,11 @@ def load_checkpoint(
     checkpoint = torch.load(
         path, map_location=device, weights_only=False
     )  # trusted, first-party output (same convention as memory_bank.load_memory_bank)
-    version = checkpoint.get("checkpoint_version")
-    if version != SUPPORTED_CHECKPOINT_VERSION:
+    version = checkpoint.get("checkpoint_version", 1)
+    if version not in SUPPORTED_CHECKPOINT_VERSIONS:
         raise ValueError(
             f"Unsupported checkpoint_version {version!r} (expected "
-            f"{SUPPORTED_CHECKPOINT_VERSION}) in {path}"
+            f"{sorted(SUPPORTED_CHECKPOINT_VERSIONS)}) in {path}"
         )
     config = checkpoint["config"]
     # Both encoders' Protocol/Service embeddings are indexed by vocab.json's

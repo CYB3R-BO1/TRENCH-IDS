@@ -120,7 +120,7 @@ class NodeFeatureEncoders(nn.Module):
     confirmed the fix by rerunning the same test post-change. This is purely
     a model-input concern (does not touch the frozen Step 1/2 pipeline or
     data on disk). Protocol/Service are indexed by the *global* vocabulary
-    (``trench_ids.vocab``, stable across every task/graph_size/benign_ratio
+    (``trench_ids.vocab``, stable across every task/graph_size/attack_benign_ratio
     set) so the same raw value gets the same embedding row everywhere --
     required for any later cross-task comparison of these node types'
     embeddings. Port has no such global vocabulary for its log-bucketed tail

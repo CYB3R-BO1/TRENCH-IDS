@@ -210,7 +210,7 @@ def test_build_split_graphs_produces_one_mini_graph_per_chunk() -> None:
     features = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
 
     graphs, split_report = build_split_graphs(
-        frame, features, vocab, graph_size=3, seed=42, benign_ratio=1.0
+        frame, features, vocab, graph_size=3, seed=42, attack_benign_ratio=1.0
     )
 
     assert len(graphs) == 2
@@ -261,7 +261,7 @@ def test_build_split_graphs_chunks_in_capture_order_not_parquet_order() -> None:
     features = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
 
     graphs, _ = build_split_graphs(
-        frame, features, vocab, graph_size=10, seed=42, benign_ratio=1.0
+        frame, features, vocab, graph_size=10, seed=42, attack_benign_ratio=1.0
     )
 
     # Chunking the Parquet order directly would give monolithic single-class
@@ -285,7 +285,7 @@ def test_build_split_graphs_preserves_capture_order_within_and_across_chunks() -
     features = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
 
     graphs, report = build_split_graphs(
-        frame, features, vocab, graph_size=10, seed=42, benign_ratio=1.0
+        frame, features, vocab, graph_size=10, seed=42, attack_benign_ratio=1.0
     )
 
     # The fixture's 50 rows occupy capture positions 0..49, so a 10-flow
@@ -325,7 +325,7 @@ def test_build_split_graphs_subsamples_benign_to_target_ratio() -> None:
     features = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
 
     graphs, split_report = build_split_graphs(
-        frame, features, vocab, graph_size=100, seed=42, benign_ratio=4.0
+        frame, features, vocab, graph_size=100, seed=42, attack_benign_ratio=4.0
     )
 
     assert len(graphs) == 1
@@ -349,7 +349,7 @@ def test_build_split_graphs_never_duplicates_benign_when_pool_too_small() -> Non
     features = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
 
     graphs, split_report = build_split_graphs(
-        frame, features, vocab, graph_size=100, seed=42, benign_ratio=1.0
+        frame, features, vocab, graph_size=100, seed=42, attack_benign_ratio=1.0
     )
 
     assert split_report["class_counts"]["Benign"] == 2  # all of the pool, once each
@@ -365,7 +365,7 @@ def test_build_split_graphs_reports_a_met_ratio_as_requested() -> None:
     features = ["IN_BYTES", "OUT_BYTES", "FLOW_DURATION_MILLISECONDS"]
 
     _, split_report = build_split_graphs(
-        frame, features, vocab, graph_size=100, seed=42, benign_ratio=4.0
+        frame, features, vocab, graph_size=100, seed=42, attack_benign_ratio=4.0
     )
 
     assert split_report["realised_attack_benign_ratio"] == pytest.approx(4.0)

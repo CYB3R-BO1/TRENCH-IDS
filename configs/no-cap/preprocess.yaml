@@ -1,0 +1,39 @@
+# Step 1 — No-Cap Raw traffic preprocessing config.
+# Uses ALL eligible attack rows (no per-task quota cap).
+# Benign drawn disjointly toward target 3:1 attack:benign ratio;
+# realized ratio reported per task (T2 benign-limited).
+# ISOLATED from main benchmark: outputs to data/no-cap/processed/
+
+seed: 42
+
+paths:
+  raw_dir: dataset
+  out_dir: data/no-cap/processed
+
+# Dataset directory name -> short source code stamped onto every row.
+# NF-UNSW-NB15-v2 excluded (see docs/dataset-plan.md §1).
+# NF-BoT-IoT-v2 restricted to Reconnaissance only via CLASS_DATASETS.
+datasets:
+  NF-ToN-IoT-v2: ToN
+  NF-CSE-CIC-IDS2018-v2: CSE
+  NF-BoT-IoT-v2: BoT
+
+sampling:
+  # NO attack_per_task cap — use all CLASS_DATASETS-sanctioned attack rows.
+  # Benign target = attack_rows / attack_benign_ratio per task.
+  # Each task's benign slice drawn disjointly from its own datasets.
+  # When benign pool exhausted (e.g., T2 BoT-IoT: 135K available),
+  # all available benign used and realized ratio reported.
+  attack_benign_ratio: 3.0
+
+  # CSV read chunk size (rows). Files up to 6 GB — never read whole.
+  chunk_size: 500000
+
+# Per-task stratified split (by canonical class). Must sum to 1.0.
+split:
+  train: 0.70
+  val: 0.15
+  test: 0.15
+
+# Drop exact-duplicate flow records (identical across all original columns).
+dedup: true

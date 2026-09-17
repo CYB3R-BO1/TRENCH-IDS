@@ -634,7 +634,7 @@ def test_save_checkpoint_writes_loadable_state(tmp_path: Path) -> None:
     )
 
     checkpoint = torch.load(path, weights_only=False)
-    assert checkpoint["checkpoint_version"] == 1
+    assert checkpoint["checkpoint_version"] == 2
     assert checkpoint["task_id"] == 1
     assert checkpoint["epochs_per_task"] == 5
     assert checkpoint["warmup_epochs"] == 2

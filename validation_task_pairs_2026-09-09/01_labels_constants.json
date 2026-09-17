@@ -1,0 +1,80 @@
+{
+  "CANONICAL_TO_TASK": {
+    "Scanning": 1,
+    "Reconnaissance": 2,
+    "DDoS": 3,
+    "Infiltration": 3,
+    "DoS": 4,
+    "Injection": 4,
+    "Password": 5,
+    "Bot": 5,
+    "XSS": 6,
+    "BruteForce": 6
+  },
+  "TASK_THEMES": {
+    "1": "Scanning",
+    "2": "Reconnaissance",
+    "3": "DDoS + Infiltration",
+    "4": "DoS + Injection",
+    "5": "Password + Bot",
+    "6": "XSS + BruteForce"
+  },
+  "TASK_DATASETS": {
+    "1": [
+      "ToN"
+    ],
+    "2": [
+      "BoT"
+    ],
+    "3": [
+      "ToN",
+      "CSE"
+    ],
+    "4": [
+      "ToN",
+      "CSE"
+    ],
+    "5": [
+      "ToN",
+      "CSE"
+    ],
+    "6": [
+      "ToN",
+      "CSE"
+    ]
+  },
+  "NUM_TASKS": 6,
+  "FLOW_RELATIONS": [
+    "originates",
+    "terminated_by",
+    "targeted_by",
+    "protocol_of",
+    "service_of"
+  ],
+  "FLOW_FEATURE_DIM": 37,
+  "HOST_FEATURE_DIM": 4,
+  "per_task": {
+    "1": [
+      "Scanning"
+    ],
+    "2": [
+      "Reconnaissance"
+    ],
+    "3": [
+      "DDoS",
+      "Infiltration"
+    ],
+    "4": [
+      "DoS",
+      "Injection"
+    ],
+    "5": [
+      "Password",
+      "Bot"
+    ],
+    "6": [
+      "XSS",
+      "BruteForce"
+    ]
+  }
+}

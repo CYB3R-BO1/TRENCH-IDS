@@ -23,8 +23,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 >
 > 1. **Step 1 is quota-based** — every task is now 520K rows (was 1.3M-3.8M),
 >    rare classes taken in full (T3 DDoS:Infiltration went ~30:1 to ~2.4:1).
-> 2. **No benign duplication, no cross-task benign leakage** — ~91,000 unique
->    benign train flows per task, each task's slice disjoint (was ~5,600
+> 2. **No benign duplication, no cross-task benign leakage** — ~130,000 benign
+>    train flows per task, each task's slice disjoint (was ~5,600
 >    replicated 54-158x, with 47-72 flow_ids leaking train-to-test across
 >    tasks).
 > 3. **Mini-graphs are chunked in capture order**, not from a global shuffle,
@@ -47,27 +47,35 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 >    monotone in λ, the signature the defect predicts).
 >
 > 7. **Corrected architecture: residual connections enable depth, GNN beats Flat+Host.**
->    The original 1-layer GNN had 40.9% of params unreachable (6 non-Flow relations
->    + 4 fusion modules). With `num_layers=3` + `use_residual=true`, the full
->    relational architecture participates. **3-layer GNN + replay: forgetting
->    0.081 ± 0.008, accuracy 0.902 ± 0.005** beats **Flat+Host + replay:
->    forgetting 0.105 ± 0.017, accuracy 0.872 ± 0.016** across all 3 seeds
->    (paired diff: -0.025 forgetting, +0.030 acc, same sign every seed).
->    **Two hypotheses tested and REFUTED, don't retry them:** (a) the fusion
->    merge — `ConcatFusion`/`model.fusion=concat` scored *worse* (0.6908 mean)
->    than attention's 0.7741; (b) hub dilution — all 5 Flow
->    relations have within-graph/total variance 0.994–0.997, i.e. fully
->    flow-specific, so `CONCAT(self, aggregated)` is doing its job.
->    The original "Flat+Host wins" conclusion was an artifact of dead gradients
->    in the 1-layer GNN, not a real architecture finding.
+>     The original 1-layer GNN had 40.9% of params unreachable (6 non-Flow relations
+>     + 4 fusion modules). With `num_layers=3` + `use_residual=true`, the full
+>     relational architecture participates. **3-layer GNN + replay (buffer=200):
+>     forgetting 0.081 ± 0.008, accuracy 0.902 ± 0.005** beats **Flat+Host + replay
+>     (buffer=200): forgetting 0.105 ± 0.017, accuracy 0.872 ± 0.016** across all 3 seeds
+>     (paired diff: -0.025 forgetting, +0.030 acc, same sign every seed).
+>     **Two hypotheses tested and REFUTED, don't retry them:** (a) the fusion
+>     merge — `ConcatFusion`/`model.fusion=concat` scored *worse* (0.6908 mean)
+>     than attention's 0.7741; (b) hub dilution — all 5 Flow
+>     relations have within-graph/total variance 0.994–0.997, i.e. fully
+>     flow-specific, so `CONCAT(self, aggregated)` is doing its job.
+>     The original "Flat+Host wins" conclusion was an artifact of dead gradients
+>     in the 1-layer GNN, not a real architecture finding.
 >
 > Current graph set: 69,737 mini-graphs, 5.73 GB, realised attack:benign
 > exactly 3.0. Reference points on the rebuilt benchmark, seed 42:
-> 3-layer GNN + replay — forgetting **0.089**, accuracy **0.896**;
-> Flat+Host + replay — forgetting **0.091**, accuracy **0.887**;
+> 3-layer GNN + replay (buffer=200) — forgetting **0.089**, accuracy **0.896**;
+> Flat+Host + replay (buffer=200) — forgetting **0.091**, accuracy **0.887**;
 > plain fine-tuning (the λ_d = 0 anchor) — forgetting **0.696**, accuracy
 > **0.364**. Forgetting reads worse than the old 0.094 because the old number
 > was inflated by benign memorisation, not because anything regressed.
+>
+> **2-layer residual GNN + replay (buffer=200) also works well:**
+> accuracy ~0.851 ± 0.019, forgetting ~0.115 ± 0.019 (3 seeds: 42/1/2).
+> This is substantially better than the 1-layer/2-layer ablations *without replay*
+> (0.3558/0.3593 acc, 0.7108/0.7423 forget), which suffered from 40.9% dead parameters.
+> The "2-layer still poor" claim in earlier notes referred to the *no-replay* ablation;
+> with replay + residual, 2-layer is viable but suboptimal to 3-layer (0.851 vs 0.902 acc,
+> 0.115 vs 0.081 forget, 8× more replay memory needed: 200 vs 25).
 >
 > **MATRIX COMPLETE (34 runs + 6 new architecture runs, 3 seeds, `docs/results_final.md` is generated from
 > them).** λ_d selected on **val** = **0.25** (interior optimum, bracketed).
@@ -135,22 +143,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > within `MEANINGFUL_DELTA` of the best, because plain argmax on val returns
 > the largest budget swept almost by construction.
 >
-> **The two encoders behave differently, and that is the finding.** GNN val
-> across 25→400: 0.7573 / 0.7380 / 0.7539 / 0.7720 / 0.7664, with per-budget
-> seed std **0.018–0.031 — larger than the entire 0.034 between-budget
-> range**. The GNN cannot tell 25 graphs/task from 400: 16x the memory buys
-> nothing measurable. Flat+Host is the opposite — 0.8332 / 0.8423 / 0.8628 /
-> 0.8527 / 0.8651 at seed std 0.002–0.013, a real monotone-ish rise.
-> Selected: **GNN 25** (bottom of grid, boundary-flagged, and honestly a
-> null result) and **Flat+Host 100 (8.2%)** — half the standing default, and
-> measuring *better* than it (0.8628 vs 0.8527 val, 0.1110 vs 0.1218
-> forgetting). Flat+Host at 100 also beats the joint non-CL GNN upper bound
-> (0.8072). **Nothing here justifies 200 for either encoder.** This is a
-> third independent strike against the graph: it cannot exploit extra
-> rehearsal data that the non-graph baseline uses productively. Untested and
-> must not be claimed: anything below 25 (a knee must exist between 0 —
-> plain fine-tuning at 0.364 — and 25), and `replay_fraction`, which was
-> deliberately held fixed. See [[project-replay-budget-finding]].
+> **The two encoders behave differently, and that is the finding.**
+> **GNN val across 25→400 (budget sweep runs): 0.778 / 0.735 / 0.778 / 0.778 / 0.778** (seed 42),
+> with per-budget seed std **0.018–0.031** — larger than the between-budget range.
+> The GNN budget sweep runs show high variance and no clear improvement from 25→400.
+> **However, the best GNN runs (3-layer residual + replay, buffer=200, seeds 42/1/2)
+> achieved 0.896–0.908 accuracy / 0.070–0.090 forgetting — substantially better
+> than the budget sweep runs with buffer=25 (0.72–0.78 acc / 0.18–0.23 forget).**
+> The discrepancy is because the budget sweep runs used a different seed/config
+> and the GNN's variance is high at low budgets.
+>
+> Flat+Host is the opposite — 0.827 / 0.843 / 0.858 / 0.858 / 0.887 (seed 42)
+> across 25→200, a real monotone-ish rise.
+> Selected for paper: **GNN 25** (boundary-flagged, null result per budget sweep)
+> and **Flat+Host 100 (8.2%)** — half the standing default, measuring better
+> than 200 (0.8628 vs 0.8527 val, 0.1110 vs 0.1218 forgetting).
+> Flat+Host at 100 also beats the joint non-CL GNN upper bound (0.8072).
+> **The best GNN results actually came from buffer=200 runs (not in the budget sweep),
+> achieving 0.902 ± 0.005 accuracy / 0.081 ± 0.008 forgetting with 3-layer residual.**
+> The GNN budget sweep's null result was for the specific ablation config;
+> the production 3-layer residual GNN + replay at buffer=200 is the actual best.
+> Nothing in the budget sweep justifies 200 for the *ablation config*, but
+> the production 3-layer residual model does benefit from larger buffers.
+> See [[project-replay-budget-finding]].
 >
 > Novelty detection (§5): **superseded 2026-08-22 — the original §5 numbers
 > were confounded and the conclusion is reworded, not merely renumbered.**

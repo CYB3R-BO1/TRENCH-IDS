@@ -1,6 +1,6 @@
 """Attack-class similarity analysis (professor-directed Step 1 redesign input).
 
-For the 14-class candidate pool (docs/attack-class-counts.md), draws a random
+For the 10-class candidate pool (docs/attack-class-counts.md), draws a random
 sample per class and writes it to its own CSV. Method (per spec):
   1. Sample ~5000 rows per attack class, stored separately.
   2. Compute the mean feature vector of every attack, over the 37 flow-

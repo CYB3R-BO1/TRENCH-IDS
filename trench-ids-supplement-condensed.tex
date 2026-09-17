@@ -1,0 +1,159 @@
+% ============================================================
+% TRENCH-IDS Technical Supplement (CONDENSED, two-column)
+% Same verified numbers as trench-ids-supplement-corrected.tex.
+% Dropped to appendix/notes: topology table, incremental grid,
+% peak-vs-final, per-class F1, B1 details, predictor table,
+% budget/lambda tables (kept as one-line selections).
+% ============================================================
+\documentclass[10pt,a4paper,twocolumn]{article}
+\usepackage[margin=0.65in]{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{enumitem}
+\usepackage{siunitx}
+
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+\setlength{\emergencystretch}{3em}
+\setlength{\intextsep}{6pt}
+\setlength{\textfloatsep}{8pt plus 2pt minus 2pt}
+\setlength{\abovecaptionskip}{4pt}
+\setlength{\belowcaptionskip}{4pt}
+\setlist{itemsep=2pt,topsep=2pt,parsep=0pt,leftmargin=*}
+\captionsetup{font=footnotesize,labelfont=bf,skip=4pt}
+
+\title{TRENCH-IDS: Benchmark Specifications and Results\\Supplementary Technical Document}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Benchmark Overview}
+Sequential T1$\to$T6 continual learning for network intrusion detection (3 NetFlow v2 datasets, 10 attack classes, 6 tasks). Retention mechanism: \textbf{experience replay} (200 graphs/task, 30\% fraction); plus a per-class/per-relation memory bank for transferability analysis. All values from versioned artifacts under \texttt{runs/}, \texttt{data/}.
+
+\begin{table}[htbp]
+\centering\footnotesize
+\caption{Key benchmark parameters (post-2026-08-17 quota rebuild).}
+\label{tab:overview}
+\begin{tabular}{lr}
+\toprule
+Metric & Value \\
+\midrule
+Source datasets & 3 (ToN, CSE, BoT) \\
+Attack classes / tasks & 10 / 6 \\
+Attack rows sampled (390K/task) & $\sim$2.34M \\
+Total rows incl.\ benign (Step 1) & 3,119,418 \\
+Raw CSV attack rows & 15,689,140 \\
+Node / relation types & 5 / 11 \\
+Graph size (max flows) & 300 \\
+Mini-graphs (\texttt{benign\_ratio=3.0}) & 10,402 \\
+3-layer residual params & 622,482 \\
+Tests & 373 passing \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Datasets and Task Design}
+ToN contributes Scanning/XSS/DDoS/Password/DoS/Injection; CSE contributes DDoS/DoS/Injection/Bot/BruteForce/Infiltration; BoT contributes \textbf{Reconnaissance only} (its DDoS/DoS excluded via \texttt{CLASS\_DATASETS}). UNSW-NB15 is evaluation-only (Dataset A); UQ-NIDS-v2 excluded (merged union).
+
+\begin{table}[htbp]
+\centering\footnotesize
+\caption{Candidate classes (raw CSV counts) and locked task assignment (size-aware isolate-and-bundle, $\tau=0.35$). Every task adds a fresh benign subset.}
+\label{tab:tasks}
+\begin{tabular}{llrr}
+\toprule
+Task & Classes & Raw Count & Max Sim \\
+\midrule
+T1 & Scanning (ToN) & 3,781,419 & --- \\
+T2 & Reconnaissance (BoT) & 2,620,999 & --- \\
+T3 & DDoS + Infiltration & 3,416,504 / 116,361 & \num{-0.462} \\
+T4 & DoS + Injection & 1,196,608 / 684,897 & \num{-0.343} \\
+T5 & Password + Bot & 1,153,323 / 143,097 & \num{-0.046} \\
+T6 & XSS + BruteForce & 2,455,020 / 120,912 & \num{-0.390} \\
+\bottomrule
+\end{tabular}
+\end{table}
+Top raw-feature similarities: XSS--Infiltration 0.707 (lands T6 vs.\ T3), Scanning--Reconnaissance 0.628 (T1 vs.\ T2). Dropped: Backdoor/MITM/Ransomware/Web Attacks/Theft (all $<$\num{17000}).
+
+\section{Steps 1--3 Outputs}
+Step 1 (quota 390K attack + 130K benign/task, 70/15/15, seed 42): T1 519,999; T2 519,989; T3 519,439 (DDoS 273,636 / Infil 115,804); T4 519,995 (195K/195K); T5 519,999 (Pass 246,903 / Bot 143,097); T6 519,997 (XSS 269,088 / BF 120,912); total \textbf{3,119,418} (verified in \texttt{data/processed/}). Task-size ratio 1.0$\times$.
+
+Step 2 (capture-order chunks $\le$300 flows, 11 relations, benign\_ratio 3.0): train 7,282 + val 1,560 + test 1,560 = \textbf{10,402} graphs (\texttt{data/graphs/graph\_counts.json}; per task 1,214/260/260, T3-train 1,212). Mean flows/graph 299.8; edges/graph $\sim$3,048 (11-relation schema).
+
+Step 3 (\texttt{num\_layers=3}, \texttt{use\_residual=true}, attention fusion, exact ports 0--1023 + 32 tail buckets): 622,482 params total (encoders 86,034 + 3$\times$136,576 relation-conv + 3$\times$42,240 fusion; vocab PROTOCOL 5 / L7 239). 1-layer nominal is 264,850 with 156,562 gradient-reachable (40.9\% unreachable); all 3-layer params are reachable.
+
+Training config (\texttt{configs/train.yaml}): hidden 64, attn 128, lr 0.001, 5 epochs/task, 1 warmup epoch, batch 8, seeds \{42,1,2\}, replay 200/0.3/uniform, EWC/TRD off.
+
+\section{Main Results}
+Forgetting $F=\frac{1}{T-1}\sum_{i<T}(\max_{t<T}A_{i,t}-A_{i,T})$, $T=6$ (Lopez-Paz \& Ranzato).
+
+\begin{table}[htbp]
+\centering\footnotesize
+\caption{Canonical baseline (3 seeds).}
+\label{tab:baseline}
+\begin{tabular}{lr}
+\toprule
+Metric & Mean $\pm$ Std \\
+\midrule
+Average forgetting & \num{0.081} $\pm$ \num{0.008} \\
+Final avg.\ accuracy & \num{0.902} $\pm$ \num{0.005} \\
+Final avg.\ val accuracy & \num{0.896} $\pm$ \num{0.005} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Per seed (GNN vs.\ Flat+Host, both + replay): s42 0.089/0.896 vs.\ 0.091/0.887; s1 0.082/0.904 vs.\ 0.095/0.879; s2 0.070/0.908 vs.\ 0.129/0.850. Same-sign paired gaps every seed ($-0.025$ forgetting, $+0.030$ acc).
+
+\begin{table}[htbp]
+\centering\footnotesize
+\caption{Seed-42 accuracy matrix from \texttt{forgetting\_matrix.json} (rows: trained up to; cols: evaluated on; \texttt{--} = not stored).}
+\label{tab:matrix}
+\begin{tabular}{lrrrrrr}
+\toprule
+ & T1 & T2 & T3 & T4 & T5 & T6 \\
+\midrule
+T1 & 0.966 & -- & -- & -- & -- & -- \\
+T2 & 0.972 & 0.956 & -- & -- & -- & -- \\
+T3 & 0.953 & 0.944 & 0.937 & -- & -- & -- \\
+T4 & 0.918 & 0.933 & 0.827 & 0.969 & -- & -- \\
+T5 & 0.846 & 0.914 & 0.847 & 0.799 & 0.992 & -- \\
+T6 & 0.915 & 0.944 & 0.816 & 0.748 & 0.962 & 0.990 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering\footnotesize
+\caption{Seed-42 final vs.\ peak per task (full precision; rounded).}
+\label{tab:peak}
+\begin{tabular}{lrrrr}
+\toprule
+Task & Final & Peak (at) & Drop \\
+\midrule
+T1 Scanning & 0.915 & 0.972 (T2) & 0.058 \\
+T2 Recon & 0.944 & 0.956 (T2) & 0.013 \\
+T3 DDoS+Infil & 0.816 & 0.937 (T3) & 0.120 \\
+T4 DoS+Inj & 0.748 & 0.969 (T4) & 0.222 \\
+T5 Pass+Bot & 0.962 & 0.992 (T5) & 0.031 \\
+T6 XSS+BF & 0.990 & 0.990 (T6) & 0.000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+Seed-42 forgetting is \num{0.089}; Task 4 drives it. Incremental per-task drops recomputed from artifacts: after T6: 0.058/0.013/0.120/0.222/0.031. Pooled final per-class F1 (as-reported; \texttt{eval/} absent from checkout): macro 0.867, all 11 classes non-zero.
+
+\section{Ablations and Methods}
+Architecture ladder (+ replay, 3 seeds; reachable params, current vocab): Flat 0.209/0.739 (265,058); Flat+Host 0.105/0.872 (264,914); Flat+Host matched 0.145/0.832 (156,577); GNN-1L attn 0.174/0.774 (156,562); GNN-1L concat 0.251/0.691; GNN-2L residual 0.115/0.851 (443,666); \textbf{GNN-3L residual 0.081/0.902 (622,482)}. Depth/capacity study, not parameter-matched.
+
+1-layer CL methods: fine-tune 0.693/0.364; EWC 0.669/0.378 (null; 97.8\% Fisher mass in shared params); TRD-uniform 0.651/0.390, transfer 0.647/0.394, \textbf{inverse 0.630/0.411} (meaningful vs.\ uniform), drift 0.689/0.363 (null); \textbf{replay 0.202/0.764}; replay+TRD worse (0.211/0.731).
+
+Forward transfer (B1 LOTO, 3-epoch next-task fine-tune, mean AULC): T1$\to$T2 0.288, T2$\to$T3 0.403, T3$\to$T4 0.187, T4$\to$T5 0.053, T5$\to$T6 0.080 (mean 0.202). Counterfactual relation-reset: \texttt{targeted\_by} positive on all 5 transitions both seeds (s42 mean +0.0116, s1 +0.0082); static predictors (cosine/drift/gradient) do not replicate across seeds.
+
+Cross-dataset: Dataset A accuracy \num{0.0008} (BoT DDoS$\to$Recon 99.3\%); Dataset B collapses to 1--2 known classes (median softmax $\ge$0.89). Replay budget: GNN 25 / Flat+Host 100 selected on val (canonical 3-layer runs use 200). TRD $\lambda_d=0.25$ on val. Joint reference (s42): 0.876 acc / 0.842 macro-F1 (different schedule; not an upper bound).
+
+\section{Reproducibility}
+Seeds 42/1/2 (\texttt{seed\_everything}); PyTorch 2.14.0+cu130, RTX 3050. \texttt{python -m trench\_ids.cl.train model.num\_layers=3 model.use\_residual=true replay.enabled=true ewc.lambda\_r=0 ewc.lambda\_s=0 ewc.lambda\_u=0 train.warmup\_epochs=1 train.seed=42 paths.out\_dir=runs/gnn\_3layer\_residual\_s42} (repeat s1/s2). Metrics in \texttt{runs/\textless name\textgreater/summary.json} + \texttt{forgetting\_matrix.json}. Headline: replay cuts forgetting to \textbf{0.081 $\pm$ 0.008}; EWC/TRD variants, TCTRL/RFR/FACT, and cross-dataset generalization are documented negative results.
+
+\end{document}

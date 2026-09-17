@@ -1,0 +1,92 @@
+{
+  "no_sizes": [
+    [
+      "Scanning"
+    ],
+    [
+      "Reconnaissance"
+    ],
+    [
+      "DDoS",
+      "XSS"
+    ],
+    [
+      "DoS",
+      "Injection"
+    ],
+    [
+      "Password",
+      "Infiltration"
+    ],
+    [
+      "Bot",
+      "BruteForce"
+    ]
+  ],
+  "no_sizes_scores": [
+    0.0,
+    0.0,
+    -0.361,
+    -0.343,
+    -0.457,
+    -0.297
+  ],
+  "with_sizes": [
+    [
+      "Scanning"
+    ],
+    [
+      "Reconnaissance"
+    ],
+    [
+      "DDoS",
+      "Infiltration"
+    ],
+    [
+      "XSS",
+      "BruteForce"
+    ],
+    [
+      "DoS",
+      "Injection"
+    ],
+    [
+      "Password",
+      "Bot"
+    ]
+  ],
+  "with_sizes_scores": [
+    0.0,
+    0.0,
+    -0.462,
+    -0.39,
+    -0.343,
+    -0.046
+  ],
+  "locked": {
+    "1": [
+      "Scanning"
+    ],
+    "2": [
+      "Reconnaissance"
+    ],
+    "3": [
+      "DDoS",
+      "Infiltration"
+    ],
+    "4": [
+      "DoS",
+      "Injection"
+    ],
+    "5": [
+      "Password",
+      "Bot"
+    ],
+    "6": [
+      "XSS",
+      "BruteForce"
+    ]
+  },
+  "with_sizes_matches_locked": true,
+  "no_sizes_matches_locked": false
+}

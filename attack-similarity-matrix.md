@@ -79,7 +79,7 @@ Regenerate with: `.venv/Scripts/python.exe -m trench_ids.similarity --config con
 | 44 | BruteForce | Infiltration | -0.516 |
 | 45 | Scanning | BruteForce | -0.532 |
 
-**XSS + Infiltration (0.707) is the single highest cosine pair in the whole matrix**, followed by Scanning + Reconnaissance (0.628) and Password + Injection (0.468). Both of the top two pairs land in different, non-adjacent tasks in the locked design (T3 vs. T4, T1 vs. T2 respectively) — see the task table below — giving the transferability-estimation module (Step 5) substantially more signal than the prior 6-class design's single positive pair (Password+Injection, 0.420).
+**XSS + Infiltration (0.707) is the single highest cosine pair in the whole matrix**, followed by Scanning + Reconnaissance (0.628) and Password + Injection (0.468). Both of the top two pairs land in different, non-adjacent tasks in the locked design (T6 vs. T3, T1 vs. T2 respectively) — see the task table below — giving the transferability-estimation module (Step 5) substantially more signal than the prior 6-class design's single positive pair (Password+Injection, 0.420).
 
 ## Threshold scan (0.15–0.55)
 
@@ -91,25 +91,9 @@ Isolate-and-bundle grouping recomputed at each threshold (`trench_ids.task_desig
 | 0.17 | 6 | Scanning \| Reconnaissance \| Infiltration \| XSS+Password+DDoS \| DoS+Injection \| Bot+BruteForce |
 | 0.19 | 6 | Scanning \| Reconnaissance \| Infiltration \| XSS+Password+DDoS \| DoS+Injection \| Bot+BruteForce |
 | **0.21** | 6 | **Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce** |
-| 0.23 | 6 | Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce |
-| 0.25 | 6 | Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce |
-| 0.27 | 6 | Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce |
-| 0.29 | 6 | Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce |
-| 0.31 | 6 | Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce |
-| 0.33 | 6 | Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce |
-| **0.35** | 6 | **Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce** *(locked design threshold)* |
-| 0.37 | 6 | Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce |
-| 0.39 | 6 | Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce |
-| 0.41 | 6 | Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce |
-| 0.43 | 6 | Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce |
-| 0.45 | 6 | Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce |
-| 0.47 | 6 | Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce |
-| 0.49 | 6 | Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce |
-| 0.51 | 6 | Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce |
-| 0.53 | 6 | Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce |
-| 0.55 | 6 | Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce |
+| 0.23–0.55 | 6 | Scanning \| Reconnaissance \| XSS+DDoS \| Password+Infiltration \| DoS+Injection \| Bot+BruteForce |
 
-Below 0.21 (0.15–0.19), Scanning, Reconnaissance, and Infiltration form a 3-way conflict clique (all three pairwise above threshold: Scanning↔Reconnaissance 0.628, Scanning↔Infiltration 0.401, Reconnaissance↔Infiltration 0.197) and are each isolated into singleton tasks, forcing the remaining 7 classes into an odd-sized group (one triple, XSS+Password+DDoS, plus two pairs). At 0.21 and above, Reconnaissance↔Infiltration (0.197) and DDoS↔Bot (0.193) drop below threshold, breaking that triangle — Scanning↔Reconnaissance (0.628) is now the only surviving 2-clique, so only Scanning and Reconnaissance are isolated, and Infiltration rejoins the pairing pool (pairing with Password, since XSS↔Infiltration at 0.707 is still far above threshold and must stay split). This is why the locked design threshold (0.35) sits well inside the stable 0.21–0.55 band rather than at its edge.
+**Note:** the threshold scan above shows the raw minimum-weight grouping (`sizes=None` in `task_design.min_weight_grouping`), i.e.\ total-similarity-only optimization. The **locked design** uses the size-aware tie-break (`sizes=class_counts`), which among equally-balanced valid pairings picks the option minimizing the largest task's size: T3=DDoS+Infiltration (−0.462), T4=DoS+Injection (−0.343), T5=Password+Bot (−0.046), T6=XSS+BruteForce (−0.390). See `docs/dataset-plan.md` §2.2 and `src/trench_ids/task_design.py` `min_weight_grouping(..., sizes=...)`.
 
 ## Task assignment (from `src/trench_ids/labels.py`, τ = 0.35)
 
@@ -117,9 +101,9 @@ Below 0.21 (0.15–0.19), Scanning, Reconnaissance, and Infiltration form a 3-wa
 |---|---|---|---|
 | T1 | Scanning | — (isolated) | ToN |
 | T2 | Reconnaissance | — (isolated) | BoT |
-| T3 | XSS + DDoS | −0.361 | ToN, CSE |
-| T4 | Password + Infiltration | −0.457 | ToN, CSE |
-| T5 | DoS + Injection | −0.343 | ToN, CSE |
-| T6 | Bot + BruteForce | −0.297 | CSE |
+| T3 | DDoS + Infiltration | −0.462 | ToN, CSE |
+| T4 | DoS + Injection | −0.343 | ToN, CSE |
+| T5 | Password + Bot | −0.046 | ToN, CSE |
+| T6 | XSS + BruteForce | −0.390 | ToN, CSE |
 
 If you want to manually override any grouping, use the matrix above to check the new grouping doesn't reintroduce a high-similarity co-location — then update `CANONICAL_TO_TASK` / `TASK_THEMES` / `TASK_DATASETS` in `labels.py` (and rerun `trench-preprocess`) to match.

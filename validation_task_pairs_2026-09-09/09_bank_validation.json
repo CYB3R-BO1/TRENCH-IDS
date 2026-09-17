@@ -1,0 +1,15 @@
+{
+  "bank_classes": [
+    "Bot",
+    "BruteForce",
+    "DDoS",
+    "DoS",
+    "Infiltration",
+    "Injection",
+    "Password",
+    "Reconnaissance",
+    "Scanning",
+    "XSS"
+  ],
+  "matches_locked": true
+}

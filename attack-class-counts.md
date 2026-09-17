@@ -26,19 +26,15 @@ task, not a task/class under consideration for the similarity analysis).
 | 1 | Scanning | ToN | 3,781,419 | T1 |
 | 2 | DDoS | ToN, CSE | 3,416,504 | T3 |
 | 3 | Reconnaissance | BoT | 2,620,999 | T2 |
-| 4 | XSS | ToN | 2,455,020 | T3 |
-| 5 | DoS | ToN, CSE | 1,196,608 | T5 |
-| 6 | Password | ToN | 1,153,323 | T4 |
-| 7 | Injection | ToN, CSE | 684,897 | T5 |
-| 8 | Bot | CSE | 143,097 | T6 |
+| 4 | XSS | ToN | 2,455,020 | T6 |
+| 5 | DoS | ToN, CSE | 1,196,608 | T4 |
+| 6 | Password | ToN | 1,153,323 | T5 |
+| 7 | Injection | ToN, CSE | 684,897 | T4 |
+| 8 | Bot | CSE | 143,097 | T5 |
 | 9 | BruteForce | CSE | 120,912 | T6 |
-| 10 | Infiltration | CSE | 116,361 | T4 |
+| 10 | Infiltration | CSE | 116,361 | T3 |
 
-**Total (10-class candidate pool, per-dataset-restricted):** 15,689,140. This is the source of the
-"~15.7M attack rows, uncapped" scale-up figure in `docs/dataset-plan.md` §3.3 - removing
-`attack_per_class_cap` (see `docs/superpowers/specs/2026-07-13-dataset-task-respec-design.md` §3)
-means Step 1 now keeps every one of these rows in full, rather than Bernoulli-subsampling the
-abundant classes down to a cap.
+**Total (10-class candidate pool, per-dataset-restricted):** 15,689,140 raw CSV rows. Under the current quota-based design (`configs/preprocess.yaml`, `attack_per_task=390000`, `benign_per_task=130000`), ~2.34M attack rows are sampled across 6 tasks (~520K rows each). Previously (superseded) the pipeline kept all 15.7M raw rows with only 8,000 benign/task, causing the defects described in `docs/methodology-2026-08-17.md` §0.
 
 Dropped classes and their (unrestricted-count) reference values, for completeness - not part of the
 candidate pool:
@@ -72,7 +68,7 @@ samples for a stratified train/val/test split" bar. Reasoning:
   0.30-0.40.
 - The pool spans a much wider range of similarity behavior than the 6-class pool did: the highest
   cosine pair in the whole matrix is XSS<->Infiltration (0.706), landing in different, non-adjacent
-  tasks (T3 vs. T4); the second-highest is Scanning<->Reconnaissance (0.628), also isolated from
+  tasks (T6 vs. T3); the second-highest is Scanning<->Reconnaissance (0.628), also isolated from
   each other (T1 vs. T2) - giving the transferability-estimation module (Step 5) much more signal to
   detect than the prior design's single positive pair (Password+Injection, 0.420).
 
@@ -92,7 +88,7 @@ train/val/test" bar - an order of magnitude below the other seven, but still far
 per-class sample floor (5,000 for the similarity analysis; well over 100K for the full task itself).
 Including them is a **benchmark-richness decision, not a data change**: nothing about these three
 classes' counts moved between the two designs - only the professor's complexity-vs-richness guidance
-did. Including them also completes a sixth task (Bot + BruteForce, T6) and keeps the isolate-and-
+did. Including them also completes a sixth task (XSS + BruteForce, T6) and keeps the isolate-and-
 bundle grouping's stable threshold band wide (0.21-0.55) rather than narrow.
 
 ## Why UNSW-NB15 is excluded

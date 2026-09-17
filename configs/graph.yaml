@@ -13,7 +13,7 @@ paths:
 graph_size: 300
 
 sampling:
-  # Attack:benign ratio applied per split, before mini-graph chunking (a
+  # Attack-to-benign ratio applied per split, before mini-graph chunking (a
   # Step 2 concern -- configs/preprocess.yaml's benign_per_task is just a
   # Step 1 pool-size safeguard, not the final ratio graphs see). Sweep
   # candidates: 2.0, 3.0, 4.0 -- rerun with a different value + a different
@@ -21,7 +21,8 @@ sampling:
   # final value from CL performance once Step 3 exists (see design spec
   # §3a). When a split's pooled benign rows can't cover the target, benign
   # rows are reused (sampled with replacement) rather than capped.
-  benign_ratio: 3.0
+  # Value = attack rows per 1 benign row (e.g., 3.0 means 3 attack : 1 benign)
+  attack_benign_ratio: 3.0
 
   # Safety cap on task-size imbalance: any task whose total graph count
   # (train+val+test) exceeds max_task_ratio times the smallest task's total
@@ -31,7 +32,7 @@ sampling:
   # finalization-design.md) already achieves a ~2.9x natural largest-to-
   # smallest ratio, so this is expected to be a no-op under the current
   # design -- it exists as a safeguard against future imbalance (a
-  # different graph_size, benign_ratio, or task redesign), not as an active
+  # different graph_size, attack_benign_ratio, or task redesign), not as an active
   # balancing step now.
   max_task_ratio: 3.0
 

@@ -85,5 +85,16 @@ def vocab_fingerprint(vocab: dict[str, dict[str, int]]) -> str:
     instead of silently mapping a Protocol/Service value to the wrong
     embedding row.
     """
-    canonical = json.dumps(vocab, sort_keys=True)
+    # Convert Path objects to strings for JSON serialization
+    def convert_paths(obj):
+        if isinstance(obj, dict):
+            return {str(k): convert_paths(v) for k, v in obj.items()}
+        elif isinstance(obj, Path):
+            return str(obj)
+        elif isinstance(obj, (list, tuple)):
+            return [convert_paths(v) for v in obj]
+        else:
+            return obj
+    
+    canonical = json.dumps(convert_paths(vocab), sort_keys=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]

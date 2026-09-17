@@ -192,10 +192,6 @@ def main() -> None:
 
     label_names = canonical_classes()
 
-    sample_graph = torch.load(
-        graphs_dir / "task_1_train.pt", weights_only=False
-    )[0]
-
     ablation_results: dict[str, Any] = {}
     all_s_r: list[float] = []
     all_macro_f1_drops: list[float] = []
@@ -225,8 +221,6 @@ def main() -> None:
             s_r_dict.keys(), key=lambda r: s_r_dict[r], reverse=True
         )
         print(f"[task {task}] S_r ranking: {[(r, s_r_dict[r]) for r in ranked_relations]}")
-
-        old_task_indices = list(range(1, task))
 
         print(f"[task {task}] Computing baseline on old tasks 1..{task-1}...")
         baseline_old = compute_old_task_aggregates(

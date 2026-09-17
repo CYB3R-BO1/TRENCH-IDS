@@ -1,0 +1,67 @@
+# Step 2 — No-Cap heterogeneous graph construction config.
+# Reads from data/no-cap/processed, writes to data/no-cap/graphs.
+# max_task_ratio: 999 disables downsampling — accepts natural task-size imbalance.
+# ISOLATED from main benchmark.
+
+paths:
+  processed_dir: data/no-cap/processed
+  out_dir: data/no-cap/graphs
+  vocab_path: data/no-cap/graphs/vocab.json
+
+# Each task's train/val/test rows are chunked into mini-graphs of at most this many flows.
+graph_size: 300
+
+sampling:
+  # Attack-to-benign ratio applied per split before mini-graph chunking.
+  # Used by Step 2 benign selector (_select_benign).
+  attack_benign_ratio: 3.0
+
+  # DISABLE downsampling — accept natural task-size imbalance.
+  # The current similarity-driven task assignment yields ~2.9x largest-to-smallest.
+  # Setting this very high ensures no task is trimmed.
+  max_task_ratio: 999
+
+# Rows within each split are shuffled (seeded) before chunking.
+seed: 42
+
+# The 37 flow-statistic features (same set used for the similarity analysis in
+# configs/similarity.yaml — excludes the 4 identifier fields + PROTOCOL +
+# L7_PROTO, which become node identity instead of Flow features).
+features:
+  - IN_BYTES
+  - IN_PKTS
+  - OUT_BYTES
+  - OUT_PKTS
+  - TCP_FLAGS
+  - CLIENT_TCP_FLAGS
+  - SERVER_TCP_FLAGS
+  - FLOW_DURATION_MILLISECONDS
+  - DURATION_IN
+  - DURATION_OUT
+  - MIN_TTL
+  - MAX_TTL
+  - LONGEST_FLOW_PKT
+  - SHORTEST_FLOW_PKT
+  - MIN_IP_PKT_LEN
+  - MAX_IP_PKT_LEN
+  - SRC_TO_DST_SECOND_BYTES
+  - DST_TO_SRC_SECOND_BYTES
+  - RETRANSMITTED_IN_BYTES
+  - RETRANSMITTED_IN_PKTS
+  - RETRANSMITTED_OUT_BYTES
+  - RETRANSMITTED_OUT_PKTS
+  - SRC_TO_DST_AVG_THROUGHPUT
+  - DST_TO_SRC_AVG_THROUGHPUT
+  - NUM_PKTS_UP_TO_128_BYTES
+  - NUM_PKTS_128_TO_256_BYTES
+  - NUM_PKTS_256_TO_512_BYTES
+  - NUM_PKTS_512_TO_1024_BYTES
+  - NUM_PKTS_1024_TO_1514_BYTES
+  - TCP_WIN_MAX_IN
+  - TCP_WIN_MAX_OUT
+  - ICMP_TYPE
+  - ICMP_IPV4_TYPE
+  - DNS_QUERY_ID
+  - DNS_QUERY_TYPE
+  - DNS_TTL_ANSWER
+  - FTP_COMMAND_RET_CODE

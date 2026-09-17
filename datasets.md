@@ -165,13 +165,13 @@ The raw `Attack` strings are inconsistent across datasets (case, spelling, granu
 | Benign | -(all tasks) | -(all tasks) | `Benign` (ToN, CSE, BoT) -shared negative class, injected fresh into every task from that task's own contributing dataset(s); not a task of its own |
 | Scanning | ToN | T1 | ToN `scanning` |
 | Reconnaissance | BoT | T2 | BoT `Reconnaissance` |
-| XSS | ToN | T3 | ToN `xss` |
 | DDoS | ToN, CSE | T3 | ToN `ddos`; CSE `DDoS attacks-LOIC-HTTP`, `DDOS attack-HOIC`, `DDOS attack-LOIC-UDP`. **Not** BoT's own `DDoS` rows -- `RAW_TO_CANONICAL` maps BoT's raw `DDoS` string to the same canonical `DDoS` class, but `CLASS_DATASETS` restricts the DDoS *class's* sanctioned sources to `{ToN, CSE}`, so BoT's 18,331,847 `DDoS`-labeled rows are excluded from this class (they'd otherwise dwarf ToN+CSE's combined 3,416,504). |
-| Password | ToN | T4 | ToN `password` |
-| Infiltration | CSE | T4 | CSE `Infilteration` *(sic)* |
-| DoS | ToN, CSE | T5 | ToN `dos`; CSE `DoS attacks-Hulk`, `DoS attacks-GoldenEye`, `DoS attacks-SlowHTTPTest`, `DoS attacks-Slowloris`. **Not** BoT's own `DoS` rows -- same `CLASS_DATASETS` restriction as DDoS above (BoT's 16,673,183 `DoS`-labeled rows excluded). |
-| Injection | ToN, CSE | T5 | ToN `injection`; CSE `SQL Injection` |
-| Bot | CSE | T6 | CSE `Bot` |
+| Infiltration | CSE | T3 | CSE `Infilteration` *(sic)* |
+| XSS | ToN | T6 | ToN `xss` |
+| DoS | ToN, CSE | T4 | ToN `dos`; CSE `DoS attacks-Hulk`, `DoS attacks-GoldenEye`, `DoS attacks-SlowHTTPTest`, `DoS attacks-Slowloris`. **Not** BoT's own `DoS` rows -- same `CLASS_DATASETS` restriction as DDoS above (BoT's 16,673,183 `DoS`-labeled rows excluded). |
+| Injection | ToN, CSE | T4 | ToN `injection`; CSE `SQL Injection` |
+| Password | ToN | T5 | ToN `password` |
+| Bot | CSE | T5 | CSE `Bot` |
 | BruteForce | CSE | T6 | CSE `FTP-BruteForce`, `SSH-Bruteforce` |
 | Backdoor | -(dropped) | -(dropped) | ToN `backdoor` -below the candidate-pool floor; see dataset-plan.md §2 |
 | MITM | -(dropped) | -(dropped) | ToN `mitm` -below floor |
@@ -181,24 +181,24 @@ The raw `Attack` strings are inconsistent across datasets (case, spelling, granu
 
 Exploits, Fuzzers, Generic, Analysis, Shellcode, Worms are UNSW-NB15-only classes and don't appear in any retained dataset -- see §3.1 (kept as reference; NF-UNSW-NB15-v2 is not part of the active pipeline).
 
-> **Design note.** Task assignment is **isolate-and-bundle** (dataset-plan.md §2.2): classes forming a mutual "conflict clique" (every pair above a similarity threshold) cannot avoid a conflicting co-location no matter how they're split, so each gets its own singleton task. For this 10-class pool at threshold 0.35, **{Scanning} and {Reconnaissance} are the max conflict clique** and are each isolated into singleton tasks; the remaining eight classes pair off via minimum-weight matching (XSS+DDoS, Password+Infiltration, DoS+Injection, Bot+BruteForce). Stable across thresholds 0.21-0.55 -- see `docs/attack-similarity-matrix.md`.
+> **Design note.** Task assignment is **isolate-and-bundle** (dataset-plan.md §2.2): classes forming a mutual "conflict clique" (every pair above a similarity threshold) cannot avoid a conflicting co-location no matter how they're split, so each gets its own singleton task. For this 10-class pool at threshold 0.35, **{Scanning} and {Reconnaissance} are the max conflict clique** and are each isolated into singleton tasks; the remaining eight classes pair off via minimum-weight matching with a size-aware tie-break (minimizing the largest task's size), yielding T3=DDoS+Infiltration, T4=DoS+Injection, T5=Password+Bot, T6=XSS+BruteForce. Stable across thresholds 0.21-0.55 -- see `docs/attack-similarity-matrix.md`.
 >
-> **No benign-only task.** Benign has no task of its own -it is present in every task as the negative class (see §5 step 5). A standalone single-class benign task is degenerate for a classifier and was dropped.
+> **No benign-only task.** Benign has no task of its own -it is present in every task as the negative class (see §5 step 6). A standalone single-class benign task is degenerate for a classifier and was dropped.
 >
 > **Below-floor classes dropped.** Backdoor, MITM, Ransomware (ToN), Web Attacks (CSE), Theft (BoT) fall below the candidate-pool floor (2,431-16,809 vs. the ~116K-3.8M range of the kept ten -- see dataset-plan.md §2.1) and are dropped from all tasks. All still map canonically (so label normalization never fails) but are filtered out during preprocessing (`EXCLUDED_CLASSES` in `labels.py`). Note Bot, BruteForce, and Infiltration are **not** in this dropped list -- unlike the prior 2-dataset design, they're now part of the active candidate pool (see dataset-plan.md §2.1's reversal note).
 
 ### Continual-learning task table
 
-Authoritative task design is **dataset-plan.md §2.2**; this mirrors it. Benign is present in **every** task (fresh per-task subset, §5 step 5); the table lists each task's *attack* classes.
+Authoritative task design is **dataset-plan.md §2.2**; this mirrors it. Benign is present in **every** task (fresh per-task subset, §5 step 6); the table lists each task's *attack* classes.
 
 | Task | Attack classes | Max intra-task cosine similarity | Contributing datasets |
 |---|---|---|---|
 | T1 | Scanning | -(isolated) | ToN |
 | T2 | Reconnaissance | -(isolated) | BoT |
-| T3 | XSS, DDoS | -0.361 | ToN, CSE |
-| T4 | Password, Infiltration | -0.457 | ToN, CSE |
-| T5 | DoS, Injection | -0.343 | ToN, CSE |
-| T6 | Bot, BruteForce | -0.297 | CSE |
+| T3 | DDoS, Infiltration | -0.462 | ToN, CSE |
+| T4 | DoS, Injection | -0.343 | ToN, CSE |
+| T5 | Password, Bot | -0.046 | ToN, CSE |
+| T6 | XSS, BruteForce | -0.390 | ToN, CSE |
 
 ---
 
@@ -216,7 +216,7 @@ This is the concrete pipeline that turns the three raw CSVs into task-partitione
 
 5. **Separate feature roles.** Reserve the 4 identifier fields (`IPV4_SRC_ADDR`, `IPV4_DST_ADDR`, `L4_SRC_PORT`, `L4_DST_PORT`) + `PROTOCOL` + `L7_PROTO` for graph-node construction (Step 2); keep the 37 flow-statistic features as the numeric Flow vector. Do **not** feed raw IP/port as numeric model inputs.
 
-6. **Per-task benign sampling.** For each task, draw a **fresh** benign subset from the *same dataset(s)* that contribute that task's attack classes (not one shared benign pool) -- T1 draws only from ToN, T2 only from BoT, T6 only from CSE; T3/T4/T5 draw from both ToN and CSE. Rationale (dataset-plan.md §2/§3): keeps traffic distribution consistent within a task and isolates attack-pattern forgetting from benign-distribution forgetting during CL evaluation. `benign_per_dataset_cap`/`benign_per_task` (`configs/preprocess.yaml`) remain Step 1 pool-size safeguards -- they are no longer what determines the final attack:benign ratio a task's graphs see; that's now a Step 2 concern (`configs/graph.yaml: sampling.benign_ratio`, see dataset-plan.md §3.3).
+6. **Per-task benign sampling.** For each task, draw a **fresh** benign subset from the *same dataset(s)* that contribute that task's attack classes (not one shared benign pool) -- T1 draws only from ToN, T2 only from BoT, T3/T4/T5/T6 draw from both ToN and CSE. Rationale (dataset-plan.md §2/§3): keeps traffic distribution consistent within a task and isolates attack-pattern forgetting from benign-distribution forgetting during CL evaluation. `benign_per_dataset_cap`/`benign_per_task` (`configs/preprocess.yaml`) remain Step 1 pool-size safeguards -- they are no longer what determines the final attack:benign ratio a task's graphs see; that's now a Step 2 concern (`configs/graph.yaml: sampling.benign_ratio`, see dataset-plan.md §3.3).
 
 7. **Clean: dedup.** Drop exact-duplicate flow records (identical across all original NetFlow columns) from the per-task frame (`dedup: true`).
 
@@ -226,14 +226,14 @@ This is the concrete pipeline that turns the three raw CSVs into task-partitione
 
 > **Normalization (deferred to Step 2).** dataset-plan.md §2 specifies **global** normalization statistics, computed once from the full training pool across all datasets (not per-dataset) to avoid dataset-identity shortcuts. Step 1 stores raw features; the global scaler is fit on the pooled train split and applied when the Flow-node feature vector is assembled in Step 2 (keeps the fit-on-train, leak-safe property while matching the graph-build stage).
 
-> **Scale-up from cap removal.** Removing `attack_per_class_cap` grows Step 1's attack-row output from the prior design's low-hundred-thousands to **~15.7M rows** (sum of the 10-class pool in `docs/attack-class-counts.md`, minus the held-out val/test share). Step 2's mini-graph count and `.pt` file sizes grow proportionally -- flagged, not fully resolved: see dataset-plan.md §3.3.
+> **Quota-based sampling (replaced scale-up).** `preprocess.compute_quotas` plans the entire sample before reading rows: `attack_per_task=390000` waterfilled across classes and source datasets, `benign_per_task=130000` drawn disjointly per task. Every task produces exactly ~520K rows. Peak memory bounded by the plan (~3.1M rows) rather than the raw data (~15.7M attack rows). See `docs/methodology-2026-08-17.md` §1.1.
 
 ### Resolved preprocessing decisions (implemented in `configs/preprocess.yaml`)
 - **Per-class cap:** none -- `attack_per_class_cap` has been removed; every row passing the `CLASS_DATASETS`/`EXCLUDED_CLASSES` filters is kept in full. Class-level balancing is now a Step 2 concern (`sampling.benign_ratio`; DoS/DDoS-style downsampling still pending, to operate on constructed graphs -- see dataset-plan.md §3.3).
-- **Benign per task:** `benign_per_task: 8000`, drawn from each task's contributing datasets (`benign_per_dataset_cap: 60000` pool per dataset).
+- **Benign per task:** `benign_per_task: 130000`, drawn disjointly from each task's contributing datasets (ceiling: NF-BoT-IoT-v2's 135,037 total benign rows).
 - **Dedup:** `dedup: true`.
 - **Output granularity:** one Parquet per task; provenance retained via the `source_dataset` column; flow identity retained via `flow_id`.
-- **Excluded classes:** Backdoor, MITM, Ransomware, Web Attacks, Theft (`EXCLUDED_CLASSES` in `labels.py`). Bot, BruteForce, and Infiltration are **no longer excluded** -- they're part of the active 10-class candidate pool (task T6 / T4).
+- **Excluded classes:** Backdoor, MITM, Ransomware, Web Attacks, Theft (`EXCLUDED_CLASSES` in `labels.py`). Bot, BruteForce, and Infiltration are **no longer excluded** -- they're part of the active 10-class candidate pool (T3 Infiltration, T5 Bot, T6 BruteForce).
 
 ---
 

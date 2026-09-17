@@ -226,7 +226,7 @@ def compute_quotas(
 
     1. **No benign reuse.** Every task's benign quota is drawn from a
        *disjoint* slice of its datasets' benign rows, and the quota is set
-       so Step 2's ``benign_ratio`` can be met without sampling with
+       so Step 2's ``attack_benign_ratio`` can be met without sampling with
        replacement. Previously ~5,600 unique benign train flows were
        replicated 54-158x to fill the ratio, so ~25% of every reported
        metric rested on a few thousand distinct flows, and 47-72 flow_ids

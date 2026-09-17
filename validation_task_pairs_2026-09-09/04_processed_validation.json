@@ -1,0 +1,123 @@
+{
+  "locked": {
+    "1": [
+      "Scanning"
+    ],
+    "2": [
+      "Reconnaissance"
+    ],
+    "3": [
+      "DDoS",
+      "Infiltration"
+    ],
+    "4": [
+      "DoS",
+      "Injection"
+    ],
+    "5": [
+      "Bot",
+      "Password"
+    ],
+    "6": [
+      "BruteForce",
+      "XSS"
+    ]
+  },
+  "tasks": {
+    "1": {
+      "n_rows": 519999,
+      "attack_classes": [
+        "Scanning"
+      ],
+      "task_ids": [
+        1
+      ],
+      "class_counts": {
+        "Scanning": 390000,
+        "Benign": 129999
+      }
+    },
+    "2": {
+      "n_rows": 519989,
+      "attack_classes": [
+        "Reconnaissance"
+      ],
+      "task_ids": [
+        2
+      ],
+      "class_counts": {
+        "Reconnaissance": 390000,
+        "Benign": 129989
+      }
+    },
+    "3": {
+      "n_rows": 519439,
+      "attack_classes": [
+        "DDoS",
+        "Infiltration"
+      ],
+      "task_ids": [
+        3
+      ],
+      "class_counts": {
+        "DDoS": 273636,
+        "Benign": 129999,
+        "Infiltration": 115804
+      }
+    },
+    "4": {
+      "n_rows": 519995,
+      "attack_classes": [
+        "DoS",
+        "Injection"
+      ],
+      "task_ids": [
+        4
+      ],
+      "class_counts": {
+        "DoS": 195000,
+        "Injection": 195000,
+        "Benign": 129995
+      }
+    },
+    "5": {
+      "n_rows": 519999,
+      "attack_classes": [
+        "Bot",
+        "Password"
+      ],
+      "task_ids": [
+        5
+      ],
+      "class_counts": {
+        "Password": 246903,
+        "Bot": 143097,
+        "Benign": 129999
+      }
+    },
+    "6": {
+      "n_rows": 519997,
+      "attack_classes": [
+        "BruteForce",
+        "XSS"
+      ],
+      "task_ids": [
+        6
+      ],
+      "class_counts": {
+        "XSS": 269088,
+        "Benign": 129997,
+        "BruteForce": 120912
+      }
+    }
+  },
+  "mismatches": [],
+  "manifest_themes": {
+    "1": "Scanning",
+    "2": "Reconnaissance",
+    "3": "DDoS + Infiltration",
+    "4": "DoS + Injection",
+    "5": "Password + Bot",
+    "6": "XSS + BruteForce"
+  }
+}
