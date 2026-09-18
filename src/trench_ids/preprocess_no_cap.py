@@ -251,10 +251,10 @@ def pass2_sample(
     benign_counts: Counter,
     quotas: dict[str, Any],
     rng: np.random.Generator,
-) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+) -> tuple[dict[int, Path | None], dict[str, pd.DataFrame], Counter]:
     """Stream full rows a second time, keeping exactly the planned quota.
 
-    For attack rows: keep ALL available rows (no sampling).
+    For attack rows: keep ALL available rows (no sampling), write per-task parquet files incrementally.
     For benign rows: keep exactly the allocated quota per dataset.
     """
     raw_dir = Path(cfg["paths"]["raw_dir"])
@@ -269,7 +269,10 @@ def pass2_sample(
     }
     seen_benign: Counter = Counter()
 
-    attack_parts: list[pd.DataFrame] = []
+    # Track per-task attack parts for incremental writing
+    attack_parts_by_task: dict[int, list[pd.DataFrame]] = {t: [] for t in sorted(TASK_THEMES)}
+    # Track total rows per task for manifest reporting
+    task_attack_counts: Counter = Counter()
     benign_parts: dict[str, list[pd.DataFrame]] = {code: [] for code in cfg["datasets"].values()}
 
     _log_rss("pass2: start")
@@ -313,22 +316,41 @@ def pass2_sample(
                 if cls == BENIGN:
                     benign_parts[code].append(kept)
                 else:
-                    attack_parts.append(kept)
+                    task_id = task_of[cls]
+                    attack_parts_by_task[task_id].append(kept)
 
-    _log_rss("pass2: before attacks concat")
-    attacks = pd.concat(attack_parts, ignore_index=True) if attack_parts else pd.DataFrame()
-    del attack_parts
-    if not attacks.empty:
-        attacks["task"] = attacks["canonical_label"].map(task_of).astype(int)
-    _log_rss("pass2: after attacks concat")
+    _log_rss("pass2: streaming complete, writing per-task attack parquets")
+    # Write per-task attack parquets incrementally
+    attack_parquet_paths: dict[int, Path | None] = {}
+    out_dir = Path(cfg["paths"]["out_dir"])
+    for task_id in sorted(TASK_THEMES):
+        parts = attack_parts_by_task.get(task_id, [])
+        if parts:
+            task_df = pd.concat(parts, ignore_index=True)
+            task_df["task"] = task_id
+            path = out_dir / f"task_{task_id}_attacks.parquet"
+            task_df.to_parquet(path, index=False)
+            attack_parquet_paths[task_id] = path
+            del parts, task_df  # free memory
+        else:
+            attack_parquet_paths[task_id] = None
+    _log_rss("pass2: after attack parquet writes")
 
+    # Benign pools (unchanged - small enough)
     benign_pools: dict[str, pd.DataFrame] = {}
     for code, parts in benign_parts.items():
         benign_pools[code] = (
             pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
         )
     _log_rss("pass2: after benign_pools concat")
-    return attacks, benign_pools
+
+    # Compute task_attack_counts from the parts we just wrote
+    task_attack_counts: Counter = Counter()
+    for task_id, path in attack_parquet_paths.items():
+        if path is not None:
+            df = pd.read_parquet(path)
+            task_attack_counts[task_id] = len(df)
+    return attack_parquet_paths, benign_pools, task_attack_counts
 
 
 def _seed_from(rng: np.random.Generator) -> int:
@@ -416,11 +438,12 @@ def _drop_corrupted_rows(
 
 def assemble_tasks(
     cfg: dict[str, Any],
-    attacks: pd.DataFrame,
+    attack_parquet_paths: dict[int, Path | None],
     benign_pools: dict[str, pd.DataFrame],
     original_cols: list[str],
     quotas: dict[str, Any],
     rng: np.random.Generator,
+    task_attack_counts: Counter,
 ) -> dict[str, Any]:
     """Build, split, and write one Parquet per task; return the manifest dict."""
     out_dir = Path(cfg["paths"]["out_dir"])
@@ -449,7 +472,8 @@ def assemble_tasks(
     }
 
     for task in sorted(TASK_THEMES):
-        atk = attacks[attacks["task"] == task] if not attacks.empty else pd.DataFrame()
+        path = attack_parquet_paths.get(task)
+        atk = pd.read_parquet(path) if path is not None else pd.DataFrame()
         ben = allocator.draw(task, quotas["benign_alloc"].get(task, {}))
         frame = pd.concat([atk, ben], ignore_index=True)
         if frame.empty:
@@ -534,14 +558,18 @@ def run(config_path: str | Path) -> dict[str, Any]:
             flush=True,
         )
 
-    attacks, benign_pools = pass2_sample(cfg, attack_counts, benign_counts, quotas, rng)
+    attack_parquet_paths, benign_pools, task_attack_counts = pass2_sample(
+        cfg, attack_counts, benign_counts, quotas, rng
+    )
     print(
-        f"[pass2] done. sampled attack flows: {len(attacks):,}; "
+        f"[pass2] done. attack parquet paths: {list(attack_parquet_paths.keys())}; "
         f"benign pools: {{ {', '.join(f'{k}:{len(v):,}' for k, v in benign_pools.items())} }}",
         flush=True,
     )
 
-    manifest = assemble_tasks(cfg, attacks, benign_pools, original_cols, quotas, rng)
+    manifest = assemble_tasks(
+        cfg, attack_parquet_paths, benign_pools, original_cols, quotas, rng, task_attack_counts
+    )
     print(f"[done] wrote {len(manifest['tasks'])} task files to {cfg['paths']['out_dir']}")
     return manifest
 
