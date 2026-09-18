@@ -316,7 +316,7 @@ def pass2_sample(
                 if cls == BENIGN:
                     benign_parts[code].append(kept)
                 else:
-                    task_id = task_of[cls]
+                    task_id = task_of(cls)
                     attack_parts_by_task[task_id].append(kept)
 
     _log_rss("pass2: streaming complete, writing per-task attack parquets")
