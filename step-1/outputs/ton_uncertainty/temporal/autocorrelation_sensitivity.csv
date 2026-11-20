@@ -1,0 +1,10 @@
+class,is_primary,raw_first,raw_sustained,detrended_first,detrended_sustained,log1p_first,log1p_sustained
+Backdoor,True,,,77,77,25.0,43.0
+ddos,True,69.0,76.0,21,30,53.0,53.0
+dos,True,20.0,57.0,3,165,28.0,50.0
+injection,True,8.0,8.0,6,30,17.0,17.0
+mitm,False,2.0,10.0,2,10,3.0,25.0
+password,True,76.0,76.0,11,17,27.0,131.0
+ransomware,False,1.0,11.0,1,11,5.0,8.0
+scanning,True,11.0,11.0,11,11,,
+xss,True,19.0,19.0,5,16,7.0,16.0

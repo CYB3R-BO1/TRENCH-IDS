@@ -217,10 +217,38 @@ downsampling.
 - **The injection-password-xss cluster is feasible at every resolution** (all three have
   thousands of >= 5 windows), so it can be tested across window sizes.
 
+### Per-class temporal autocorrelation (`outputs/ton_uncertainty/temporal/`)
+
+Run: `python ton_autocorrelation.py --manifest .../ton_class_contiguous_benignmatched/split_manifest.json
+--out outputs/ton_uncertainty/temporal`. 60 s bins over each class's own training interval (zero
+bins included, outside-period excluded); classes **never concatenated**; >= 30 lags (extended to
+180 if not decayed); detrending + log1p sensitivity.
+
+| class | primary | bins | lag-1 | sustained \|ACF\|<0.2 (raw) | detrended | blocks @30min / @60min |
+| --- | --- | --- | --- | --- | --- | --- |
+| Backdoor | yes | 1,195 | 0.96 | **never (<180)** | 77 | 39 / 19 |
+| ddos | yes | 625 | 0.52 | 76 | 30 | 20 / 10 |
+| dos | yes | 368 | 0.74 | 57 | 165 | 12 / 6 |
+| injection | yes | 189 | 0.52 | 8 | 30 | 6 / 3 |
+| password | yes | 649 | 0.79 | 76 | 17 | 21 / 10 |
+| scanning | yes | 962 | 0.87 | 11 | 11 | 32 / 16 |
+| xss | yes | 335 | 0.68 | 19 | 16 | 11 / 5 |
+| mitm | supp | 100 | 0.26 | 10 | 10 | 3 / 1 |
+| ransomware | supp | 72 | 0.15 | 11 | 11 | 2 / 1 |
+
+- **Estimator-sensitive:** the sustained decay lag ranges ~8-165 min (raw / detrended / log1p),
+  so no single block length is uniquely implied.
+- **Backdoor never decays raw** (lag-1 0.96, still >= 0.2 at 180 lags): its series is strongly
+  non-stationary; detrending brings it to 77 min.
+- Rule-based suggestion = **76 min** (longest sustained among primary classes), but at 60 min
+  blocks injection has only 3 and xss 5 - **30 min** keeps >= 6 blocks for every primary class.
+- Bootstrap (deferred) must resample **within each class's own sequence**; classes do not share
+  contemporaneous blocks.
+
 ### Still to do for ToN
 
-Per-class temporal autocorrelation, then a ToN-specific bootstrap block length, then per-window
-relation distributions and uncertainty - all computed independently (no UNSW 10 s/900 s transfer).
+Select the primary window size and the bootstrap block length, then run per-window relation
+distributions and the bootstrap - independent of UNSW (no 10 s/900 s transfer).
 
 
 ## Design decisions

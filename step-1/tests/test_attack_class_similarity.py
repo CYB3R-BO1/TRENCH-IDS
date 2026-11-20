@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import attack_class_similarity as acs  # noqa: E402
 import feature_schema as fs  # noqa: E402
 import step1_3_uncertainty as u13  # noqa: E402
+import ton_autocorrelation as tacf  # noqa: E402
 import ton_benign_audit as tba  # noqa: E402
 import ton_class_contiguous as tcc  # noqa: E402
 import ton_window_sweep as tws  # noqa: E402
@@ -657,6 +658,23 @@ class TestTonWindowSweep(unittest.TestCase):
         b_test = [r for r in nat if r["class"] == "B" and r["split"] == "test"][0]
         self.assertEqual(b_test["attack_flows"], 2)
         self.assertEqual([r for r in acls if r["class"] == "A" and r["split"] == "train"][0]["windows_class_ge2"], 2)
+
+
+class TestTonAcf(unittest.TestCase):
+    def test_ar1_positive_and_white_near_zero(self):
+        rng = np.random.default_rng(0)
+        x = np.zeros(800); e = rng.normal(size=800)
+        for i in range(1, 800):
+            x[i] = 0.9 * x[i - 1] + e[i]
+        r, _ = tacf._acf(x, 5)
+        self.assertGreater(r[0], 0.5)
+        w, _ = tacf._acf(rng.normal(size=800), 10)
+        self.assertLess(abs(w[0]), 0.2)
+
+    def test_decay_crossing(self):
+        f, s = tacf._decay(np.array([0.9, 0.5, 0.1, 0.05]))
+        self.assertEqual(f, 3)
+        self.assertEqual(s, 3)
 
 
 if __name__ == "__main__":
