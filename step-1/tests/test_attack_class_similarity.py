@@ -552,5 +552,28 @@ class TestConfigValidation(unittest.TestCase):
             acs.validate_cfg(self._cfg(seed=-1))
 
 
+class TestExcludeFeatures(unittest.TestCase):
+    def _write(self, tmp):
+        p = Path(tmp) / "toy.csv"
+        pd.DataFrame({"A": [1]}).to_csv(p, index=False)
+        return p
+
+    def test_unknown_feature_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _toy_cfg()
+            cfg["exclude_features"] = ["NOPE"]
+            with self.assertRaises(ValueError) as cm:
+                acs.extract(self._write(tmp), cfg, ["Alpha"], (0, 1))
+            self.assertIn("unknown --exclude-features", str(cm.exception))
+
+    def test_known_feature_passes_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _toy_cfg()
+            cfg["exclude_features"] = ["SRC_TO_DST_SECOND_BYTES"]
+            with self.assertRaises(ValueError) as cm:
+                acs.extract(self._write(tmp), cfg, ["Alpha"], (0, 1))
+            self.assertIn("missing from CSV", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

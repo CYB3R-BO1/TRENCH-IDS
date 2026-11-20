@@ -490,8 +490,13 @@ def class_taxonomy(name: str, taxo: dict) -> tuple[str, str]:
 # --------------------------------------------------------------------------- #
 def extract(data_path: Path, cfg: dict, attack_classes: list[str], cuts: tuple[int, int]) -> dict:
     all_cols = pd.read_csv(data_path, nrows=0).columns.tolist()
-    features = [f for f in MAGNITUDE_FEATURES if f in all_cols]
-    required = set(MAGNITUDE_FEATURES + FLAG_MASKS + CATEGORICAL_FIELDS +
+    exclude = set(cfg.get("exclude_features") or [])
+    unknown = exclude - set(MAGNITUDE_FEATURES) - set(DIST_FEATURES)
+    if unknown:
+        raise ValueError(f"unknown --exclude-features: {sorted(unknown)}")
+    features = [f for f in MAGNITUDE_FEATURES if f in all_cols and f not in exclude]
+    dist_features = [f for f in DIST_FEATURES if f not in exclude]
+    required = set(features + FLAG_MASKS + CATEGORICAL_FIELDS +
                    [HOST_SRC, HOST_DST, "FLOW_START_MILLISECONDS", "FLOW_END_MILLISECONDS",
                     "Label", "Attack"])
     missing = sorted(required - set(all_cols))
@@ -665,7 +670,8 @@ def extract(data_path: Path, cfg: dict, attack_classes: list[str], cuts: tuple[i
     return {
         "n_rows": n_rows, "dataset_name": cfg.get("dataset_name", ""),
         "all_classes": all_classes, "matrix_classes": list(attack_classes),
-        "magnitude_features": features, "F": F, "K": K, "cuts": (t70, t85),
+        "magnitude_features": features, "dist_features": dist_features,
+        "F": F, "K": K, "cuts": (t70, t85),
         "g_valid": g_valid, "g_sum": g_sum, "g_sumsq": g_sumsq,
         "c_valid": c_valid, "c_sum": c_sum, "c_sumsq": c_sumsq,
         "res": res, "seen": seen, "have_res": have_res,
@@ -728,7 +734,7 @@ def build_matrices(d: dict, cfg: dict) -> dict:
     cosine_feature_support = support.copy()
 
     # Wasserstein on STANDARDISED log values (train statistics), per feature.
-    feat_pos = [d["magnitude_features"].index(f) for f in DIST_FEATURES]
+    feat_pos = [d["magnitude_features"].index(f) for f in d.get("dist_features", DIST_FEATURES)]
     samples = {}
     for name in matrix_classes:
         ci = class_code[name]
@@ -1025,7 +1031,7 @@ def write_outputs(d, mats, feas, sweep, sens, window_feas, cfg, prov) -> dict:
         json.dump(prov, fh, indent=2)
     with open(OUT_DIR / "feature_schema.json", "w", encoding="utf-8") as fh:
         json.dump({"roles": fs.feature_roles(), "magnitude_features": d["magnitude_features"],
-                   "dist_features": DIST_FEATURES, "identifier_features": fs.IDENTIFIER_FEATURES,
+                   "dist_features": d.get("dist_features", DIST_FEATURES), "identifier_features": fs.IDENTIFIER_FEATURES,
                    "bitmask_features": fs.BITMASK_FEATURES,
                    "categorical_fields": CATEGORICAL_FIELDS}, fh, indent=2)
     split_rows = {s: int(d["ccount_split"][:, i].sum()) for i, s in enumerate(SPLIT_NAMES)}
@@ -1098,7 +1104,7 @@ def write_outputs(d, mats, feas, sweep, sens, window_feas, cfg, prov) -> dict:
         frames.append(t)
     pd.concat(frames, ignore_index=True).to_csv(OUT_DIR / "wasserstein_per_feature.csv", index=False)
     pd.DataFrame(mats["wasserstein_feature_support"], index=labels,
-                 columns=DIST_FEATURES).to_csv(OUT_DIR / "wasserstein_feature_support.csv")
+                 columns=d.get("dist_features", DIST_FEATURES)).to_csv(OUT_DIR / "wasserstein_feature_support.csv")
     pd.DataFrame(mats["wasserstein_pair_coverage"], index=labels, columns=labels).to_csv(
         OUT_DIR / "wasserstein_pair_coverage.csv")
     frames = []
@@ -1286,7 +1292,7 @@ Most similar: {', '.join(f"{r.class_a}-{r.class_b} ({r.cosine:.3f})" for r in mo
 
 ## 3. Wasserstein distance (valid samples, train-only)
 
-Mean 1-D Wasserstein over {len(DIST_FEATURES)} continuous features using **valid**
+Mean 1-D Wasserstein over {len(d.get('dist_features', DIST_FEATURES))} continuous features using **valid**
 observations only (invalid values are excluded, never zero-filled).
 
 {_md_table(md(mats['wasserstein']))}
@@ -1343,6 +1349,8 @@ def parse_args():
     parser.add_argument("--min-train-flows", type=int, default=1,
                         help="minimum training flows for a class to enter similarity matrices")
     parser.add_argument("--min-feature-samples", type=int, default=2)
+    parser.add_argument("--exclude-features", nargs="*", default=[],
+                        help="magnitude feature names to exclude (for ablation; baseline untouched)")
     parser.add_argument("--cat-topk", type=int, default=0, help="0 = full observed support")
     parser.add_argument("--port-topk", type=int, default=None, help="deprecated alias for --cat-topk")
     parser.add_argument("--margin-min", type=float, default=15.0)
@@ -1365,6 +1373,7 @@ def parse_args():
         "window_sweep_ms": args.window_sweep_ms, "split": tuple(args.split),
         "split_floor": args.split_floor, "min_feature_samples": args.min_feature_samples,
         "min_train_flows": args.min_train_flows, "cat_topk": cat_topk,
+        "exclude_features": list(args.exclude_features),
         "margin_min": args.margin_min, "episode_gap_min": args.episode_gap_min,
         "sensitivity_gaps": args.sensitivity_gaps_min,
         "sensitivity_margins": args.sensitivity_margins_min,

@@ -25,6 +25,29 @@ Evidence for characterising attack classes, computed from a **NetFlow-v3** datas
   shares for Generic/Recon/Shellcode; `L7_PROTO` has fractional encodings; 5 s windows are
   heavily mixed across attack classes.
 
+## Feature-quality investigations (Step 1.2)
+
+Run via `python diagnostics.py ...`; evidence in `outputs/diagnostics/`.
+
+- **Rate-feature sensitivity (cosine ablation, 37 -> 35 magnitude features).** Dropping
+  `SRC_TO_DST_SECOND_BYTES` and `DST_TO_SRC_SECOND_BYTES` barely moves the cosine:
+  mean |delta| 0.006, max |delta| 0.022 (Exploits-Generic), Spearman rho 0.999,
+  Kendall tau 0.991, top-5 pairs unchanged, Generic still clearly dissimilar (mean
+  0.765 -> 0.758). The cosine findings do **not** depend on the two high-invalidity
+  rate features. Ablation run: `outputs/unsw_rate_ablation/`.
+- **Fractional `L7_PROTO`.** 23,866 rows (1.009%) are non-integral across 10 distinct
+  values (`7.37` = 18,765; `10.16` = 4,877; rest are near-integer variants), present in
+  benign and attack traffic (Fuzzers 11.7% of its rows, Backdoor 5.9%, DoS 1.7%).
+  They are **not** correlated with other anomalies (share of `OUT_BYTES == 0` is 0.003
+  among fractional rows vs 0.028 overall). Repeated, consistent, uncorrelated values are
+  consistent with legitimate encoder output (likely upstream-averaged protocol ids), not
+  random corruption.
+- **Categorical-validation policy (proposed, not yet applied):** never round. Treat each
+  distinct fractional `L7_PROTO` value as a valid exact categorical category (keyed by its
+  exact value/string) rather than invalid. This also removes the current Fuzzers-specific
+  truncation (~12% of its `L7_PROTO` mass is dropped before JS). Until approved, fractional
+  values remain excluded and reported in `invalid_categorical_values.csv`.
+
 ## Design decisions
 
 - **Evidence only.** No task groupings, no task sequences, no model. (Per the agreed plan.)
