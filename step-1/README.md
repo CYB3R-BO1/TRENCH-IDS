@@ -48,6 +48,32 @@ Run via `python diagnostics.py ...`; evidence in `outputs/diagnostics/`.
   truncation (~12% of its `L7_PROTO` mass is dropped before JS). Until approved, fractional
   values remain excluded and reported in `invalid_categorical_values.csv`.
 
+## Window-size feasibility sweep (Step 1.2)
+
+Descriptive sweep over 1/5/10/30/60 s with **60 s-aligned split cuts** (run:
+`outputs/unsw_window_sweep/`; splits 69.99% / 14.99% / 15.02%). Every window size divides the
+alignment, so no physical window crosses a partition boundary.
+
+| window | median flows/window (train) | % attack windows multi-class | train classes with >=100 windows & >=5 class flows |
+| --- | --- | --- | --- |
+| 1 s | 25 | 44% single-class (least mixing) | 3 |
+| 5 s | 136 | 93% multi-class | 6 |
+| 10 s | 274 | 95% multi-class | 6 |
+| 30 s | 826 | 95% multi-class | 5 |
+| 60 s | 1,637 | 94% multi-class | 5 |
+
+- **Trade-off is explicit.** 1 s minimises mixing but is sparse (median 25 flows/window, only
+  3 classes have 100+ windows with >=5 class flows). 5-10 s keeps 6 classes feasible with real
+  graph size, at the cost of 93-95% of attack-bearing windows being multi-class.
+- **Train vs val/test asymmetry (important).** Under the chronological quantile split, ~60% of
+  *train* windows contain no attack at all, whereas val/test windows are 92-97% multi-attack.
+  Mixing is a property of the split, not only the window size.
+- **Task-filtered policy (provisional).** Graphs keep benign + one designated class only;
+  retained attack-flow share per class ranges from 0.99% (Analysis) to 32.85% (Exploits).
+  Unlabeled-context traffic is reported (`other_attack_flows_dropped`) but deferred.
+- **Window size is not auto-selected.** It must be chosen from occupancy, mixing and
+  task-filtered feasibility together (see `window_sweep_report.md` for the full evidence).
+
 ## Design decisions
 
 - **Evidence only.** No task groupings, no task sequences, no model. (Per the agreed plan.)

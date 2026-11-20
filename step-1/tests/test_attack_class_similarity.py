@@ -16,6 +16,7 @@ from scipy.stats import wasserstein_distance
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import attack_class_similarity as acs  # noqa: E402
 import feature_schema as fs  # noqa: E402
+import window_sweep as ws  # noqa: E402
 
 TOY_ATTACKS = ["Alpha", "Beta", "Gamma"]
 TOY_ALL = [acs.BENIGN] + TOY_ATTACKS
@@ -573,6 +574,22 @@ class TestExcludeFeatures(unittest.TestCase):
             with self.assertRaises(ValueError) as cm:
                 acs.extract(self._write(tmp), cfg, ["Alpha"], (0, 1))
             self.assertIn("missing from CSV", str(cm.exception))
+
+
+class TestWindowSweep(unittest.TestCase):
+    def test_window_counts(self):
+        ts = np.array([0, 1, 2, 1000, 1001, 2500], dtype=np.int64)
+        ccode = np.array([0, 1, 0, 1, 1, 0], dtype=np.int16)
+        total, benign, counts = ws.window_counts(ts, ccode, 1, 1000)
+        np.testing.assert_array_equal(total, [3, 2, 1])
+        np.testing.assert_array_equal(benign, [2, 0, 1])
+        np.testing.assert_array_equal(counts[1], [1, 2, 0])
+
+    def test_split_of_windows_alignment(self):
+        split = ws.split_of_windows(10, 1000, 3000, 6000)
+        np.testing.assert_array_equal(split, [0, 0, 0, 1, 1, 1, 2, 2, 2, 2])
+        with self.assertRaises(ValueError):
+            ws.split_of_windows(10, 4000, 3000, 6000)
 
 
 if __name__ == "__main__":
