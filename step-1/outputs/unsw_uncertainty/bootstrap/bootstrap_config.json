@@ -1,0 +1,37 @@
+{
+  "n_bootstrap": 500,
+  "n_sensitivity": 150,
+  "seed": 0,
+  "fine_block_ms": 60000,
+  "block_lengths_ms": [
+    60000,
+    300000,
+    900000
+  ],
+  "primary_block_ms": 300000,
+  "metrics": [
+    "cosine",
+    "wasserstein",
+    "jensen_shannon",
+    "relation_profile",
+    "flag_bit_similarity"
+  ],
+  "normalisation": "training-only gmean/gstd recomputed per replicate",
+  "fixed_universe": true,
+  "fixed_host_padding": {
+    "L_host": 10,
+    "L_pair": 40
+  },
+  "wassertstein_subsample_cap": 3000,
+  "train_blocks": 1059,
+  "n_pairs": 21,
+  "classes": [
+    "Backdoor",
+    "DoS",
+    "Exploits",
+    "Fuzzers",
+    "Generic",
+    "Reconnaissance",
+    "Shellcode"
+  ]
+}

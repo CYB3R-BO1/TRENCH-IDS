@@ -1,0 +1,120 @@
+{
+  "align_ms": 60000,
+  "cuts": {
+    "t70": 1424238120000,
+    "t85": 1424250480000
+  },
+  "split_quantiles": [
+    0.7,
+    0.85
+  ],
+  "window_sizes_ms": [
+    1000,
+    5000,
+    10000,
+    30000,
+    60000
+  ],
+  "per_window": {
+    "1000": {
+      "train": {
+        "windows": 59567,
+        "flows": 1655502,
+        "attack_flows": 65156,
+        "benign_flows": 1590346
+      },
+      "val": {
+        "windows": 11739,
+        "flows": 354595,
+        "attack_flows": 31396,
+        "benign_flows": 323199
+      },
+      "test": {
+        "windows": 11645,
+        "flows": 355327,
+        "attack_flows": 31141,
+        "benign_flows": 324186
+      }
+    },
+    "5000": {
+      "train": {
+        "windows": 12275,
+        "flows": 1655502,
+        "attack_flows": 65156,
+        "benign_flows": 1590346
+      },
+      "val": {
+        "windows": 2397,
+        "flows": 354595,
+        "attack_flows": 31396,
+        "benign_flows": 323199
+      },
+      "test": {
+        "windows": 2370,
+        "flows": 355327,
+        "attack_flows": 31141,
+        "benign_flows": 324186
+      }
+    },
+    "10000": {
+      "train": {
+        "windows": 6197,
+        "flows": 1655502,
+        "attack_flows": 65156,
+        "benign_flows": 1590346
+      },
+      "val": {
+        "windows": 1208,
+        "flows": 354595,
+        "attack_flows": 31396,
+        "benign_flows": 323199
+      },
+      "test": {
+        "windows": 1192,
+        "flows": 355327,
+        "attack_flows": 31141,
+        "benign_flows": 324186
+      }
+    },
+    "30000": {
+      "train": {
+        "windows": 2095,
+        "flows": 1655502,
+        "attack_flows": 65156,
+        "benign_flows": 1590346
+      },
+      "val": {
+        "windows": 407,
+        "flows": 354595,
+        "attack_flows": 31396,
+        "benign_flows": 323199
+      },
+      "test": {
+        "windows": 401,
+        "flows": 355327,
+        "attack_flows": 31141,
+        "benign_flows": 324186
+      }
+    },
+    "60000": {
+      "train": {
+        "windows": 1059,
+        "flows": 1655502,
+        "attack_flows": 65156,
+        "benign_flows": 1590346
+      },
+      "val": {
+        "windows": 206,
+        "flows": 354595,
+        "attack_flows": 31396,
+        "benign_flows": 323199
+      },
+      "test": {
+        "windows": 202,
+        "flows": 355327,
+        "attack_flows": 31141,
+        "benign_flows": 324186
+      }
+    }
+  }
+}

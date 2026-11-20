@@ -16,6 +16,7 @@ from scipy.stats import wasserstein_distance
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import attack_class_similarity as acs  # noqa: E402
 import feature_schema as fs  # noqa: E402
+import step1_3_uncertainty as u13  # noqa: E402
 import window_sweep as ws  # noqa: E402
 
 TOY_ATTACKS = ["Alpha", "Beta", "Gamma"]
@@ -590,6 +591,29 @@ class TestWindowSweep(unittest.TestCase):
         np.testing.assert_array_equal(split, [0, 0, 0, 1, 1, 1, 2, 2, 2, 2])
         with self.assertRaises(ValueError):
             ws.split_of_windows(10, 4000, 3000, 6000)
+
+
+class TestStep13(unittest.TestCase):
+    def test_entropy(self):
+        self.assertEqual(u13._entropy(Counter({1: 5})), 0.0)
+        self.assertEqual(u13._entropy(Counter()), 0.0)
+        self.assertAlmostEqual(u13._entropy(Counter({1: 5, 2: 5})), 1.0)
+
+    def test_groups_partition(self):
+        keys = np.array([5, 5, 3, 3, 3, 9])
+        got = {k: list(rows) for k, rows in u13._groups(keys, np.arange(6))}
+        self.assertEqual(got[3], [2, 3, 4])
+        self.assertEqual(got[5], [0, 1])
+        self.assertEqual(got[9], [5])
+
+    def test_window_counts_base_offset(self):
+        total, benign, counts = ws.window_counts(
+            np.array([1000, 1001, 3000], dtype=np.int64),
+            np.array([0, 1, 0], dtype=np.int16), 1, 1000, base=1000)
+        # base=1000, w=1000 -> window ids (t-1000)//1000 = [0, 0, 2]; id 1 is empty
+        np.testing.assert_array_equal(total, [2, 0, 1])
+        np.testing.assert_array_equal(benign, [1, 0, 1])
+        np.testing.assert_array_equal(counts[1], [1, 0, 0])
 
 
 if __name__ == "__main__":

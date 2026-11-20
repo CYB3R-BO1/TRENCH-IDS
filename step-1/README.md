@@ -82,8 +82,56 @@ alignment, so no physical window crosses a partition boundary.
   197 -> 114; Fuzzers 1670 -> 1163). Worms has no usable graph at either size.
   Evidence: `window_5s_vs_10s_comparison.csv`.
 
-## Design decisions
+## Frozen window configuration (Step 1.3)
 
+- **Primary: 10 s** graph windows (main TRENCH-IDS configuration). **5 s** = sensitivity
+  (finer resolution), **30 s** = exploratory (aggregation / heterogeneity). Kept identical
+  across all attack classes; Backdoor's 5 s behaviour is a recorded class-specific finding.
+- Wording: 10 s yields **larger graphs, not more samples** (6,197 vs 12,275 train windows);
+  the reduced sample count is examined by the bootstrap.
+
+## Step 1.3 - uncertainty and temporal stability
+
+Run via `python step1_3_uncertainty.py {bootstrap|relation-windows}`; outputs in
+`outputs/unsw_uncertainty/`.
+
+### Temporal block bootstrap (`bootstrap/`)
+
+- Contiguous training-time blocks; all classes (incl. benign) move together; the same blocks
+  are used for every pair; **gmean/gstd recomputed per replicate**; categorical universe and
+  host padding fixed to full-train values (padding length does not affect JS).
+- Primary: 300 s blocks, 500 replicates, seed 0; sensitivity at 60 s / 900 s (150 replicates).
+- **Block-length sensitivity (mean 95% CI width):** 60 s < 300 s < 900 s for every metric
+  (e.g. cosine 0.074 / 0.119 / 0.125). Mean CI widths at 300 s: wasserstein 0.34 (widest),
+  cosine 0.12, JS 0.08, relation 0.09, flags 0.02 (tightest).
+- **Temporal dependence (lag autocorrelation of per-60 s block class flows):** long-range for
+  **Backdoor** (0.95 at lag 1, still 0.26 at lag 10) and **Generic** (0.70 -> 0.28); short for
+  DoS/Exploits/Fuzzers/Reconnaissance/Shellcode (near zero by lag 2-5). 300 s does not fully
+  cover Backdoor's dependence, so its pairs are the most likely to be under-covered.
+- **Rank stability (prob. in top-5, 300 s):** JS and relation each have exactly one perfectly
+  stable pair (**DoS-Exploits, 1.00**). Cosine's top-5 is less certain: Reconnaissance-Shellcode
+  0.89, DoS-Fuzzers 0.84, Backdoor-DoS 0.77 (so the observed closest pair is not the most
+  *stable* one). Wasserstein is the noisiest metric (e.g. Backdoor-Fuzzers observed 0.147, 95%
+  CI [0.129, 0.525]).
+- Bootstrap output is reliability evidence only; it does **not** drive task construction.
+
+### Per-window relation statistics (`temporal_relations/`)
+
+Task-filtered (designated class's flows per window; windows without the class excluded),
+at 10 s and 5 s, with distributions and CVs rather than a single aggregate.
+
+- Per-window connectivity is strongly concentrated for almost every class: median
+  `dst_port_entropy` 0 and median `host_pair_top_share` 1.0 (all flows in a window go to one
+  host pair).
+- **Exploits is the clear exception** - median entropy 0.84, top host-pair share 0.38, and the
+  lowest temporal CV (0.29): diverse *and* stable across windows.
+- **Backdoor differs by window size** (the anticipated 5 s finding): median `dst_port_entropy`
+  0.0 at 10 s but 0.79 at 5 s, top host-pair share 1.0 vs 0.46 - the coarser window merges
+  temporally separate contacts into one dominant pair.
+- **Worms** (CV ~9.1) and **Shellcode** (CV ~2.1-6.0) are the most temporally variable; they
+  are also the weakest-supported classes.
+
+## Design decisions
 - **Evidence only.** No task groupings, no task sequences, no model. (Per the agreed plan.)
 - **One global chronological split** from all-flow `FLOW_START` quantiles
   (`--split 0.70 0.85`). Every similarity input uses the **training partition only**, so
