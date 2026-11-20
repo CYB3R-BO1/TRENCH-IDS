@@ -168,6 +168,11 @@ def analyse_size(w, ts, ccode, K, attack_classes, t70, t85, thresholds, base):
                 "pct_of_attack_flows_retained": _pct(cc.sum(), attack_total),
                 "mean_other_attack_flows_per_window": float(other.mean()) if nwin else 0.0,
                 "other_attack_flows_dropped": int(other.sum()),
+                "pct_windows_filtered_total_lt2": _pct((filtered_total < 2).sum(), nwin),
+                "pct_windows_class_lt2": _pct((cc < 2).sum(), nwin),
+                "task_benign_attack_ratio": (float(benign_total / cc.sum()) if cc.sum() else 0.0),
+                "task_median_benign_attack_ratio": (
+                    float(np.median(ben[cc > 0] / cc[cc > 0])) if (cc > 0).any() else 0.0),
                 **fge,
             })
             n_ge[cls] = (int((cc >= 5).sum()), int((cc >= 10).sum()))

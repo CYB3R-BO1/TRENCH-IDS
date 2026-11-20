@@ -73,6 +73,14 @@ alignment, so no physical window crosses a partition boundary.
   Unlabeled-context traffic is reported (`other_attack_flows_dropped`) but deferred.
 - **Window size is not auto-selected.** It must be chosen from occupancy, mixing and
   task-filtered feasibility together (see `window_sweep_report.md` for the full evidence).
+- **5 s vs 10 s (task-filtered, benign + one class).** At 10 s the median designated-class
+  flows per graph roughly double for the high-volume classes (Exploits 3 -> 7, Fuzzers
+  6 -> 11, Generic 2 -> 4, Reconnaissance 2 -> 3), and strong-supervision windows rise
+  sharply (train windows with >=20 class flows: Exploits 34 -> 155, Fuzzers 56 -> 239,
+  Generic 6 -> 40). The cost is ~half the graph windows (12,275 -> 6,197 train) and lower
+  absolute window counts for bursty low-volume classes at the >=5 threshold (Backdoor
+  197 -> 114; Fuzzers 1670 -> 1163). Worms has no usable graph at either size.
+  Evidence: `window_5s_vs_10s_comparison.csv`.
 
 ## Design decisions
 
