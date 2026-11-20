@@ -100,19 +100,22 @@ Run via `python step1_3_uncertainty.py {bootstrap|relation-windows}`; outputs in
 - Contiguous training-time blocks; all classes (incl. benign) move together; the same blocks
   are used for every pair; **gmean/gstd recomputed per replicate**; categorical universe and
   host padding fixed to full-train values (padding length does not affect JS).
-- Primary: 300 s blocks, 500 replicates, seed 0; sensitivity at 60 s / 900 s (150 replicates).
+- Primary: **900 s blocks, 500 replicates** (only **73 coarse blocks** - a real limit on
+  effective temporal information); sensitivity at 300 s and 60 s (500 replicates each).
 - **Block-length sensitivity (mean 95% CI width):** 60 s < 300 s < 900 s for every metric
-  (e.g. cosine 0.074 / 0.119 / 0.125). Mean CI widths at 300 s: wasserstein 0.34 (widest),
-  cosine 0.12, JS 0.08, relation 0.09, flags 0.02 (tightest).
-- **Temporal dependence (lag autocorrelation of per-60 s block class flows):** long-range for
-  **Backdoor** (0.95 at lag 1, still 0.26 at lag 10) and **Generic** (0.70 -> 0.28); short for
-  DoS/Exploits/Fuzzers/Reconnaissance/Shellcode (near zero by lag 2-5). 300 s does not fully
-  cover Backdoor's dependence, so its pairs are the most likely to be under-covered.
-- **Rank stability (prob. in top-5, 300 s):** JS and relation each have exactly one perfectly
-  stable pair (**DoS-Exploits, 1.00**). Cosine's top-5 is less certain: Reconnaissance-Shellcode
-  0.89, DoS-Fuzzers 0.84, Backdoor-DoS 0.77 (so the observed closest pair is not the most
-  *stable* one). Wasserstein is the noisiest metric (e.g. Backdoor-Fuzzers observed 0.147, 95%
-  CI [0.129, 0.525]).
+  (cosine 0.078 / 0.118 / 0.127; wasserstein 0.226 / 0.339 / 0.365; JS 0.054 / 0.079 / 0.100;
+  relation 0.062 / 0.083 / 0.101; flags 0.018 / 0.018 / 0.021).
+- **Temporal dependence (60 s-block ACF, extended to 30 lags; first lag with |r| < 0.2):**
+  Backdoor **12** lags (~12 min), Generic **19** lags (~19 min), Fuzzers 6, DoS 4, Exploits 2,
+  Reconnaissance 2, Shellcode 1. So 900 s covers Backdoor but **not Generic**, whose dependence
+  exceeds the primary block - the honest residual limitation.
+- **Rank stability (prob. in top-5):** with 900 s blocks only **JS and relation_profile** keep a
+  rock-solid pair (**DoS-Exploits, 1.00** in both). Everything else softens versus 300 s/60 s:
+  cosine Backdoor-DoS 0.65 (900 s) vs 0.75 (300 s) vs 0.96 (60 s); JS Backdoor-DoS 0.84 vs 0.96
+  vs 1.00. Wasserstein remains the noisiest (Backdoor-Fuzzers observed 0.147, 95% CI
+  [0.147, 0.440]). Narrower short-block intervals were over-confident, not better.
+- Three configurations are kept separate and **must not be merged into one interval**:
+  900 s = primary conservative estimate; 300 s = sensitivity; 60 s = exploratory.
 - Bootstrap output is reliability evidence only; it does **not** drive task construction.
 
 ### Per-window relation statistics (`temporal_relations/`)
@@ -130,6 +133,26 @@ at 10 s and 5 s, with distributions and CVs rather than a single aggregate.
   temporally separate contacts into one dominant pair.
 - **Worms** (CV ~9.1) and **Shellcode** (CV ~2.1-6.0) are the most temporally variable; they
   are also the weakest-supported classes.
+
+## Step 1.4 - independent NF-ToN-IoT-v3 analysis
+
+Run: `python attack_class_similarity.py --dataset ton --out outputs/ton_full --seed 0`
+(27,520,260 flows, 5.3 GB, sha256 `53ec8f46...`); split 69.99 / 15.01 / 15.00.
+Bootstrap block length is **not** transferred from UNSW - ToN temporal dependence must be
+measured on its own.
+
+- 9 attack classes discovered, but only **4 are train-supported**: ddos, dos, injection,
+  scanning. Backdoor, mitm, password, ransomware, xss have **zero training flows**.
+- **Attack classes are nearly temporally disjoint across the split** (dos/injection/scanning
+  train-only; ddos train+val; xss val+test; password val-only; Backdoor/mitm/ransomware
+  test-only). A single global chronological split therefore leaves most classes unsupported
+  for training.
+- Similarity over the 4 supported classes: cosine ddos-injection 0.51 (highest) but
+  ddos-scanning **-0.80** (opposite profiles); JS ddos-injection 0.23; Wasserstein
+  ddos-scanning 0.62; relation ddos-injection 0.66.
+- **Open issue:** before any ToN task construction, decide a ToN-appropriate split (e.g.
+  per-class temporal windows or stratification) and measure ToN's own ACF/window behaviour.
+  Do not reuse UNSW conclusions.
 
 ## Design decisions
 - **Evidence only.** No task groupings, no task sequences, no model. (Per the agreed plan.)

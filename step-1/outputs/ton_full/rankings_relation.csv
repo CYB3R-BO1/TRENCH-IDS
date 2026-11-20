@@ -1,0 +1,7 @@
+class_a,class_b,relation_similarity,rank
+ddos,injection,0.663036133161444,1
+injection,scanning,0.49217824480271155,2
+ddos,scanning,0.4734383738673722,3
+dos,scanning,0.44501438453288744,4
+dos,injection,0.41737180699930987,5
+ddos,dos,0.4026160906275804,6

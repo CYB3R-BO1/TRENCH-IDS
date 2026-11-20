@@ -1,0 +1,7 @@
+class_a,class_b,cosine,rank
+ddos,injection,0.5126433759959873,1
+ddos,dos,0.3589451789107542,2
+dos,injection,0.34108636915056334,3
+dos,scanning,-0.5019379949704269,4
+injection,scanning,-0.695169963357923,5
+ddos,scanning,-0.7992592083645027,6

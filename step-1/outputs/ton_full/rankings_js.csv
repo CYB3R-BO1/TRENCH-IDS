@@ -1,0 +1,7 @@
+class_a,class_b,js_distance,rank
+ddos,injection,0.22976152482538442,1
+ddos,scanning,0.3717446248183338,2
+injection,scanning,0.4016626677742171,3
+dos,scanning,0.4293703787050353,4
+dos,injection,0.5008485163642779,5
+ddos,dos,0.5096953900308905,6

@@ -1,6 +1,6 @@
 {
   "n_bootstrap": 500,
-  "n_sensitivity": 150,
+  "n_sensitivity": 500,
   "seed": 0,
   "fine_block_ms": 60000,
   "block_lengths_ms": [
@@ -8,7 +8,14 @@
     300000,
     900000
   ],
-  "primary_block_ms": 300000,
+  "primary_block_ms": 900000,
+  "acf_lags": 30,
+  "coarse_blocks_per_length_ms": {
+    "60000": 1059,
+    "300000": 216,
+    "900000": 73
+  },
+  "primary_temporal_blocks": 73,
   "metrics": [
     "cosine",
     "wasserstein",

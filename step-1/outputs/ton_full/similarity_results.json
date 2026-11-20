@@ -1,0 +1,343 @@
+{
+  "dataset": "NF-ToN-IoT-v3",
+  "provenance": {
+    "data_path": "C:\\Users\\cherr\\Documents\\PROJECTS\\TRENCH-IDS_research\\v3\\ToN-IoT\\NF-ToN-IoT-v3\\data\\NF-ToN-IoT-v3.csv",
+    "data_size_mb": 5302.9,
+    "data_sha256": "53ec8f468a43ede9b1536fabc0390af2fa33ab4312b23ce4d864f186a4651f78",
+    "generated_utc": "2026-11-20T17:10:12Z"
+  },
+  "config": {
+    "reservoir_cap": 20000,
+    "window_ms": 5000,
+    "window_sweep_ms": [
+      1000,
+      5000,
+      10000,
+      30000,
+      60000
+    ],
+    "split": [
+      0.7,
+      0.85
+    ],
+    "split_floor": 1000,
+    "min_feature_samples": 2,
+    "min_train_flows": 1,
+    "cat_topk": 0,
+    "exclude_features": [],
+    "margin_min": 15.0,
+    "episode_gap_min": 15.0,
+    "sensitivity_gaps": [
+      1,
+      5,
+      15,
+      30,
+      60
+    ],
+    "sensitivity_margins": [
+      0,
+      5,
+      15,
+      30
+    ],
+    "min_graph_flows": 2,
+    "seed": 0,
+    "chunk": 250000,
+    "out": "outputs\\ton_full",
+    "dataset": "ton",
+    "dataset_name": "NF-ToN-IoT-v3",
+    "taxonomy_csv": null,
+    "max_rows": null
+  },
+  "n_rows": 27520260,
+  "attack_classes": [
+    "ddos",
+    "dos",
+    "injection",
+    "scanning"
+  ],
+  "split": {
+    "cuts": {
+      "t70": 1556248665000,
+      "t85": 1556353755000
+    },
+    "cuts_aligned_to_window": true,
+    "window_ms": 5000,
+    "rows": {
+      "train": 19261376,
+      "val": 4130758,
+      "test": 4128126
+    },
+    "percent": {
+      "train": 69.99,
+      "val": 15.01,
+      "test": 15.0
+    },
+    "attack_rows": {
+      "train": 5618596,
+      "val": 3253577,
+      "test": 1855873
+    },
+    "benign_rows": {
+      "train": 13642780,
+      "val": 877181,
+      "test": 2272253
+    },
+    "sha256": "53ec8f468a43ede9b1536fabc0390af2fa33ab4312b23ce4d864f186a4651f78"
+  },
+  "invalid_value_totals": {
+    "nan": 0,
+    "inf": 0,
+    "negative": 0,
+    "categorical_nan": 0,
+    "categorical_inf": 0,
+    "categorical_fractional": 0,
+    "categorical_out_of_range": 0,
+    "flag_valid": 82560780,
+    "flag_nan": 0,
+    "flag_inf": 0,
+    "flag_negative": 0,
+    "flag_fractional": 0,
+    "flag_unsupported": 0
+  },
+  "flag_support_gaps": [
+    [
+      "Backdoor",
+      "TCP_FLAGS"
+    ],
+    [
+      "Backdoor",
+      "CLIENT_TCP_FLAGS"
+    ],
+    [
+      "Backdoor",
+      "SERVER_TCP_FLAGS"
+    ],
+    [
+      "mitm",
+      "TCP_FLAGS"
+    ],
+    [
+      "mitm",
+      "CLIENT_TCP_FLAGS"
+    ],
+    [
+      "mitm",
+      "SERVER_TCP_FLAGS"
+    ],
+    [
+      "password",
+      "TCP_FLAGS"
+    ],
+    [
+      "password",
+      "CLIENT_TCP_FLAGS"
+    ],
+    [
+      "password",
+      "SERVER_TCP_FLAGS"
+    ],
+    [
+      "ransomware",
+      "TCP_FLAGS"
+    ],
+    [
+      "ransomware",
+      "CLIENT_TCP_FLAGS"
+    ],
+    [
+      "ransomware",
+      "SERVER_TCP_FLAGS"
+    ],
+    [
+      "xss",
+      "TCP_FLAGS"
+    ],
+    [
+      "xss",
+      "CLIENT_TCP_FLAGS"
+    ],
+    [
+      "xss",
+      "SERVER_TCP_FLAGS"
+    ]
+  ],
+  "zero_standardised_profiles": [],
+  "zero_cosine_pairs": [],
+  "label_counts": {
+    "0": 16792214,
+    "1": 10728046
+  },
+  "matrices": {
+    "standardized_mean_profile_cosine": {
+      "labels": [
+        "ddos",
+        "dos",
+        "injection",
+        "scanning"
+      ],
+      "values": [
+        [
+          1.0,
+          0.358945,
+          0.512643,
+          -0.799259
+        ],
+        [
+          0.358945,
+          1.0,
+          0.341086,
+          -0.501938
+        ],
+        [
+          0.512643,
+          0.341086,
+          1.0,
+          -0.69517
+        ],
+        [
+          -0.799259,
+          -0.501938,
+          -0.69517,
+          1.0
+        ]
+      ]
+    },
+    "wasserstein": {
+      "labels": [
+        "ddos",
+        "dos",
+        "injection",
+        "scanning"
+      ],
+      "values": [
+        [
+          0.0,
+          0.85771,
+          2.076391,
+          0.622325
+        ],
+        [
+          0.85771,
+          0.0,
+          2.407196,
+          0.958603
+        ],
+        [
+          2.076391,
+          2.407196,
+          0.0,
+          2.693224
+        ],
+        [
+          0.622325,
+          0.958603,
+          2.693224,
+          0.0
+        ]
+      ]
+    },
+    "jensen_shannon": {
+      "labels": [
+        "ddos",
+        "dos",
+        "injection",
+        "scanning"
+      ],
+      "values": [
+        [
+          0.0,
+          0.509695,
+          0.229762,
+          0.371745
+        ],
+        [
+          0.509695,
+          0.0,
+          0.500849,
+          0.42937
+        ],
+        [
+          0.229762,
+          0.500849,
+          0.0,
+          0.401663
+        ],
+        [
+          0.371745,
+          0.42937,
+          0.401663,
+          0.0
+        ]
+      ]
+    },
+    "relation_profile": {
+      "labels": [
+        "ddos",
+        "dos",
+        "injection",
+        "scanning"
+      ],
+      "values": [
+        [
+          1.0,
+          0.402616,
+          0.663036,
+          0.473438
+        ],
+        [
+          0.402616,
+          1.0,
+          0.417372,
+          0.445014
+        ],
+        [
+          0.663036,
+          0.417372,
+          1.0,
+          0.492178
+        ],
+        [
+          0.473438,
+          0.445014,
+          0.492178,
+          1.0
+        ]
+      ]
+    },
+    "flag_bit_similarity": {
+      "labels": [
+        "ddos",
+        "dos",
+        "injection",
+        "scanning"
+      ],
+      "values": [
+        [
+          1.0,
+          0.730122,
+          0.827343,
+          0.777095
+        ],
+        [
+          0.730122,
+          1.0,
+          0.56869,
+          0.974234
+        ],
+        [
+          0.827343,
+          0.56869,
+          1.0,
+          0.612747
+        ],
+        [
+          0.777095,
+          0.974234,
+          0.612747,
+          1.0
+        ]
+      ]
+    }
+  }
+}

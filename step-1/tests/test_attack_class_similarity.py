@@ -616,5 +616,15 @@ class TestStep13(unittest.TestCase):
         np.testing.assert_array_equal(counts[1], [1, 0, 0])
 
 
+    def test_rank_stats(self):
+        arr = np.zeros((2, 3, 3))
+        arr[0, 0, 1], arr[0, 0, 2], arr[0, 1, 2] = 0.9, 0.5, 0.1
+        arr[1, 0, 1], arr[1, 0, 2], arr[1, 1, 2] = 0.2, 0.8, 0.1
+        pairs = [("A", "B", 0, 1), ("A", "C", 0, 2), ("B", "C", 1, 2)]
+        _, ranks = u13._rank_stats(arr, pairs, sim=True)
+        self.assertEqual(list(ranks[0]), [1, 2, 3])
+        self.assertEqual(list(ranks[1]), [2, 1, 3])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

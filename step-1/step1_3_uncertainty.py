@@ -294,7 +294,20 @@ def _pairs(M, labels):
     return out
 
 
-def run_bootstrap(cache, cfg, out_dir: Path, lengths_ms, primary_ms, n_boot, n_sens, seed):
+def _rank_stats(arr, pairs, sim):
+    """Rank of each pair across replicates (1 = most similar)."""
+    B = arr.shape[0]
+    P = len(pairs)
+    pv = np.empty((B, P))
+    for i, (_, _, a, b) in enumerate(pairs):
+        pv[:, i] = arr[:, a, b]
+    order = np.argsort(-pv if sim else pv, axis=1)
+    ranks = np.empty_like(order)
+    ranks[np.arange(B)[:, None], order] = np.arange(1, P + 1)[None, :]
+    return pv, ranks
+
+
+def run_bootstrap(cache, cfg, out_dir: Path, lengths_ms, primary_ms, n_boot, n_sens, seed, acf_lags=30):
     names = cache["all_classes"]
     train_flows = {}
     for c in cache["attack_classes"]:
@@ -330,6 +343,8 @@ def run_bootstrap(cache, cfg, out_dir: Path, lengths_ms, primary_ms, n_boot, n_s
             agg[b // m].append(b)
         return [v for _, v in sorted(agg.items())]
 
+    coarse_counts = {L: len(blocks_for(L)) for L in lengths_ms}
+
     # temporal dependence diagnostic: lag-1..10 autocorrelation of per-fine-block class flows
     ac_rows = []
     counts = {c: Counter() for c in cache["all_classes"]}
@@ -339,12 +354,20 @@ def run_bootstrap(cache, cfg, out_dir: Path, lengths_ms, primary_ms, n_boot, n_s
         series = pd.Series(counts[c]).sort_index()
         x = series.to_numpy(dtype=float)
         if x.std() > 0 and x.size > 3:
-            for lag in range(1, 11):
+            for lag in range(1, acf_lags + 1):
                 if x.size - lag >= 3:
                     with np.errstate(invalid="ignore", divide="ignore"):
                         r = float(np.corrcoef(x[:-lag], x[lag:])[0, 1])
                     ac_rows.append({"class": c, "lag_blocks": lag, "autocorr": r})
     pd.DataFrame(ac_rows).to_csv(out_dir / "bootstrap_autocorrelation.csv", index=False)
+    # decay summary: first lag where |autocorr| < 0.2
+    decay = []
+    acdf = pd.DataFrame(ac_rows)
+    for c in labels:
+        d = acdf[(acdf["class"] == c) & (acdf["autocorr"].abs() < 0.2)]
+        decay.append({"class": c, "first_lag_below_0.2": int(d["lag_blocks"].min()) if len(d) else None,
+                      "lag1": float(acdf[acdf["class"] == c]["autocorr"].iloc[0])})
+    pd.DataFrame(decay).to_csv(out_dir / "bootstrap_autocorrelation_decay.csv", index=False)
 
     rng = np.random.default_rng(seed)
 
@@ -382,9 +405,12 @@ def run_bootstrap(cache, cfg, out_dir: Path, lengths_ms, primary_ms, n_boot, n_s
         return float(r[col].iloc[0]) if len(r) else float("nan")
 
     ci_rows, rank_rows, cov_rows = [], [], []
+    prim_rank = {}
     for mi, metric in enumerate(METRICS):
         sim = SIMILARITY[metric]
-        for ca, cb, a, b in pairs:
+        _, ranks = _rank_stats(prim[mi], pairs, sim)
+        prim_rank[metric] = ranks
+        for pi, (ca, cb, a, b) in enumerate(pairs):
             vals = prim[mi][:, a, b]
             defined = np.isfinite(vals)
             v = vals[defined]
@@ -398,22 +424,34 @@ def run_bootstrap(cache, cfg, out_dir: Path, lengths_ms, primary_ms, n_boot, n_s
                             "n_replicates": int(v.size)})
             cov_rows.append({"metric": metric, "class_a": ca, "class_b": cb,
                              "defined_fraction": float(defined.mean()), "n_replicates": int(vals.size)})
-            # rank among all pairs (1 = most similar)
-            ranks = []
-            for rep in range(prim.shape[1]):
-                col = prim[mi][rep]
-                pv = np.array([col[x, y] for _, _, x, y in pairs])
-                order = np.argsort(-pv if sim else pv)
-                ranks.append(int(np.flatnonzero(np.array([p[2] == a and p[3] == b for p in pairs])[order])[0]) + 1)
-            ranks = np.array(ranks)
+            rr = ranks[:, pi]
             rank_rows.append({"metric": metric, "class_a": ca, "class_b": cb,
-                              "prob_top5": float((ranks <= 5).mean()), "rank_mean": float(ranks.mean()),
-                              "rank_median": float(np.median(ranks)), "rank_min": int(ranks.min()),
-                              "rank_max": int(ranks.max()), "n_pairs": len(pairs)})
+                              "prob_top5": float((rr <= 5).mean()), "rank_mean": float(rr.mean()),
+                              "rank_median": float(np.median(rr)), "rank_min": int(rr.min()),
+                              "rank_max": int(rr.max()), "n_pairs": len(pairs)})
 
     pd.DataFrame(ci_rows).to_csv(out_dir / "bootstrap_pairwise_cis.csv", index=False)
     pd.DataFrame(rank_rows).to_csv(out_dir / "bootstrap_rank_stability.csv", index=False)
     pd.DataFrame(cov_rows).to_csv(out_dir / "bootstrap_defined_coverage.csv", index=False)
+
+    # rank stability compared across block lengths
+    sens_rank = {}
+    for L, arr in sens.items():
+        sens_rank[L] = {metric: _rank_stats(arr[mi], pairs, SIMILARITY[metric])[1]
+                        for mi, metric in enumerate(METRICS)}
+    cmp_rows = []
+    for metric in METRICS:
+        pr = prim_rank[metric]
+        for pi, (ca, cb, a, b) in enumerate(pairs):
+            row = {"metric": metric, "class_a": ca, "class_b": cb,
+                   f"prob_top5_{primary_ms // 1000}s": float((pr[:, pi] <= 5).mean()),
+                   f"rank_mean_{primary_ms // 1000}s": float(pr[:, pi].mean())}
+            for L in sorted(sens):
+                r = sens_rank[L][metric][:, pi]
+                row[f"prob_top5_{L // 1000}s"] = float((r <= 5).mean())
+                row[f"rank_mean_{L // 1000}s"] = float(r.mean())
+            cmp_rows.append(row)
+    pd.DataFrame(cmp_rows).to_csv(out_dir / "bootstrap_rank_stability_comparison.csv", index=False)
 
     # sensitivity: mean CI width per metric per length
     sens_rows = []
@@ -436,6 +474,9 @@ def run_bootstrap(cache, cfg, out_dir: Path, lengths_ms, primary_ms, n_boot, n_s
 
     cfg_out = {"n_bootstrap": n_boot, "n_sensitivity": n_sens, "seed": seed,
                "fine_block_ms": fine, "block_lengths_ms": lengths_ms, "primary_block_ms": primary_ms,
+               "acf_lags": acf_lags,
+               "coarse_blocks_per_length_ms": {str(L): n for L, n in coarse_counts.items()},
+               "primary_temporal_blocks": coarse_counts[primary_ms],
                "metrics": METRICS, "normalisation": "training-only gmean/gstd recomputed per replicate",
                "fixed_universe": True, "fixed_host_padding": {"L_host": cache["L_host"], "L_pair": cache["L_pair"]},
                "wassertstein_subsample_cap": 3000, "train_blocks": len(cache["train_blocks"]),
@@ -444,10 +485,20 @@ def run_bootstrap(cache, cfg, out_dir: Path, lengths_ms, primary_ms, n_boot, n_s
 
     lines = ["# Step 1.3 - temporal block bootstrap", "",
              f"- Primary block length {primary_ms//1000}s, {n_boot} replicates; seed {seed}.",
-             f"- Training blocks: {len(cache['train_blocks'])}; classes: {', '.join(labels)}.",
+             f"- Training fine (60 s) blocks: {len(cache['train_blocks'])}; "
+             f"coarse blocks: " + ", ".join(f"{L//1000}s={n}" for L, n in sorted(coarse_counts.items()))
+             + ".",
+             f"- **Caveat:** coarse-block count limits effective temporal information "
+             f"(primary = {coarse_counts[primary_ms]} blocks); replicate count improves Monte-Carlo "
+             "precision only, not the number of independent blocks.",
+             f"- Classes: {', '.join(labels)}.",
              "- Blocks are contiguous training time spans; all classes (incl. benign) move together;",
              "  the same blocks are used for every pair; gmean/gstd are recomputed per replicate.",
              "- Categorical universe and host-degree padding are FIXED to the full-train values.",
+             "",
+             "## Defined coverage (primary)", "",
+             f"- All pairs defined in {min(r['defined_fraction'] for r in cov_rows)*100:.1f}%-"
+             f"{max(r['defined_fraction'] for r in cov_rows)*100:.1f}% of replicates.",
              "",
              "## 95% CI width by block length (mean over pairs)", "",
              "| metric | " + " | ".join(f"{L//1000}s" for L in [primary_ms] + sorted(sens)) + " |",
@@ -468,6 +519,16 @@ def run_bootstrap(cache, cfg, out_dir: Path, lengths_ms, primary_ms, n_boot, n_s
             lines.append(f"- {r.class_a}-{r.class_b}: observed {r.observed:.4f}, "
                          f"95% CI [{r.ci_low:.4f}, {r.ci_high:.4f}]")
         lines.append("")
+    lines += ["", "## Rank stability across block lengths (probability of top-5)", "",
+              "| metric | pair | " + " | ".join(f"{L//1000}s" for L in [primary_ms] + sorted(sens)) + " |",
+              "| --- | --- | " + " | ".join("---" for _ in [primary_ms] + sorted(sens)) + " |"]
+    cdf = pd.DataFrame(cmp_rows)
+    for metric in METRICS:
+        d = cdf[cdf["metric"] == metric].sort_values(f"rank_mean_{primary_ms // 1000}s").head(6)
+        for r in d.to_dict("records"):
+            cells = [f"{r[f'prob_top5_{primary_ms // 1000}s']:.2f}"]
+            cells += [f"{r[f'prob_top5_{L // 1000}s']:.2f}" for L in sorted(sens)]
+            lines.append(f"| {metric} | {r['class_a']}-{r['class_b']} | " + " | ".join(cells) + " |")
     (out_dir / "bootstrap_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"primary": prim, "sens": sens}
 
@@ -602,9 +663,10 @@ def main():
     b.add_argument("--baseline-dir", type=Path, default=acs.STEP_DIR / "outputs" / "unsw_full")
     b.add_argument("--out", type=Path, default=acs.STEP_DIR / "outputs" / "unsw_uncertainty" / "bootstrap")
     b.add_argument("--block-lengths-s", type=int, nargs="+", default=[60, 300, 900])
-    b.add_argument("--primary-length-s", type=int, default=300)
+    b.add_argument("--primary-length-s", type=int, default=900)
     b.add_argument("--boot", type=int, default=500)
-    b.add_argument("--sens-boot", type=int, default=150)
+    b.add_argument("--sens-boot", type=int, default=500)
+    b.add_argument("--acf-lags", type=int, default=30)
     b.add_argument("--seed", type=int, default=0)
     b.add_argument("--chunk", type=int, default=250_000)
     b.add_argument("--max-rows", type=int, default=None)
@@ -630,7 +692,8 @@ def main():
         cache = load_blocks(args.data, cfg, attack_classes, cuts)
         cfg["baseline_dir"] = args.baseline_dir
         run_bootstrap(cache, cfg, args.out, [L * 1000 for L in args.block_lengths_s],
-                      args.primary_length_s * 1000, args.boot, args.sens_boot, args.seed)
+                      args.primary_length_s * 1000, args.boot, args.sens_boot, args.seed,
+                      acf_lags=args.acf_lags)
         print(f"[1.3] wrote {args.out}")
     else:
         relation_windows(args.data, cfg, attack_classes, cuts, args.out, args.window_sizes_ms)
