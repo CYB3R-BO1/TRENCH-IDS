@@ -8,3 +8,4 @@ __pycache__/
 step-1/outputs/*
 !step-1/outputs/unsw_full/
 !step-1/outputs/unsw_full/**
+step-1/similarity_report.md
