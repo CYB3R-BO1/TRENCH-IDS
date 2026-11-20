@@ -1,0 +1,15 @@
+{
+  "estimand": "per-class contiguous chronological split",
+  "global_feature_mean_std": {
+    "current_scope": "attack-train flows of all classes UNION benign assigned by the precedence policy (t < max per-class t70)",
+    "current_benign_flows_included": 16772031,
+    "problem": "the precedence policy puts nearly all benign into 'train', including time that is validation/test for some classes -> val/test benign leaks into the global standardisation",
+    "recommended_scope": "benign from the union of per-class TRAIN windows only",
+    "recommended_benign_flows_included": 14732002,
+    "excluded_benign_flows": 2040029
+  },
+  "per_class_feature_mean": "that class's TRAIN-window flows only (correct, unchanged)",
+  "similarity_calculations": "per-class TRAIN windows only",
+  "validation_test_transform": "would use the same (train-derived) global mean/std; with the current precedence policy these stats are contaminated by validation/test benign",
+  "window_assignment": "60000 ms aligned; a window belongs to exactly one split per class"
+}

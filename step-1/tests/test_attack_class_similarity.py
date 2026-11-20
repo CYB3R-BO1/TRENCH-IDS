@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import attack_class_similarity as acs  # noqa: E402
 import feature_schema as fs  # noqa: E402
 import step1_3_uncertainty as u13  # noqa: E402
+import ton_benign_audit as tba  # noqa: E402
 import ton_class_contiguous as tcc  # noqa: E402
 import window_sweep as ws  # noqa: E402
 
@@ -632,6 +633,13 @@ class TestTonContiguous(unittest.TestCase):
         self.assertEqual(tcc._snap(1556029139999), 1556029080000)
         self.assertEqual(tcc._snap(1556029140000), 1556029140000)
         self.assertEqual(tcc._snap(1556029140000) % tcc.ALIGN_MS, 0)
+
+
+class TestTonBenignAudit(unittest.TestCase):
+    def test_split_of_window(self):
+        self.assertEqual(tba.split_of(0, 60000, 120000), 0)
+        self.assertEqual(tba.split_of(1, 60000, 120000), 1)
+        self.assertEqual(tba.split_of(2, 60000, 120000), 2)
 
 
 if __name__ == "__main__":

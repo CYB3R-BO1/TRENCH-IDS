@@ -1,0 +1,10 @@
+class,train_flows,status
+Backdoor,142242,train_supported
+ddos,2897088,train_supported
+dos,142098,train_supported
+injection,266120,train_supported
+mitm,4140,train_supported
+password,1113551,train_supported
+ransomware,2681,train_supported
+scanning,905605,train_supported
+xss,1979768,train_supported

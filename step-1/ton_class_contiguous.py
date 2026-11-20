@@ -52,6 +52,7 @@ def per_class_cuts(data_path: Path, cfg: dict, classes: list[str]):
             if m.any():
                 parts[c].append(t[m].copy())
     cuts = {}
+    win_split = {}
     for c in classes:
         ts = np.sort(np.concatenate(parts[c])) if parts[c] else np.array([], dtype=np.int64)
         if ts.size < 3:
@@ -63,11 +64,30 @@ def per_class_cuts(data_path: Path, cfg: dict, classes: list[str]):
             t70 = _snap(q70); t85 = min(_snap(q85), int(ts[-1]) // ALIGN_MS * ALIGN_MS + ALIGN_MS)
         cuts[c] = {"t70": int(t70), "t85": int(t85), "n": int(ts.size),
                    "first": int(ts[0]), "last": int(ts[-1])}
-    return cuts
+        wu, inv = np.unique((ts // ALIGN_MS).astype(np.int64), return_inverse=True)
+        wts = (wu * ALIGN_MS)
+        win_split[c] = {int(w): (0 if t < t70 else (1 if t < t85 else 2))
+                        for w, t in zip(wu.tolist(), wts.tolist())}
+    return cuts, win_split
 
 
-def build(data_path: Path, cfg: dict, classes: list[str], cuts: dict) -> dict:
+def _merged_window_split(win_split):
+    """window -> split array (classes are temporally disjoint, so windows do not conflict)."""
+    allkeys = [w for d in win_split.values() if d for w in d]
+    if not allkeys:
+        return None
+    lo, hi = min(allkeys), max(allkeys)
+    arr = np.full(hi - lo + 1, -1, dtype=np.int8)
+    for d in win_split.values():
+        for w, s in d.items():
+            arr[w - lo] = s
+    return lo, arr
+
+
+def build(data_path: Path, cfg: dict, classes: list[str], cuts: dict, win_split=None) -> dict:
     names = [acs.BENIGN] + list(classes)
+    wsplit = _merged_window_split(win_split or {})
+    wsplit_lo, wsplit_arr = wsplit if wsplit else (0, None)
     code_of = {n: i for i, n in enumerate(names)}
     K = len(names)
     features = acs.MAGNITUDE_FEATURES
@@ -91,7 +111,6 @@ def build(data_path: Path, cfg: dict, classes: list[str], cuts: dict) -> dict:
     benign_flow_win: dict[int, int] = defaultdict(int)  # window -> benign flows
 
     t70s = np.array([cuts[c]["t70"] for c in classes if cuts[c]], dtype=np.int64)
-    t85s = np.array([cuts[c]["t85"] for c in classes if cuts[c]], dtype=np.int64)
 
     n_rows = 0
     for chunk in acs._iter_csv(data_path, cfg):
@@ -114,12 +133,13 @@ def build(data_path: Path, cfg: dict, classes: list[str], cuts: dict) -> dict:
             if m.any():
                 sp_att[m] = np.where(t[m] < cut["t70"], 0, np.where(t[m] < cut["t85"], 1, 2))
         is_benign = codes == 0
-        # benign split by precedence train > val > test over class intervals
-        bsplit = np.full(len(chunk), 2, dtype=np.int8)
-        if t70s.size:
-            bsplit[t >= int(t85s.min())] = 2
-            bsplit[(t >= int(t70s.min())) & (t < int(t85s.max()))] = 1
-            bsplit[t < int(t70s.max())] = 0  # union of train intervals
+        # benign matched by WINDOW MEMBERSHIP: a benign window takes the split of the class it
+        # contains; windows with no class are unused. This keeps val/test benign out of g_*.
+        bsplit = np.full(len(chunk), -1, dtype=np.int8)
+        if wsplit_arr is not None:
+            widx = (t // ALIGN_MS).astype(np.int64) - wsplit_lo
+            ok = (widx >= 0) & (widx < wsplit_arr.size)
+            bsplit[ok] = wsplit_arr[widx[ok]]
         # global standardisation reference = any train flow (attack-train or benign-train)
         gmask = ((sp_att == 0) | (is_benign & (bsplit == 0)))
         if gmask.any():
@@ -128,13 +148,15 @@ def build(data_path: Path, cfg: dict, classes: list[str], cuts: dict) -> dict:
             g_sum += np.nansum(Lt, axis=0)
             g_sumsq += np.nansum(Lt * Lt, axis=0)
         if is_benign.any():
-            benign_split += np.bincount(bsplit[is_benign], minlength=3)
-            bidx = np.flatnonzero(is_benign)
-            bw = (t[bidx] // ALIGN_MS).astype(np.int64)
-            u, inv = np.unique(bw, return_inverse=True)
-            cnts = np.bincount(inv, minlength=u.size)
-            for b, cn in zip(u.tolist(), cnts.tolist()):
-                benign_flow_win[int(b)] += int(cn)
+            bm = is_benign & (bsplit >= 0)
+            if bm.any():
+                benign_split += np.bincount(bsplit[bm], minlength=3)
+                bidx = np.flatnonzero(bm)
+                bw = (t[bidx] // ALIGN_MS).astype(np.int64)
+                u, inv = np.unique(bw, return_inverse=True)
+                cnts = np.bincount(inv, minlength=u.size)
+                for b, cn in zip(u.tolist(), cnts.tolist()):
+                    benign_flow_win[int(b)] += int(cn)
 
         cat_codes, cat_ok = {}, {}
         for j, field in enumerate(acs.CATEGORICAL_FIELDS):
@@ -235,8 +257,9 @@ def write_outputs(d, extra, cuts, cfg, args, prov):
         "windows_train_for_multiple_classes": len(win_shared),
         "benign_flows_in_multi_class_train_windows": int(sum(
             extra["benign_flow_win"].get(b, 0) for b in win_shared)),
-        "note": "benign is assigned per window by precedence train>val>test; reuse across class "
-                "train sets is shared-normal exposure, reported not removed.",
+        "note": "benign is matched by window membership: a benign window takes the split of the "
+                "class it contains; windows with no class are unused, so val/test benign never "
+                "enters training statistics.",
     }
     split_manifest = {
         "mode": "per_class_contiguous_chronological",
@@ -341,9 +364,9 @@ def main():
     sha = "skipped" if args.skip_hash else acs.sha256(args.data)
     classes = acs.discover_attack_classes(args.data, cfg)
     print(f"[contig] {len(classes)} attack classes: {classes}")
-    cuts = per_class_cuts(args.data, cfg, classes)
+    cuts, win_split = per_class_cuts(args.data, cfg, classes)
     print("[contig] per-class cuts ready")
-    d, extra = build(args.data, cfg, classes, cuts)
+    d, extra = build(args.data, cfg, classes, cuts, win_split)
     prov = {"data_path": str(args.data.resolve()), "data_sha256": sha,
             "data_size_mb": round(args.data.stat().st_size / 1e6, 1),
             "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}

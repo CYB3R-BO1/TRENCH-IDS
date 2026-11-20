@@ -1,0 +1,11 @@
+check,value
+benign_windows_used_by_any_class,5328
+benign_flows_in_used_windows,16554988
+windows_used_by_multiple_classes,0
+windows_with_conflicting_split_assignment,0
+B_train_intersect_B_val_flows,0
+B_train_intersect_B_test_flows,0
+B_val_intersect_B_test_flows,0
+pooled_precedence_benign_train_flows,16772031
+window_matched_benign_train_flows,14732002
+benign_flows_excluded_by_window_matching,2040029

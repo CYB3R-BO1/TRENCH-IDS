@@ -172,6 +172,30 @@ support/feasibility kept; (D) per-class coverage + first-occurrence ordering rep
   train period may follow another's test period). Do **not** compare its numbers directly with
   the UNSW global-chronological run.
 
+### Benign partition audit and normalisation-scope correction
+
+Read-only audit (`ton_benign_audit.py`) -> `benign_task_matching.csv`,
+`benign_partition_overlap_audit.csv`, `task_split_temporal_audit.csv`,
+`normalization_scope.json`, `benign_partition_audit.md` (in `ton_class_contiguous/`).
+
+- **Partition isolation holds.** Classes are temporally disjoint, so **0 windows are used by more
+  than one class** and **0 windows have conflicting train/val/test assignments**:
+  B_train n B_val = B_train n B_test = B_val n B_test = empty.
+- **Per-class matched benign varies enormously** (`benign_task_matching.csv`): e.g. mitm train
+  1,755,629 benign for only 4,140 attack flows, scanning 8,327,687 / 905,605, versus injection
+  67,149 / 266,120 and xss 283,026 / 1,977,968. Benign:attack imbalance is class-dependent.
+- **The precedence policy was wrong.** It put **16,772,031** benign flows into "train" -
+  including **2,040,029** that are validation/test for some class - so val/test benign leaked
+  into the global mean/std.
+- **Correction applied** (new outputs, current run preserved): benign is matched by window
+  membership, so the global mean/std uses benign from per-class TRAIN windows only ->
+  **train 14,732,002 / val 920,895 / test 902,091**, with 0 val/test benign in training stats.
+  See `outputs/ton_class_contiguous_benignmatched/`.
+- **Impact:** relation and JS similarities are unchanged (they never used the global benign);
+  cosine changes by mean |delta| 0.0068 / max 0.0155. Conclusions are unchanged
+  (injection-password-xss cluster; scanning the outlier). Per-class means and the similarity
+  inputs were always train-only.
+
 ### Still to do for ToN
 
 Window-size feasibility sweep, then per-class temporal autocorrelation, then a ToN-specific

@@ -1,0 +1,71 @@
+{
+  "mode": "per_class_contiguous_chronological",
+  "align_ms": 60000,
+  "split_quantiles": [
+    0.7,
+    0.85
+  ],
+  "estimand": "per-class chronological; NOT a globally forward-in-time split",
+  "per_class_cuts": {
+    "Backdoor": {
+      "t70": 1556508240000,
+      "t85": 1556519700000
+    },
+    "ddos": {
+      "t70": 1556241180000,
+      "t85": 1556247360000
+    },
+    "dos": {
+      "t70": 1556151660000,
+      "t85": 1556156160000
+    },
+    "injection": {
+      "t70": 1556182680000,
+      "t85": 1556185680000
+    },
+    "mitm": {
+      "t70": 1556546400000,
+      "t85": 1556547300000
+    },
+    "password": {
+      "t70": 1556325240000,
+      "t85": 1556331420000
+    },
+    "ransomware": {
+      "t70": 1556427660000,
+      "t85": 1556428260000
+    },
+    "scanning": {
+      "t70": 1556086260000,
+      "t85": 1556088660000
+    },
+    "xss": {
+      "t70": 1556360940000,
+      "t85": 1556364840000
+    }
+  },
+  "class_order_by_first_occurrence": [
+    "scanning",
+    "dos",
+    "injection",
+    "ddos",
+    "password",
+    "xss",
+    "ransomware",
+    "Backdoor",
+    "mitm"
+  ],
+  "benign_audit": {
+    "benign_flows_by_split": {
+      "train": 14732002,
+      "val": 920895,
+      "test": 902091
+    },
+    "windows_train_for_multiple_classes": 0,
+    "benign_flows_in_multi_class_train_windows": 0,
+    "note": "benign is matched by window membership: a benign window takes the split of the class it contains; windows with no class are unused, so val/test benign never enters training statistics."
+  },
+  "dataset": "NF-ToN-IoT-v3",
+  "sha256": "53ec8f468a43ede9b1536fabc0390af2fa33ab4312b23ce4d864f186a4651f78",
+  "rows": 27520260
+}
