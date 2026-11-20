@@ -1,0 +1,5 @@
+,ddos,dos,injection,scanning
+ddos,0,7,7,7
+dos,7,0,7,7
+injection,7,7,0,7
+scanning,7,7,7,0

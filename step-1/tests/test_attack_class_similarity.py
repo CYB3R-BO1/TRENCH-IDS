@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import attack_class_similarity as acs  # noqa: E402
 import feature_schema as fs  # noqa: E402
 import step1_3_uncertainty as u13  # noqa: E402
+import ton_class_contiguous as tcc  # noqa: E402
 import window_sweep as ws  # noqa: E402
 
 TOY_ATTACKS = ["Alpha", "Beta", "Gamma"]
@@ -624,6 +625,13 @@ class TestStep13(unittest.TestCase):
         _, ranks = u13._rank_stats(arr, pairs, sim=True)
         self.assertEqual(list(ranks[0]), [1, 2, 3])
         self.assertEqual(list(ranks[1]), [2, 1, 3])
+
+
+class TestTonContiguous(unittest.TestCase):
+    def test_snap_to_60s_grid(self):
+        self.assertEqual(tcc._snap(1556029139999), 1556029080000)
+        self.assertEqual(tcc._snap(1556029140000), 1556029140000)
+        self.assertEqual(tcc._snap(1556029140000) % tcc.ALIGN_MS, 0)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,10 @@ step-1/outputs/*
 !step-1/outputs/unsw_full/**
 !step-1/outputs/ton_full/
 !step-1/outputs/ton_full/**
+!step-1/outputs/ton_global_chrono/
+!step-1/outputs/ton_global_chrono/**
+!step-1/outputs/ton_class_contiguous/
+!step-1/outputs/ton_class_contiguous/**
 !step-1/outputs/unsw_window_sweep/
 !step-1/outputs/unsw_window_sweep/**
 !step-1/outputs/unsw_uncertainty/

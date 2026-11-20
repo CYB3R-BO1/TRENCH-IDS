@@ -1,0 +1,16 @@
+class,flag_field
+Backdoor,TCP_FLAGS
+Backdoor,CLIENT_TCP_FLAGS
+Backdoor,SERVER_TCP_FLAGS
+mitm,TCP_FLAGS
+mitm,CLIENT_TCP_FLAGS
+mitm,SERVER_TCP_FLAGS
+password,TCP_FLAGS
+password,CLIENT_TCP_FLAGS
+password,SERVER_TCP_FLAGS
+ransomware,TCP_FLAGS
+ransomware,CLIENT_TCP_FLAGS
+ransomware,SERVER_TCP_FLAGS
+xss,TCP_FLAGS
+xss,CLIENT_TCP_FLAGS
+xss,SERVER_TCP_FLAGS

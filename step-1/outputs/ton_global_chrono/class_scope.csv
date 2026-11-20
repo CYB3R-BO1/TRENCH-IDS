@@ -1,0 +1,11 @@
+class,train_flows,status
+Benign,13642780,train_supported
+Backdoor,0,zero_train_support
+ddos,3674386,train_supported
+dos,203456,train_supported
+injection,381777,train_supported
+mitm,0,zero_train_support
+password,0,zero_train_support
+ransomware,0,zero_train_support
+scanning,1358977,train_supported
+xss,0,zero_train_support

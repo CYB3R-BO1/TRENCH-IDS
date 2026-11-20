@@ -1,0 +1,7 @@
+class_a,class_b,wasserstein,rank
+ddos,scanning,0.6223249225262161,1
+ddos,dos,0.8577103869163109,2
+dos,scanning,0.9586028385493475,3
+ddos,injection,2.076391120524941,4
+dos,injection,2.407195888207176,5
+injection,scanning,2.6932243208607765,6

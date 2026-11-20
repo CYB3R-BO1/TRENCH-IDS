@@ -1,0 +1,7 @@
+class_a,class_b,src_host_jaccard,dst_host_jaccard
+ddos,dos,0.222222,0.11194
+ddos,injection,0.333333,0.23913
+ddos,scanning,0.105263,0.036765
+dos,injection,0.25,0.096296
+dos,scanning,0.263158,0.047753
+injection,scanning,0.190476,0.025547

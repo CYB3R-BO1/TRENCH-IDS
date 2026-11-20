@@ -1,0 +1,11 @@
+class,family,description
+Benign,Benign,Normal background traffic (shared negative class).
+Backdoor,Backdoor,
+ddos,ddos,
+dos,dos,
+injection,injection,
+mitm,mitm,
+password,password,
+ransomware,ransomware,
+scanning,scanning,
+xss,xss,

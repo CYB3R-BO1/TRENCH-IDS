@@ -1,0 +1,11 @@
+class,is_attack,flows
+Benign,False,16792214
+Backdoor,True,203384
+ddos,True,4141256
+dos,True,203456
+injection,True,381777
+mitm,True,6013
+password,True,1594777
+ransomware,True,3971
+scanning,True,1358977
+xss,True,2834435

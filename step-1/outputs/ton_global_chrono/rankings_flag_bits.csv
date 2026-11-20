@@ -1,0 +1,7 @@
+class_a,class_b,flag_bits_similarity,rank
+dos,scanning,0.974233568776619,1
+ddos,injection,0.8273432751558834,2
+ddos,scanning,0.7770948642669466,3
+ddos,dos,0.730121744412507,4
+injection,scanning,0.612747285646086,5
+dos,injection,0.5686896021403995,6

@@ -1,0 +1,10 @@
+class,flows,train_flows,val_flows,test_flows,min_split_flows,attack_floor_ok,train_supported
+Backdoor,203384,142242,30560,30582,30560,True,True
+ddos,4141256,2897088,622335,621833,621833,True,True
+dos,203456,142098,30730,30628,30628,True,True
+injection,381777,266120,58189,57468,57468,True,True
+mitm,6013,4140,956,917,917,False,True
+password,1594777,1113551,240391,240835,240391,True,True
+ransomware,3971,2681,694,596,596,False,True
+scanning,1358977,905605,191427,261945,191427,True,True
+xss,2834435,1979768,428391,426276,426276,True,True

@@ -1,0 +1,21 @@
+class_a,class_b,defined,reason
+ddos,Backdoor,False,Backdoor has zero_train_support
+ddos,mitm,False,mitm has zero_train_support
+ddos,password,False,password has zero_train_support
+ddos,ransomware,False,ransomware has zero_train_support
+ddos,xss,False,xss has zero_train_support
+dos,Backdoor,False,Backdoor has zero_train_support
+dos,mitm,False,mitm has zero_train_support
+dos,password,False,password has zero_train_support
+dos,ransomware,False,ransomware has zero_train_support
+dos,xss,False,xss has zero_train_support
+injection,Backdoor,False,Backdoor has zero_train_support
+injection,mitm,False,mitm has zero_train_support
+injection,password,False,password has zero_train_support
+injection,ransomware,False,ransomware has zero_train_support
+injection,xss,False,xss has zero_train_support
+scanning,Backdoor,False,Backdoor has zero_train_support
+scanning,mitm,False,mitm has zero_train_support
+scanning,password,False,password has zero_train_support
+scanning,ransomware,False,ransomware has zero_train_support
+scanning,xss,False,xss has zero_train_support

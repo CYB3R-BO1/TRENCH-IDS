@@ -136,23 +136,47 @@ at 10 s and 5 s, with distributions and CVs rather than a single aggregate.
 
 ## Step 1.4 - independent NF-ToN-IoT-v3 analysis
 
-Run: `python attack_class_similarity.py --dataset ton --out outputs/ton_full --seed 0`
-(27,520,260 flows, 5.3 GB, sha256 `53ec8f46...`); split 69.99 / 15.01 / 15.00.
-Bootstrap block length is **not** transferred from UNSW - ToN temporal dependence must be
-measured on its own.
+Two ToN runs, kept separate; the UNSW 10 s/900 s configuration is **not** transferred.
 
-- 9 attack classes discovered, but only **4 are train-supported**: ddos, dos, injection,
-  scanning. Backdoor, mitm, password, ransomware, xss have **zero training flows**.
-- **Attack classes are nearly temporally disjoint across the split** (dos/injection/scanning
-  train-only; ddos train+val; xss val+test; password val-only; Backdoor/mitm/ransomware
-  test-only). A single global chronological split therefore leaves most classes unsupported
-  for training.
-- Similarity over the 4 supported classes: cosine ddos-injection 0.51 (highest) but
-  ddos-scanning **-0.80** (opposite profiles); JS ddos-injection 0.23; Wasserstein
-  ddos-scanning 0.62; relation ddos-injection 0.66.
-- **Open issue:** before any ToN task construction, decide a ToN-appropriate split (e.g.
-  per-class temporal windows or stratification) and measure ToN's own ACF/window behaviour.
-  Do not reuse UNSW conclusions.
+### Reference: global chronological split (`outputs/ton_global_chrono/`, also `ton_full/`)
+
+Run: `python attack_class_similarity.py --dataset ton --out outputs/ton_full --seed 0`
+(27,520,260 flows, sha256 `53ec8f46...`; split 69.99/15.01/15.00).
+
+- Only **4 of 9 classes are train-supported** (ddos, dos, injection, scanning); the other five
+  have zero training flows, and the classes are **nearly temporally disjoint** across the split
+  (dos/injection/scanning train-only; ddos train+val; xss val+test; password val-only;
+  Backdoor/mitm/ransomware test-only). Useful for studying temporal emergence, unusable for a
+  conventional 9-class supervised / continual-learning experiment.
+
+### Primary: per-class contiguous chronological split (`outputs/ton_class_contiguous/`)
+
+Run: `python ton_class_contiguous.py --dataset ton --out outputs/ton_class_contiguous --seed 0`.
+Each attack class gets its own 70/15/15 cut points (60 s aligned), so every class keeps a
+temporal train -> val -> test direction. Safeguards: (A) 60 s-aligned cuts, so no physical
+window is split for a class; (B) benign matched per window with reuse audited; (C) minimum
+support/feasibility kept; (D) per-class coverage + first-occurrence ordering reported.
+
+- **All 9 classes now have train/val/test.** 7 meet the 3-split floor (>= 1000 in every split);
+  **mitm** (val 956) and **ransomware** (596) are train-supported but fail the all-split floor.
+- Classes run in sequence (first occurrence: scanning -> dos -> injection -> ddos -> password ->
+  xss -> ransomware -> Backdoor -> mitm, 2019-04-23 .. 04-29); per-class spans 2-26 h.
+- **No shared-normal exposure:** because the classes are temporally disjoint, **0 windows are
+  train for more than one class**. (Benign val/test counts are small under the pooling
+  precedence policy; per-class window-matched benign for task construction is still a follow-up.)
+- **Similarity (9x9).** A tight, metric-consistent cluster emerges: **injection-password-xss**
+  (cosine 0.91-0.94; JS 0.21-0.37; relation 0.58-0.71; flags 0.996-0.998). **scanning** is the
+  outlier (cosine negative with every class, -0.38 .. -0.89). ddos/dos are much less similar
+  than the global-split run implied (cosine 0.25).
+- **Estimand caveat:** this is not a globally forward-in-time deployment split (one class's
+  train period may follow another's test period). Do **not** compare its numbers directly with
+  the UNSW global-chronological run.
+
+### Still to do for ToN
+
+Window-size feasibility sweep, then per-class temporal autocorrelation, then a ToN-specific
+bootstrap block length, then per-window relation distributions - all computed independently.
+
 
 ## Design decisions
 - **Evidence only.** No task groupings, no task sequences, no model. (Per the agreed plan.)

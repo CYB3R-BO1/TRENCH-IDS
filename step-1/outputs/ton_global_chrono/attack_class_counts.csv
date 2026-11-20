@@ -1,0 +1,11 @@
+class,family,flows,share_of_file_pct,description
+Benign,Benign,16792214,61.0176,Normal background traffic (shared negative class).
+Backdoor,Backdoor,203384,0.739,
+ddos,ddos,4141256,15.048,
+dos,dos,203456,0.7393,
+injection,injection,381777,1.3873,
+mitm,mitm,6013,0.0218,
+password,password,1594777,5.7949,
+ransomware,ransomware,3971,0.0144,
+scanning,scanning,1358977,4.9381,
+xss,xss,2834435,10.2994,
