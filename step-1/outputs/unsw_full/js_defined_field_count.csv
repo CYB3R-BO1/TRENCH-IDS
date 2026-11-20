@@ -1,0 +1,8 @@
+,Backdoor,DoS,Exploits,Fuzzers,Generic,Reconnaissance,Shellcode
+Backdoor,0,9,9,9,9,9,9
+DoS,9,0,9,9,9,9,9
+Exploits,9,9,0,9,9,9,9
+Fuzzers,9,9,9,0,9,9,9
+Generic,9,9,9,9,0,9,9
+Reconnaissance,9,9,9,9,9,0,9
+Shellcode,9,9,9,9,9,9,0

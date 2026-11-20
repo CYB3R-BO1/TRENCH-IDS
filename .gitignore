@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.commandcode/
+
+# Run outputs: commit only the validated UNSW baseline; ignore everything else.
+step-1/outputs/*
+!step-1/outputs/unsw_full/
+!step-1/outputs/unsw_full/**

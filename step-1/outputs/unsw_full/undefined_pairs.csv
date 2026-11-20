@@ -1,0 +1,15 @@
+class_a,class_b,defined,reason
+Backdoor,Analysis,False,Analysis has low_train_support
+Backdoor,Worms,False,Worms has low_train_support
+DoS,Analysis,False,Analysis has low_train_support
+DoS,Worms,False,Worms has low_train_support
+Exploits,Analysis,False,Analysis has low_train_support
+Exploits,Worms,False,Worms has low_train_support
+Fuzzers,Analysis,False,Analysis has low_train_support
+Fuzzers,Worms,False,Worms has low_train_support
+Generic,Analysis,False,Analysis has low_train_support
+Generic,Worms,False,Worms has low_train_support
+Reconnaissance,Analysis,False,Analysis has low_train_support
+Reconnaissance,Worms,False,Worms has low_train_support
+Shellcode,Analysis,False,Analysis has low_train_support
+Shellcode,Worms,False,Worms has low_train_support
