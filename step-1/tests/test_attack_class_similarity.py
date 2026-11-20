@@ -19,6 +19,7 @@ import feature_schema as fs  # noqa: E402
 import step1_3_uncertainty as u13  # noqa: E402
 import ton_benign_audit as tba  # noqa: E402
 import ton_class_contiguous as tcc  # noqa: E402
+import ton_window_sweep as tws  # noqa: E402
 import window_sweep as ws  # noqa: E402
 
 TOY_ATTACKS = ["Alpha", "Beta", "Gamma"]
@@ -640,6 +641,22 @@ class TestTonBenignAudit(unittest.TestCase):
         self.assertEqual(tba.split_of(0, 60000, 120000), 0)
         self.assertEqual(tba.split_of(1, 60000, 120000), 1)
         self.assertEqual(tba.split_of(2, 60000, 120000), 2)
+
+
+class TestTonWindowSweep(unittest.TestCase):
+    def test_analyse_per_class_split(self):
+        total = np.array([5, 3, 0, 4]); benign = np.array([3, 1, 0, 2])
+        cls = np.array([[2, 2, 0, 0], [0, 0, 0, 2]])
+        cuts = {"A": (2000, 3000), "B": (2000, 3000)}
+        floors = {"A": True, "B": False}
+        comp, nat, acls, filt, ratio, mix = tws.analyse(
+            1000, 0, total, benign, cls, ["A", "B"], cuts, floors, [2, 5, 10, 20])
+        a_train = [r for r in nat if r["class"] == "A" and r["split"] == "train"][0]
+        self.assertEqual(a_train["windows"], 2)
+        self.assertEqual(a_train["attack_flows"], 4)
+        b_test = [r for r in nat if r["class"] == "B" and r["split"] == "test"][0]
+        self.assertEqual(b_test["attack_flows"], 2)
+        self.assertEqual([r for r in acls if r["class"] == "A" and r["split"] == "train"][0]["windows_class_ge2"], 2)
 
 
 if __name__ == "__main__":

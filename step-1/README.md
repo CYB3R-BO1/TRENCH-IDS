@@ -196,10 +196,31 @@ Read-only audit (`ton_benign_audit.py`) -> `benign_task_matching.csv`,
   (injection-password-xss cluster; scanning the outlier). Per-class means and the similarity
   inputs were always train-only.
 
+### Window-size feasibility sweep (`outputs/ton_window_sweep/`)
+
+Run: `python ton_window_sweep.py --dataset ton --out outputs/ton_window_sweep --seed 0`
+on the canonical benign-matched split; sizes 1/5/10/30/60 s, 60 s-aligned class cuts so all
+sizes stay isolated. Three views: natural, task-filtered, unlabeled context. No benign
+downsampling.
+
+- **Mixing is 0 by construction.** ToN attack classes occupy disjoint time windows, so no window
+  contains two attack classes - a fundamental difference from UNSW. Unlabeled context is ~0.
+- **Occupancy is very large.** Median flows/window (train): 27 (1 s), 110 (5 s), 202 (10 s),
+  514 (30 s), 943 (60 s); p90 up to 12,752 at 60 s. 1 s train has 179,461 windows (~3.95M flows
+  sit in windows containing no class and are not attributed to a split).
+- **Task-filtered feasibility is class-dependent** (train windows with >= 5 class flows):
+  ddos 27,798 (1 s) - 553 (60 s); password 36,394 - 648; xss 19,446 - 334; injection 5,452 - 141;
+  dos 14,348 - 368; scanning 5,452 - 425; Backdoor 2,583 - 1,176 but only **3** windows with >= 10
+  at 1 s. mitm (182 - 64) and **ransomware (100 - 51) are supplementary**, not forced.
+- **Benign:attack imbalance is extreme and class-dependent** (median, train): scanning 42 (1 s)
+  -> 228 (60 s); password/injection/xss 0.1-0.4 (attack-heavy); ddos ~1.4-2.2; Backdoor 0.5-1.3.
+- **The injection-password-xss cluster is feasible at every resolution** (all three have
+  thousands of >= 5 windows), so it can be tested across window sizes.
+
 ### Still to do for ToN
 
-Window-size feasibility sweep, then per-class temporal autocorrelation, then a ToN-specific
-bootstrap block length, then per-window relation distributions - all computed independently.
+Per-class temporal autocorrelation, then a ToN-specific bootstrap block length, then per-window
+relation distributions and uncertainty - all computed independently (no UNSW 10 s/900 s transfer).
 
 
 ## Design decisions

@@ -16,6 +16,8 @@ step-1/outputs/*
 !step-1/outputs/ton_class_contiguous/**
 !step-1/outputs/ton_class_contiguous_benignmatched/
 !step-1/outputs/ton_class_contiguous_benignmatched/**
+!step-1/outputs/ton_window_sweep/
+!step-1/outputs/ton_window_sweep/**
 !step-1/outputs/unsw_window_sweep/
 !step-1/outputs/unsw_window_sweep/**
 !step-1/outputs/unsw_uncertainty/
