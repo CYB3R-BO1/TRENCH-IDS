@@ -245,10 +245,32 @@ bins included, outside-period excluded); classes **never concatenated**; >= 30 l
 - Bootstrap (deferred) must resample **within each class's own sequence**; classes do not share
   contemporaneous blocks.
 
+### Temporal block bootstrap (`outputs/ton_uncertainty/bootstrap/`)
+
+Run: `python ton_bootstrap.py --dataset ton --manifest .../ton_class_contiguous_benignmatched/split_manifest.json
+--out outputs/ton_uncertainty/bootstrap`. Primary **30 min**, sensitivity **60 min**, 500 replicates.
+Resampling is **within each class's own contiguous training sequence** (classes never concatenated
+or shared); the same blocks are used across a class's pairwise comparisons; training-only
+normalisation is recomputed per replicate. Per the plan, UNSW's 900 s was not transferred.
+
+- **Blocks (30 / 60 min):** Backdoor 41/21, ddos 20/12, dos 13/7, injection 6/4, mitm 4/2,
+  password 22/12, ransomware 3/2, scanning 31/16, xss 12/7. Flagged < 5 blocks: 30 min =
+  mitm, ransomware; 60 min = injection, mitm, ransomware.
+- **Mean 95% CI width (30 vs 60 min):** cosine 0.215/0.255, Wasserstein 0.444/0.473,
+  JS 0.068/0.055, relation 0.106/0.099, flags 0.091/0.072.
+- **The injection-password-xss cluster is robust:** cosine 0.933/0.905/0.904 (30 min),
+  CI widths 0.040-0.057, and top-5 probability 1.00 for cosine and flags (JS 0.98-1.00).
+  So the cluster survives resampling in ToN as it did across UNSW resolutions.
+- Low-block classes (ransomware, mitm) get very wide CIs (e.g. password-ransomware cosine CI
+  width ~0.33) - reported, not hidden.
+- **Tractability note:** the bootstrap pools categorical fields over a top-256 universe (+ 'other')
+  and subsamples Wasserstein to 2,000 points per class; the point estimates match the full-support
+  pipeline, and CIs are computed on this equivalent pooling.
+
 ### Still to do for ToN
 
-Select the primary window size and the bootstrap block length, then run per-window relation
-distributions and the bootstrap - independent of UNSW (no 10 s/900 s transfer).
+Per-window relation distributions at 10 s / 5 s, then the final cross-dataset (UNSW vs ToN)
+comparison of Step-1 evidence.
 
 
 ## Design decisions

@@ -1,0 +1,10 @@
+class,blocks_30min,blocks_60min
+Backdoor,41,21
+ddos,20,12
+dos,13,7
+injection,6,4
+mitm,4,2
+password,22,12
+ransomware,3,2
+scanning,31,16
+xss,12,7

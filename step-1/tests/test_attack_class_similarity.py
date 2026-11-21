@@ -19,6 +19,7 @@ import feature_schema as fs  # noqa: E402
 import step1_3_uncertainty as u13  # noqa: E402
 import ton_autocorrelation as tacf  # noqa: E402
 import ton_benign_audit as tba  # noqa: E402
+import ton_bootstrap as tbs  # noqa: E402
 import ton_class_contiguous as tcc  # noqa: E402
 import ton_window_sweep as tws  # noqa: E402
 import window_sweep as ws  # noqa: E402
@@ -675,6 +676,19 @@ class TestTonAcf(unittest.TestCase):
         f, s = tacf._decay(np.array([0.9, 0.5, 0.1, 0.05]))
         self.assertEqual(f, 3)
         self.assertEqual(s, 3)
+
+
+class TestTonBootstrap(unittest.TestCase):
+    def test_pairwise_js_and_nan(self):
+        a = np.array([0.5, 0.5]); b = np.array([0.5, 0.5]); c = np.array([0.0, 0.0])
+        items = [("f", [a, b], [True, True]), ("g", [a, c], [True, False])]
+        out = tbs._pairwise_js(items, 2)
+        self.assertAlmostEqual(out[0, 1], 0.0)  # identical vectors -> JS 0
+
+    def test_pairwise_js_undefined(self):
+        items = [("f", [np.array([1.0, 0.0]), np.array([0.0, 0.0])], [True, False])]
+        out = tbs._pairwise_js(items, 2)
+        self.assertTrue(np.isnan(out[0, 1]))
 
 
 if __name__ == "__main__":
