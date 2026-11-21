@@ -21,6 +21,7 @@ import ton_autocorrelation as tacf  # noqa: E402
 import ton_benign_audit as tba  # noqa: E402
 import ton_bootstrap as tbs  # noqa: E402
 import ton_class_contiguous as tcc  # noqa: E402
+import ton_temporal_relations as ttr  # noqa: E402
 import ton_window_sweep as tws  # noqa: E402
 import window_sweep as ws  # noqa: E402
 
@@ -689,6 +690,25 @@ class TestTonBootstrap(unittest.TestCase):
         items = [("f", [np.array([1.0, 0.0]), np.array([0.0, 0.0])], [True, False])]
         out = tbs._pairwise_js(items, 2)
         self.assertTrue(np.isnan(out[0, 1]))
+
+
+class TestTonTemporalRelations(unittest.TestCase):
+    def test_metrics_entropy_and_undefined(self):
+        c = {k: Counter() for k, _ in ttr.FIELDS}
+        c["src"].update({1: 5, 2: 5})
+        m = ttr.metrics(c, 10)
+        self.assertEqual(m["src_distinct"], 2)
+        self.assertAlmostEqual(m["src_top_share"], 0.5)
+        self.assertAlmostEqual(m["src_entropy"], 1.0)
+        self.assertTrue(np.isnan(m["dst_entropy"]))       # undefined, not zero
+        self.assertEqual(m["dst_distinct"], 0)
+
+    def test_single_category_is_zero_entropy(self):
+        c = {k: Counter() for k, _ in ttr.FIELDS}
+        c["dst_port"].update({443: 7})
+        m = ttr.metrics(c, 7)
+        self.assertEqual(m["dst_port_entropy"], 0.0)      # genuine zero
+        self.assertAlmostEqual(m["dst_port_top_share"], 1.0)
 
 
 if __name__ == "__main__":

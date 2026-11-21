@@ -277,6 +277,32 @@ Per-window relation distributions at 10 s / 5 s, then the final cross-dataset (U
 comparison of Step-1 evidence.
 
 
+## Step 1.5 - ToN per-window relation statistics
+
+Run: `python ton_temporal_relations.py --dataset ton --manifest .../ton_class_contiguous_benignmatched/split_manifest.json
+--coverage .../ton_class_contiguous/class_temporal_coverage.csv --out outputs/ton_uncertainty/temporal_relations`.
+Windows 10 s (primary) and 5 s (sensitivity); task-filtered graph = benign + designated class;
+other attack classes excluded. Two populations per class/split: **A** = class present,
+**B** = benign-only windows in the same class interval. Undefined (no flows) is NaN, kept
+separate from genuine 0 entropy. Outputs: `relation_window_statistics_{10,5}s.csv`,
+`relation_temporal_distributions.csv`, `relation_temporal_stability.csv`,
+`relation_present_vs_absent.csv`, `temporal_relation_report.md`, figures.
+
+- **Attack presence changes structure for some classes only** (train, 10 s, graph): scanning
+  dst-port entropy 0.929 vs 0.578 (delta +0.351) and 690 vs 45 distinct src ports; injection
+  -0.436; password -0.566. By contrast Backdoor delta +0.006, mitm +0.009, ransomware -0.017,
+  i.e. their window structure is already present in benign traffic.
+- **Population B is absent for ddos/dos** (every window in their interval contains attack
+  flows) and very thin for password (18) and xss (8), so those A/B contrasts are weak/undefined.
+- **The injection-password-xss cluster is stable in aggregate but not structurally homogeneous
+  per window.** Attack-only dst-port entropy (train, 10 s): injection 0.135, password 0.000,
+  xss 0.921 - injection/password concentrate on one/few ports per window while xss is diverse.
+  Aggregate cosine similarity (~0.90-0.93) therefore reflects shared magnitude/categorical
+  profiles, not identical per-window connectivity.
+- **5 s vs 10 s ordering is preserved** (password < xss < injection < Backdoor in entropy);
+  values shift slightly and distinct-port counts roughly halve with the smaller window, as
+  expected from window size rather than a change in structure.
+
 ## Design decisions
 - **Evidence only.** No task groupings, no task sequences, no model. (Per the agreed plan.)
 - **One global chronological split** from all-flow `FLOW_START` quantiles
