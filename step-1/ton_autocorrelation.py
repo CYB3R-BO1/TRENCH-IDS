@@ -191,7 +191,9 @@ def main():
          f"- Lags: >= {a.lags}, extended to {LAG_CAP} if not decayed; detrending + log1p sensitivity.",
          f"- Data sha256 `{sha}`.",
          f"- **Suggested conservative block length: {suggested_s//60} min ({suggested_s} s)** "
-         f"= longest sustained dependence among primary classes.",
+         f"= longest finite RAW sustained crossing among primary classes (excludes Backdoor, whose "
+         f"raw ACF does not decay; detrended crossings reach up to 165 min for DoS). Chosen config: "
+         f"30 min primary / 60 min sensitivity.",
          "", "## Class temporal dependence", "",
          "| class | primary | interval | bins | lag1 | first<0.2 | sustained<0.2 | detrended sustained |",
          "| --- | --- | --- | --- | --- | --- | --- | --- |"]

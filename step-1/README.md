@@ -240,8 +240,12 @@ bins included, outside-period excluded); classes **never concatenated**; >= 30 l
   so no single block length is uniquely implied.
 - **Backdoor never decays raw** (lag-1 0.96, still >= 0.2 at 180 lags): its series is strongly
   non-stationary; detrending brings it to 77 min.
-- Rule-based suggestion = **76 min** (longest sustained among primary classes), but at 60 min
-  blocks injection has only 3 and xss 5 - **30 min** keeps >= 6 blocks for every primary class.
+- **Rule-based suggestion = 76 min** - this is the longest *finite raw* sustained crossing
+  among the primary classes (ddos/password); Backdoor's raw ACF never decays and DoS's
+  *detrended* crossing reaches 165 min, so 76 min is **not** the longest across estimators.
+  Chosen instead: **30 min primary / 60 min sensitivity**. At 60 min injection has only 3
+  blocks and xss 5; 30 min keeps >= 6 for every primary class. 30 min is an operational
+  compromise, not a claim of fully accounting for dependence.
 - Bootstrap (deferred) must resample **within each class's own sequence**; classes do not share
   contemporaneous blocks.
 

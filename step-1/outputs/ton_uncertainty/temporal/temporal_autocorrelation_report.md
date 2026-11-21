@@ -6,7 +6,7 @@
   outside-period excluded); classes never concatenated.
 - Lags: >= 30, extended to 180 if not decayed; detrending + log1p sensitivity.
 - Data sha256 `53ec8f468a43ede9b1536fabc0390af2fa33ab4312b23ce4d864f186a4651f78`.
-- **Suggested conservative block length: 76 min (4560 s)** = longest sustained dependence among primary classes.
+- **Suggested conservative block length: 76 min (4560 s)** = longest finite RAW sustained crossing among primary classes (excludes Backdoor, whose raw ACF does not decay; detrended crossings reach up to 165 min for DoS). DoS's detrended crossing (165 min) exceeds this, so 76 min is not the longest across estimators. Chosen config: 30 min primary / 60 min sensitivity.
 
 ## Class temporal dependence
 
