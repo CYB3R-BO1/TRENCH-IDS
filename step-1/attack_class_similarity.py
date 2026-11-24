@@ -45,8 +45,8 @@ import windows as winmod  # noqa: E402
 # --------------------------------------------------------------------------- #
 BENIGN = "Benign"
 DATASETS = {
-    "unsw": ("v3/UNSW/data/NF-UNSW-NB15-v3.csv", "NF-UNSW-NB15-v3"),
-    "ton": ("v3/ToN-IoT/NF-ToN-IoT-v3/data/NF-ToN-IoT-v3.csv", "NF-ToN-IoT-v3"),
+    "unsw": ("data/UNSW/data/NF-UNSW-NB15-v3.csv", "NF-UNSW-NB15-v3"),
+    "ton": ("data/ToN-IoT/NF-ToN-IoT-v3/data/NF-ToN-IoT-v3.csv", "NF-ToN-IoT-v3"),
 }
 DEFAULT_DATASET = "unsw"
 
@@ -111,12 +111,12 @@ RELATION_BLOCKS = [
 def find_repo_root(start: Path) -> Path:
     p = start.resolve()
     for _ in range(12):
-        if (p / "v3").is_dir():
+        if (p / "data").is_dir():
             return p
         if p.parent == p:
             break
         p = p.parent
-    raise SystemExit(f"could not locate a repo root containing 'v3' above {start}")
+    raise SystemExit(f"could not locate a repo root containing 'data' above {start}")
 
 
 STEP_DIR = Path(__file__).resolve().parent

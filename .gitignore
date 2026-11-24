@@ -4,6 +4,9 @@ __pycache__/
 .venv/
 .commandcode/
 
+# Raw NetFlow dataset bags (local data drops; not committed).
+data/
+
 # Run outputs: commit the validated baseline and the Step-1.2/1.3 evidence; ignore the rest.
 step-1/outputs/*
 !step-1/outputs/unsw_full/

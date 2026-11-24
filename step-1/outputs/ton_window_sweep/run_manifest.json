@@ -1,6 +1,6 @@
 {
   "dataset": "NF-ToN-IoT-v3",
-  "data_path": "C:\\Users\\cherr\\Documents\\PROJECTS\\TRENCH-IDS_research\\v3\\ToN-IoT\\NF-ToN-IoT-v3\\data\\NF-ToN-IoT-v3.csv",
+  "data_path": "C:\\Users\\cherr\\Documents\\PROJECTS\\TRENCH-IDS\\data\\ToN-IoT\\NF-ToN-IoT-v3\\data\\NF-ToN-IoT-v3.csv",
   "data_sha256": "53ec8f468a43ede9b1536fabc0390af2fa33ab4312b23ce4d864f186a4651f78",
   "seed": 0,
   "boundary_policy": "per-class 60 s-aligned cuts",

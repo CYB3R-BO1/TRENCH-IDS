@@ -390,23 +390,42 @@ are listed with reasons in `class_scope.csv` / `undefined_pairs.csv`; they are n
 dropped from the report.
 
 ```bash
-python -m unittest discover -s tests -v     # 57 tests
+python -m unittest discover -s tests -v     # 74 tests
 ```
 
-## Not yet implemented (next phase)
+## Next phase
 
-- Bootstrap confidence intervals for pairwise metrics (`--bootstrap`).
-- Per-window distributions of relation statistics (beyond the whole-split block distances).
+- Bootstrap confidence intervals for pairwise metrics: implemented via
+  `python step1_3_uncertainty.py bootstrap` (primary 900 s / sensitivity 300 s / exploratory 60 s
+  blocks, 500 replicates) — recorded in `outputs/unsw_uncertainty/bootstrap/` and
+  `outputs/ton_uncertainty/bootstrap/`.
+- Per-window distributions of relation statistics: implemented via
+  `python step1_3_uncertainty.py relation-windows` and `python ton_temporal_relations.py`
+  (10 s primary / 5 s sensitivity) — recorded in `outputs/ton_uncertainty/temporal_relations/`.
+- Final cross-dataset (UNSW vs ToN) comparison of the Step-1 evidence: recorded in
+  `outputs/cross_dataset_analysis/`.
+
+Outstanding: final task-sequence approval (`TRENCH_TASK_SEQUENCE_DESIGN.md`, draft) and the
+downstream model-training / continual-learning evaluation experiments.
 
 ## Files
 
 ```
-step-1/
-  attack_class_similarity.py   CLI / orchestration / metrics / report
-  feature_schema.py            feature roles (MAGNITUDE / IDENTIFIER / BITMASK / CATEGORICAL)
-  windows.py                   per-window feasibility
-  similarity_report.md         generated narrative (after a run)
-  README.md
-  tests/test_attack_class_similarity.py
-  outputs/                     (populated by a run; see "What this produces")
+attack_class_similarity.py    CLI / orchestration / metrics / report (datasets: unsw, ton)
+diagnostics.py                  feature-quality investigations (Step 1.2)
+feature_schema.py               feature roles (MAGNITUDE / IDENTIFIER / BITMASK / CATEGORICAL)
+step1_3_uncertainty.py         bootstrap + per-window relation stability (Step 1.3)
+ton_autocorrelation.py         per-class temporal autocorrelation
+ton_benign_audit.py            benign partition audit / normalisation-scope correction
+ton_bootstrap.py                temporal block bootstrap
+ton_class_contiguous.py        per-class contiguous chronological splits
+ton_temporal_relations.py      per-window relation statistics
+ton_window_sweep.py            ToN window-size feasibility sweep
+TRENCH_TASK_SEQUENCE_DESIGN.md draft task-sequence specification
+windows.py                      per-window feasibility
+window_sweep.py                 window-size feasibility sweep (unsw)
+similarity_report.md           generated narrative (after a run)
+README.md
+tests/test_attack_class_similarity.py
+outputs/                       (populated by a run; see "What this produces")
 ```

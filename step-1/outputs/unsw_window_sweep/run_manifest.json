@@ -1,6 +1,6 @@
 {
   "dataset": "NF-UNSW-NB15-v3",
-  "data_path": "C:\\Users\\cherr\\Documents\\PROJECTS\\TRENCH-IDS_research\\v3\\UNSW\\data\\NF-UNSW-NB15-v3.csv",
+  "data_path": "C:\\Users\\cherr\\Documents\\PROJECTS\\TRENCH-IDS\\data\\UNSW\\data\\NF-UNSW-NB15-v3.csv",
   "data_sha256": "4ebb97bd74412d566137d95a6fc3ffd8f374f1cf8cfe204d007848e7a668f9b5",
   "seed": 0,
   "boundary_policy": "global chronological quantiles aligned to 60000 ms",
