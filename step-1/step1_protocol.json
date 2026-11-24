@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "window": {"primary_ms": 10000, "sensitivity_ms": 5000, "exploratory_ms": 30000, "alignment_ms": 60000, "key": "floor(FLOW_START_MILLISECONDS / window_ms)"},
+  "allocation": {
+    "scope": "dataset_and_window_size_all_eligible_classes",
+    "match": "same_attack_present_window",
+    "traversal": "ascending_physical_window_id",
+    "priority": ["lowest_fraction_of_class_attack_present_windows_already_awarded_in_split", "fewest_attack_present_windows_in_split", "most_designated_attack_flows_in_window", "ascending_raw_class_label"],
+    "keep_all_designated_attack_flows": true,
+    "keep_all_benign_flows_for_owner": true,
+    "repeated_benign_ablation": "give_each_eligible_attack_present_class_the_same_window_benign_within_its_split"
+  },
+  "random_order": {
+    "seeds": [101, 227, 307, 401, 503],
+    "algorithm": "sort labels by (hex SHA-256 of UTF-8 'seed:label', raw label)"
+  },
+  "evaluation": {
+    "label_space": {"benign": 0, "designated_attack": 1},
+    "unit": "flow",
+    "primary_metric": "average_precision",
+    "secondary_metrics": ["auroc", "recall", "false_positive_rate", "benign_prevalence", "attack_prevalence"],
+    "training_seeds": [11, 23, 37, 53, 71],
+    "checkpoint_fractions": [0, 0.01, 0.10, 0.25, 0.50, 1],
+    "checkpoint_rounding": "ceil",
+    "budget": "max_eligible_train_task_window_count_within_dataset_and_resolution",
+    "graphs_per_update": 1,
+    "training_window_schedule": "ascending_window_key_cyclic",
+    "loss": "unweighted_binary_cross_entropy_mean_over_flows_per_graph",
+    "target_optimizer_state": "reset",
+    "primary_warm_start": "encoder_and_shared_binary_head",
+    "encoder_only_control": "fresh_target_head_shared_with_paired_scratch_run",
+    "zero_shot_baseline": "untrained_seed_matched_binary_detector",
+    "forward_transfer_baseline": "seed_matched_target_only_training_from_scratch",
+    "forward_transfer_primary_checkpoint": 1,
+    "forgetting": "end_of_own_phase_score_minus_score_after_each_later_phase_on_same_test_graphs",
+    "forgetting_metrics": ["average_precision", "auroc"],
+    "fixed_threshold": 0.5,
+    "target_validation_fpr_cap": 0.01,
+    "target_threshold_priority": ["maximum_validation_recall_under_fpr_cap", "minimum_validation_fpr", "maximum_threshold"],
+    "relation_masks": ["source_host_degree", "dest_host_degree", "host_pair_degree", "flow_to_src_port", "flow_to_dst_port", "flow_to_protocol", "flow_to_service"],
+    "replay": false,
+    "aggregate": "paired differences by direction and train seed, then equal weight per target within each order and equal weight across the five orders"
+  },
+  "datasets": {
+    "unsw": {
+      "splits": {"policy": "global_chronological", "graph_manifest": "outputs/unsw_window_sweep/split_manifest.json", "similarity_manifest": "outputs/unsw_full/split_manifest.json"},
+      "bootstrap": {"primary_seconds": 900, "sensitivity_seconds": 300, "replicates": 500, "seed": 0},
+      "eligible_classes": ["DoS", "Exploits", "Fuzzers", "Generic", "Reconnaissance"],
+      "pairs": [
+        {"condition": "high", "classes": ["DoS", "Fuzzers"], "tier": "primary", "reverse": true},
+        {"condition": "low", "classes": ["Generic", "Exploits"], "tier": "primary", "reverse": true},
+        {"condition": "relation", "classes": ["Exploits", "Fuzzers"], "tier": "primary", "reverse": true}
+      ],
+      "possible_full_orders": 120,
+      "random_orders": {
+        "101": ["Fuzzers", "DoS", "Exploits", "Generic", "Reconnaissance"],
+        "227": ["Reconnaissance", "Exploits", "DoS", "Fuzzers", "Generic"],
+        "307": ["Generic", "Reconnaissance", "Exploits", "DoS", "Fuzzers"],
+        "401": ["DoS", "Generic", "Reconnaissance", "Exploits", "Fuzzers"],
+        "503": ["Generic", "Reconnaissance", "Fuzzers", "DoS", "Exploits"]
+      }
+    },
+    "ton": {
+      "splits": {"policy": "per_class_contiguous_chronological", "graph_manifest": "outputs/ton_window_sweep/split_manifest.json", "similarity_manifest": "outputs/ton_class_contiguous_benignmatched/split_manifest.json", "normalization_window_ms": 60000, "normalization_benign_train_flows": 14732002},
+      "bootstrap": {"primary_seconds": 1800, "sensitivity_seconds": 3600, "replicates": 500, "seed": 0},
+      "eligible_classes": ["Backdoor", "ddos", "dos", "injection", "password", "scanning", "xss"],
+      "pairs": [
+        {"condition": "high", "classes": ["injection", "password"], "tier": "primary", "reverse": true},
+        {"condition": "high", "classes": ["injection", "xss"], "tier": "secondary", "reverse": true},
+        {"condition": "low", "classes": ["dos", "Backdoor"], "tier": "primary", "reverse": true},
+        {"condition": "relation", "classes": ["injection", "ddos"], "tier": "primary", "reverse": true}
+      ],
+      "possible_full_orders": 5040,
+      "random_orders": {
+        "101": ["xss", "password", "ddos", "dos", "Backdoor", "scanning", "injection"],
+        "227": ["password", "scanning", "dos", "injection", "ddos", "Backdoor", "xss"],
+        "307": ["dos", "password", "xss", "Backdoor", "injection", "scanning", "ddos"],
+        "401": ["dos", "injection", "ddos", "Backdoor", "password", "xss", "scanning"],
+        "503": ["injection", "xss", "password", "scanning", "ddos", "dos", "Backdoor"]
+      }
+    }
+  }
+}

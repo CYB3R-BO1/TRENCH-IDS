@@ -27,8 +27,8 @@
   containing the same 10 steps; keep it in sync with the Markdown.
 - `docs/Proposed methodology for the next work.docx` — earlier, shorter draft; superseded, not current.
 - `step-1/README.md` — Step-1 evidence, per-run status, how to reproduce.
-- `step-1/TRENCH_TASK_SEQUENCE_DESIGN.md` — draft final detailed task-sequence specification
-  (pending reviewer approval; Step 1 completion is gated on its approval).
+- `step-1/TRENCH_TASK_SEQUENCE_DESIGN.md` — approved Step 1 task-sequence specification
+  (frozen 2026-11-24; Step 1 is closed from a research-design perspective).
 
 ## Related material outside this repository
 

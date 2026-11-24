@@ -1,235 +1,217 @@
-# TRENCH Task-Sequence Design — Final Detailed Specification (Draft)
+# TRENCH-IDS Step 1 task-sequence specification
 
-- **Status:** **Draft final detailed specification** — pending reviewer approval. Step 1 is **not yet**
-  declared complete; the user has decided to proceed with this detailed specification, and will approve it
-  before Step 1 completion is declared.
-- **Source evidence:** frozen cross-dataset comparison (`outputs/cross_dataset_analysis/`) and the frozen
-  per-dataset artifacts it draws from:
-  - UNSW: `outputs/unsw_full/`, `outputs/unsw_uncertainty/`, `outputs/unsw_window_sweep/`,
-    `outputs/unsw_rate_ablation/`, `outputs/diagnostics/`.
-  - ToN: `outputs/ton_full/`, `outputs/ton_class_contiguous/`, `outputs/ton_class_contiguous_benignmatched/`,
-    `outputs/ton_uncertainty/`, `outputs/ton_window_sweep/`.
-- **Scope:** research objective, design principles, formal task definitions, candidate sequences, benign
-  allocation, sample/window allocation, train/val/test protocol, forward-transfer & forgetting evaluation,
-  controls, feasibility constraints, limitations, reproducibility.
+Status: approved Step 1 task-sequence specification, frozen 2026-11-24. Step 1 is closed from a
+research-design perspective. The ten-step research proposal remains under review.
 
----
+## 1. Task and label space
 
-## 1. Research objective and design principles
+Each task contains one raw attack class and its allocated benign traffic. Predict a binary label for
+each flow using one shared sigmoid head, with benign coded 0 and the designated attack coded 1.
+The class name identifies the data and evaluation slice. Keep it, the ground-truth label, split
+membership and task position out of model inputs. Use the same detector and score definition for
+every task and checkpoint. The binary head allows scoring a previously unseen attack before it
+has appeared in training and measuring retention of earlier classes on their own held-out data.
+The experiment estimates attack-versus-benign transfer, with attack-type classification outside
+this protocol.
 
-### 1.1 Research objective
+Group flows by the start timestamp into half-open, epoch-aligned windows. Use 10 s graphs for
+primary experiments, 5 s for sensitivity and 30 s for exploration. A task graph contains every
+designated attack flow in its window plus benign flows if the task owns that window's allocation.
+Exclude other attack flows, including their use as unlabeled context. Keep single-flow and
+attack-only graphs. Treat host identities as window-local graph keys. Keep graph construction
+and fitted statistics isolated by split. The training schedule may carry learned parameters
+across tasks as specified below.
 
-The central TRENCH-IDS research question is **forward transfer across attack classes**: whether a
-representation or behavior learned on one attack class supports learning of a new, previously unseen
-attack class, and whether the observed similarity is *causal* or merely *associative*.
+## 2. Frozen splits and normalization
 
-The task-sequence design must answer, with experimental conditions:
+- **NF-UNSW-NB15-v3 (primary).** Use the global 70/85-percentile chronological cuts already
+  aligned to 60 s in the [graph-sweep manifest](outputs/unsw_window_sweep/split_manifest.json).
+  Train is before the first cut, validation is from the first cut through just before the
+  second, and test starts at the second. The [similarity baseline](outputs/unsw_full/split_manifest.json)
+  used its own frozen 5 s-aligned cuts. Treat those values as screening evidence and the
+  60 s-aligned manifest as authoritative for graph training and feasibility.
+- **NF-ToN-IoT-v3 (secondary).** Use each raw class's contiguous chronological 70/85-percentile
+  cuts from the [corrected manifest](outputs/ton_class_contiguous_benignmatched/split_manifest.json).
+  The [graph-sweep cuts](outputs/ton_window_sweep/split_manifest.json) are identical and aligned
+  to 60 s. These per-class splits estimate synthetic class-introduction effects.
+- Preserve the corrected ToN similarity normalization. At the original 60 s matching scale,
+  compute the global mean and standard deviation from attack-train flows and benign flows in
+  the union of per-class train windows. Count each eligible benign flow in that reference
+  once, including matched supplementary classes as in the existing analysis. The manifest
+  records 14,732,002 train benign flows, 920,895 validation and 902,091 test. The 10 s graph
+  allocation below is a separate inventory. For model evaluation, use fixed per-flow
+  transforms with no dataset-fitted moments, category frequencies, class prototypes or
+  vocabularies drawn from future tasks. In particular, keep the offline all-class similarity
+  reference out of the model inputs.
 
-1. **Similar → new:** Does learning a similar attack class help learn a new attack? (High-similarity conditions.)
-2. **Dissimilar → new:** Does learning a dissimilar attack class provide any forward-transfer benefit? (Low-similarity conditions.)
-3. **Relation-specific:** Does the similarity of a particular graph relation predict its contribution to
-   forward transfer? (Relation-specific conditions.)
+## 3. Deterministic benign allocation
 
-These three must remain the organizing questions. The design must not become a mere collection of
-attack-class pairs for its own sake.
+Run separately per dataset and graph-window size, over the **entire frozen eligible class set**
+before creating any pair, reverse direction or full order. Let the physical window key be
+`floor(FLOW_START_MILLISECONDS / window_ms)`. Work from all observed attack classes when checking
+physical window split integrity, then restrict ownership candidates to the eligible set.
 
-### 1.2 Design principles
+1. Count the positive flows per eligible class and physical window. For each class and split,
+   count its attack-present windows before assigning benign. Verify that each physical window
+   belongs to one split and each class/window has a single record. Reject a conflicting split.
+2. Visit physical windows in ascending key order. Where benign and one or more eligible attack
+   classes co-occur, award all benign flows in that window to exactly one of those classes.
+   Use the smallest exact fraction of already awarded benign windows divided by attack-present
+   windows for the class in that split. Break ties by the smaller denominator, then by the
+   larger designated attack count in that window, then by ascending case-sensitive raw label.
+   The counters are independent per split. No sampling or seed is used.
+3. Retain each class's attacks in every window in which it occurs. Leave benign-only windows,
+   and benign in windows with only excluded attack classes, unallocated. In a shared UNSW
+   physical window, the other task graphs still keep their own distinct attack rows. In ToN
+   the attack-present windows are class-disjoint. Allocation is fixed across all runs at the
+   same resolution. Reversing a pair changes presentation order and preserves graph membership.
+4. For the repeated-benign ablation, copy the same-window benign set to every eligible class
+   present in that physical window within its split. Retain the primary attack membership,
+   chronology, schedules and seeds. This changes UNSW exposure in mixed windows. ToN's disjoint
+   class windows make this ablation identical to its primary allocation.
 
-1. **No automatic clustering** of similar attacks into the same task.
-2. **Unseen-class transitions must remain possible**; transferability is tested through task sequences that
-   introduce new attack classes over previously learned ones.
-3. All candidate sequences respect dataset-specific temporal structure and class-feasibility constraints.
-4. Normal traffic is handled per task with matched benign subsets (allocation policy in §4).
-5. Bootstrap uncertainty must be respected (UNSW primary block 900 s; ToN primary 30 min) and unresolved
-   cases flagged (UNSW Generic; ToN Injection).
+The [10 s feasibility table](evidence/task_feasibility_10s.csv) contains all 36 eligible
+class/split rows. It reports usable nonempty graphs, attack thresholds of 5, 10 and 20, median
+attack flows over attack-present windows, and assigned benign flows and windows. Thresholds are
+descriptive. Every row has both labels across the split. UNSW DoS has a median of one attack
+per graph and just one test graph with at least 20 attacks. ToN scanning has 54 validation
+and 47 test graphs. Inspect these counts alongside the performance estimates.
 
----
+## 4. Frozen sequences
 
-## 2. Formal task definitions
-
-- **Task k:** the designated attack class is introduced as a discriminative task over matched benign
-  traffic; other attack classes are excluded from the task graph; previously introduced classes are not
-  replayed unless replay is explicitly evaluated.
-
-- **Task graph:** `G_k = (V_k, E_k)` contains the designated attack-class flows from the task's training
-  windows plus the benign subset allocated to task `k`. Evaluation windows are held-out windows of the
-  designated class with their matched benign context; all other attack classes are excluded.
-
-- **Pair condition (A → B):** task A followed by task B. Forward transfer is evaluated as the benefit of
-  the A-trained state for learning B; forgetting is evaluated as retention of A after B.
-
----
-
-## 3. Candidate sequences for both datasets
-
-### 3.1 Corrected candidate matrix
-
-| Condition | UNSW | ToN-IoT |
-|---|---|---|
-| High similarity | DoS → Fuzzers | Injection → Password |
-| Secondary high similarity | — | Injection → XSS |
-| Low similarity | Generic → Exploits | DoS → Backdoor |
-| Relation-specific | Exploits → Fuzzers | Injection → DDoS |
-| Random-order control | Seeded permutations of 5 eligible classes | Seeded permutations of 7 eligible classes |
-
-### 3.2 Per-dataset detail and decisions
-
-**NF-UNSW-NB15-v3** (eligible classes: DoS, Exploits, Fuzzers, Generic, Reconnaissance):
-
-| condition | sequence | status | basis |
+| Dataset | Condition | Direction | Evidence |
 |---|---|---|---|
-| High similarity | DoS → Fuzzers | **Approved provisionally** | Cosine 0.986; bootstrap verified at final 900 s config (top-5 prob 0.754, rank mean 4.02, 95% CI [0.949, 0.991]); CI does not include 1.0 membership, so kept **provisional**. |
-| Secondary high | — | n/a | — |
-| Low similarity | Generic → Exploits | Approved | Cosine 0.539 (lowest among eligible); flag Generic unresolved long-range dependence (min block 1,140 s > 900 s primary). |
-| Relation-specific | Exploits → Fuzzers | Approved candidate | Block-level host-degree similarity (≈0.002/0.055) with port-level divergence (src ≈ 0.871, dst ≈ 0.643); approved as the relation-contrast candidate. |
-| Random control | Seeded permutations of 5 eligible classes | Redesign | Multiple permutations, comparable budgets. |
-| Order reversal | Selected pairs, both directions | Redesign | Order-reversal probes + random-order controls are separate. |
+| UNSW | Primary high | DoS → Fuzzers | Cosine 0.986, 900 s bootstrap CI [0.949, 0.991], top-five frequency 0.754. Retained as a high-cosine contrast with uncertain rank. |
+| UNSW | Primary low | Generic → Exploits | Cosine 0.539. This is a low-cosine contrast with unresolved Generic dependence. |
+| UNSW | Primary relation | Exploits → Fuzzers | Small host-degree distances and large source- and destination-port distances. The common Fuzzers target also supports a descriptive comparison with DoS → Fuzzers. |
+| ToN | Primary high | injection → password | Canonical cosine 0.936, relation similarity 0.709, flag similarity 0.996. Cosine top-five frequency is 1.00 at 30 min. |
+| ToN | Secondary high | injection → xss | Canonical cosine 0.909 and relation similarity 0.699. Provides a high-cosine comparison whose within-window destination-port profile differs from password. |
+| ToN | Primary low | dos → Backdoor | Canonical cosine 0.169 and relation similarity 0.316. This tests a low-score contrast on both measures. |
+| ToN | Primary relation | injection → ddos | Canonical overall relation similarity 0.664 versus cosine 0.336. Retained for the protocol/source-port versus host-pair contrast documented below. |
 
-**NF-ToN-IoT-v3** (eligible classes: Backdoor, ddos, dos, injection, password, scanning, xss):
+Run the reverse of every listed pair as a separate direction. This yields six UNSW and eight
+ToN directed pair conditions. Keep `ddos` and `dos` distinct. UNSW Analysis and Worms are
+excluded for low train support. UNSW Backdoor and Shellcode and ToN mitm and ransomware are
+supplementary and fail the frozen 1,000-attack-flows-per-split eligibility rule.
 
-| condition | sequence | status | basis |
-|---|---|---|---|
-| High similarity | Injection → Password | Approved | Cosine 0.936; relation 0.709; flags 0.996; bootstrap top-5 1.00 at 30 min; both eligible. |
-| Secondary high | Injection → XSS | Pending approval | Cosine 0.909; relation 0.699; optional second contrast. |
-| Low similarity | DoS → Backdoor | Approved (order reversed) | First-occurrence order respected (DoS precedes Backdoor); cosine symmetric at 0.169. |
-| Relation-specific | Injection → DDoS | Approved (final direction) | Sourced from screened relation evidence: relation similarity 0.664 vs cosine 0.336; ToN relation-block JS distance 0.387 (defined); strongest relation/low-cosine contrast candidate; direction set to chronology-respecting **Injection → DDoS**. |
-| Random control | Seeded permutations of 7 eligible classes | Redesign | Synthetic class-order controls; individual temporal order preserved, introduction sequence not necessarily chronological. |
-| Order reversal | Selected pairs, both directions | Redesign | Order-reversal probes + random-order controls are separate. |
+Run five unique full permutations per dataset from seeds **101, 227, 307, 401, 503**. They are
+written explicitly in [step1_protocol.json](step1_protocol.json) and generated by sorting on
+the SHA-256 hex digest of the UTF-8 string `seed:raw_label`, with raw label as a tie-break.
+There are 120 possible UNSW orders over five classes and 5,040 possible ToN orders over seven.
+Use all five training seeds **11, 23, 37, 53, 71** for each order and directed pair. This gives
+25 full-order runs per dataset and 30 UNSW and 40 ToN pair runs before matched controls and
+ablations. Full sequences preserve within-class chronology and represent synthetic
+class introductions. ToN's per-class chronological splits and task order do not define a
+single global historical timeline.
 
-### 3.3 Final screening-pass confirmations (recap)
+## 5. Checkpoints, metrics and matched comparisons
 
-1. UNSW DoS → Fuzzers bootstrap stability at final 900 s: verified (top-5 0.754; CI [0.949, 0.991]) — **provisional**.
-2. UNSW Exploits → Fuzzers relation contrast: confirmed (host-similarity vs port-divergence).
-3. ToN relation contrast: **Injection → DDoS** confirmed via screened relation evidence.
+Let `U` be the maximum number of usable train graphs among the frozen eligible tasks at that
+dataset and resolution. Use `U` optimizer updates per class phase, one graph per update. At
+10 s, `U` is 2,297 for UNSW and 7,018 for ToN. Traverse each task in ascending window order,
+cycling from the start after exhaustion. Use the complete current graph and average unweighted
+binary cross-entropy over its labeled flows. This budgets update count equally. Distinct
+graph counts, per-phase repetitions and flow exposures differ by class and must be logged.
+The matched target arms consume exactly the same graph sequence and target examples.
 
----
+- **Before a new class appears:** evaluate the frozen detector from the preceding task on
+  the target test graphs. Compute target average precision (AP), AUROC, and recall and
+  false-positive rate (FPR) at the fixed threshold of 0.5. Compare with a seed-matched,
+  untrained detector using the same test graphs. Report attack prevalence as the AP no-skill
+  reference and 0.5 as the AUROC no-skill reference. Use no target validation, calibration
+  or fitting before introduction. Seal test results from tuning and training decisions.
+- **After introducing a new class:** compare the continued shared detector against a
+  seed-matched target-only detector trained from scratch. Both use the same architecture,
+  target training schedule, optimizer initialization, learning-rate schedule, update
+  budget, target validation access and evaluation graphs. Carry the encoder and head in
+  the continued arm and reset optimizer state at every class boundary. Keep the
+  pretraining cost of the continued arm explicit. Record checkpoints at updates
+  `ceil(f * U)` for `f = 0, 0.01, 0.10, 0.25, 0.50, 1.0`, deduplicating integer counts.
+  Zero belongs to the zero-shot comparison. At positive updates, report paired AP
+  differences (continued minus scratch). Prespecify final-update AP advantage as the
+  primary endpoint, with earlier checkpoints showing learning speed. At each positive
+  checkpoint also report AUROC and fixed-threshold recall/FPR. At `U` report recall and
+  realized FPR at a threshold picked separately per arm on target validation to maximize
+  recall under 1% empirical FPR. Break ties by lower validation FPR, then higher threshold.
+  Include an above-maximum threshold as the no-detections option. Add an encoder-only
+  warm-start control using the identical fresh head initialization as its paired scratch
+  arm to distinguish encoder reuse from binary-head reuse.
+- **Retention and forgetting:** record a class's AP and AUROC on its own immutable test
+  graphs immediately after its phase (`U`) and after every subsequent phase. Forgetting
+  is end-of-own-phase score minus later score. Positive values indicate degradation.
+  Report fixed-threshold recall and FPR on the same graphs and retain negative forgetting
+  values as improvements. No replay or target-dependent changes to old test graphs.
+- **Tuning and aggregation:** preregister a single architecture and training recipe per dataset
+  and resolution before running the comparisons. Use the same recipe across arms and directions,
+  with no per-arm tuning, test-based selection or early stopping. Compute AP and AUROC over all held-out flows within
+  a task and report prevalence and counts. Report each direction's paired differences across
+  the five training seeds as individual values, mean and sample standard deviation. For
+  full orders, average equally over target tasks after the first, average training seeds
+  within each order, and then weight the five orders equally. For final forgetting in a
+  full order, average over all classes except the last, alongside per-class forgetting
+  trajectories. Use separate dataset, resolution and experimental-condition summaries.
+  Keep the two directions visible, since they condition on different targets and prevalences.
 
-## 4. Normal-traffic allocation policy (primary, as agreed — preserved)
+## 6. Relation-specific controls
 
-- Each task receives its designated attack class and a **matched benign subset**.
-- Benign windows are allocated to **at most one task** (disjoint benign allocation).
-  - UNSW: benign windows must be audited and allocated without overlap across tasks.
-  - ToN: benign-matching audit already provides the foundation (matched by window membership).
-- Other attack classes are excluded from the task graph.
-- Previously introduced attack classes are **not replayed** unless replay is explicitly being evaluated.
-- **No repeated Normal exposure** in primary tasks.
-- A **separate repeated-Normal-exposure ablation** is retained.
+The [relation-distance table](evidence/relation_distances.csv) uses base-2 Jensen–Shannon
+distance on training-only class profiles. Smaller values indicate closer distributions.
+The host blocks compare sorted flow shares, while the port, protocol and service blocks
+compare empirical value frequencies using validated categorical codes. These measures
+screen candidate pairs. Transfer effects require model comparisons.
 
----
+| Relation | UNSW Exploits / Fuzzers | ToN injection / ddos, canonical | ToN injection / ddos, global split sensitivity |
+|---|---:|---:|---:|
+| Source host | 0.002488 | 0.323789 | 0.386905 |
+| Destination host | 0.055281 | 0.429852 | 0.447639 |
+| Host pair | 0.136597 | 0.485957 | 0.543157 |
+| Source port | 0.871018 | 0.169184 | 0.155408 |
+| Destination port | 0.642789 | 0.452384 | 0.394651 |
+| Protocol | 0.189865 | 0.046434 | 0.044791 |
+| Service | 0.565390 | 0.445602 | 0.386196 |
 
-## 5. Actual sample and graph-window allocation numbers
+UNSW supplies a host-versus-port contrast. Source-host and destination-host distributions are
+especially close, while both port distributions and service diverge. ToN supplies a complementary
+contrast. Protocol and source port are closest, while host pair is most distant in both split
+variants. Destination port and service also diverge in the canonical split. The previously
+reported 0.387 ToN value was the source-host block under the global split. The canonical
+per-class run stored only the aggregate, so the seven canonical blocks were computed from
+the two classes' training rows. Their mean reproduces the stored aggregate similarity of
+0.663828 after subtracting from one. The two candidates support distinct probes, so both are
+retained. [UNSW stored blocks](outputs/unsw_full/relation_block_distance.csv)
+[ToN stored global blocks](outputs/ton_global_chrono/relation_block_distance.csv)
+[ToN canonical aggregate](outputs/ton_class_contiguous_benignmatched/similarity_results.json)
 
-All numbers below are taken from frozen experiment artifacts; **no balanced/invented sample sizes were
-created**. Where per-task benign/attack splits are required for pair conditions, they are derived from the
-task-filtered window statistics and benign-matching artifacts, not invented.
+For both relation pairs and both directions, run the intact and each of the seven single-relation
+mask conditions with the same seeds, task graphs, feature transforms, head initialization and
+target budgets. In a mask condition disable the designated relation in source, target and
+scratch arms, including direct features that duplicate the masked relation. Distinguish source-
+and destination-port roles. Retain all supervised flow nodes. Use the encoder-only warm-start
+control to compute final AP advantage for full and masked graphs, then subtract the masked
+advantage from the full advantage within seed and direction. This estimates the incremental
+contribution of a relation conditional on the remaining relations. Shared information across
+relations and changes to model capacity limit mechanistic attribution.
 
-### 5.1 UNSW (global chronological split; train partition)
+## 7. Temporal uncertainty
 
-| quantity | value | source |
-|---|---|---|
-| Train benign flows | 1,590,548 | `unsw_full/` |
-| Train attack flows | 65,181 | `unsw_full/` |
-| Train benign:attack ratio | ≈ 24.4 : 1 | `unsw_full/` |
-| Task-filtered (benign + designated) train windows | ≈ 6,197 @ 10 s; ≈ 12,275 @ 5 s | `unsw_window_sweep/task_filtered_window_statistics.csv` |
-| Median designated-class flows per task graph @ 10 s (high-volume classes) | Exploits 7, Fuzzers 11, Generic 4, Reconnaissance 3 | `unsw_window_sweep/` |
-| Strong-supervision windows (≥20 designated-class flows) @ 10 s | Exploits 155, Fuzzers 239, Generic 40 | `unsw_window_sweep/window_5s_vs_10s_comparison.csv` |
+| Dataset | Primary bootstrap block | Sensitivity block | Scope and constraint |
+|---|---:|---:|---|
+| UNSW | 900 s | 300 s | 73 primary blocks. Generic's estimated 1,140 s dependence exceeds the primary block length. |
+| ToN | 30 min | 60 min | Resample inside each class's training sequence. injection has 6/4 blocks at the two lengths, and Backdoor raw autocorrelation never met the decay criterion within 180 min. |
 
-### 5.2 ToN (per-class contiguous chronological split, benign-matched; train partition)
+These bootstrap blocks estimate uncertainty in screening metrics. Graph training always uses
+the graph windows in §1. The frozen analyses use 500 replicates and seed 0, with within-run
+train-only normalization. The ToN block sizes trade dependence coverage against the number of
+blocks. Block counts are nominal and effective independent counts may be smaller. The seed
+summaries for future training runs measure run-to-run variability separately from temporal
+uncertainty in the screening evidence.
 
-| quantity | value | source |
-|---|---|---|
-| Train benign flows | 14,732,002 | `ton_class_contiguous_benignmatched/` |
-| Train attack flows | 7,453,293 | `ton_class_contiguous_benignmatched/` |
-| Train benign:attack ratio | ≈ 1.98 : 1 | `ton_class_contiguous_benignmatched/` |
-| Per-class benign/attack (train) | injection 67,149 / 266,120; xss 283,026 / 1,977,968; mitm 1,755,629 / 4,140; scanning 8,327,687 / 905,605 | `ton_class_contiguous_benignmatched/benign_task_matching.csv` |
-| Task-filtered train windows (≥5 class flows) | ddos 27,798 @1 s → 553 @60 s; password 36,394 → 648; xss 19,446 → 334; injection 5,452 → 141; dos 14,348 → 368; scanning 5,452 → 425; Backdoor 2,583 → 1,176 (3 windows ≥10 @1 s) | `ton_window_sweep/task_filtered_window_statistics.csv` |
-| Median flows/window (train) by window size | 1 s: 27; 5 s: 110; 10 s: 202; 30 s: 514; 60 s: 943 | `ton_window_sweep/` |
+## 8. Reproduction
 
-### 5.3 Allocation notes
-
-- The benign:attack imbalance is extreme and class-dependent (notably for ToN).
-- ToN attack classes are temporally disjoint → 0 windows train for more than one class; benign allocation
-  is therefore largely non-overlapping by construction, but the matched-benign protocol still assigns a
-  per-task benign subset.
-- No balanced sample sizes were invented; task graphs are built from designated-class + matched benign only.
-
----
-
-## 6. Training, validation and test protocol
-
-- Per task: training on the task graph (designated class + matched benign) from the task's training
-  windows; validation on the task's validation windows; test on the task's held-out windows.
-- Pair conditions run as sequential tasks (A then B).
-- Training budgets must be comparable across conditions within each dataset.
-- Window/bootstrap configuration for training graphs: primary 10 s / sensitivity 5 s / exploratory 30 s
-  (UNSW); ToN task graphs use the per-class contiguous split with the chosen bootstrap block lengths
-  (UNSW primary 900 s; ToN primary 30 min / sensitivity 60 min).
-- Bootstrap intervals from different block configurations are not pooled across datasets (different
-  estimands); they inform uncertainty, not task design directly.
-
----
-
-## 7. Forward-transfer and forgetting evaluation
-
-- **Forward transfer:** train task A → evaluate on task B (unseen class). High-similarity conditions
-  (DoS → Fuzzers; Injection → Password) test whether similar-class learning helps; low-similarity
-  conditions (Generic → Exploits; DoS → Backdoor) test whether dissimilar-class learning yields any
-  benefit; relation-specific conditions (Exploits → Fuzzers; Injection → DDoS) test whether a particular
-  graph relation drives transfer.
-- **Forgetting:** after task B, assess retention of task A (replay not assumed; replay is an explicit
-  optional ablation).
-- The relation-specific axis uses the screened relation structure (e.g., Exploits → Fuzzers: host-degree
-  similarity with port-level divergence; Injection → DDoS: relation 0.664 vs cosine 0.336).
-
----
-
-## 8. Order-reversal and random-order controls
-
-- **Order-reversal probes:** both directions of selected pairs (e.g., Injection → Password / Password →
-  Injection; DoS → Backdoor / Backdoor → DoS; DoS → Fuzzers / Fuzzers → DoS).
-- **Random-order controls:** multiple seeded permutations of the eligible class set (UNSW: 5 classes; ToN:
-  7 classes); same classes and comparable training budgets; ToN controls explicitly labeled synthetic
-  class-order controls. Pairwise transition experiments are defined separately from full multi-class
-  random-order sequences.
-
----
-
-## 9. Feasibility constraints and exclusions
-
-- Only primary-eligible classes are used in candidate task sequences:
-  - UNSW: DoS, Exploits, Fuzzers, Generic, Reconnaissance.
-  - ToN: Backdoor, ddos, dos, injection, password, scanning, xss.
-- Supplementary classes are excluded from candidate sequences pending explicit justification:
-  - UNSW: Backdoor, Shellcode (train-supported, floor-failing).
-  - ToN: mitm, ransomware (train-supported, floor-failing).
-- Low-training-support classes are excluded: UNSW — Analysis, Worms.
-- UNSW Generic carries unresolved long-range temporal dependence (min block 1,140 s > 900 s primary).
-- ToN Injection carries limited bootstrap blocks (6 @ 30 min primary; 4 @ 60 min sensitivity) → cautious
-  interpretation.
-
----
-
-## 10. Limitations and reproducibility configuration
-
-- Different split estimands across datasets (UNSW global chronological; ToN per-class contiguous) →
-  descriptive, not pooled.
-- Only Backdoor and DoS/dos treated as shared concepts; raw labels preserved; Reconnaissance/Scanning and
-  ddos/dos not silently merged.
-- ToN populations: attack-present vs benign-only where available; UNSW attack-present only.
-- Bootstrap intervals not pooled across datasets.
-- Single-seed bootstrap caveats; window-size differences.
-- Reproducibility: frozen window config (10 s primary / 5 s sensitivity / 30 s exploratory), frozen
-  bootstrap blocks (UNSW 900 s / 300 s; ToN 30 min / 60 min), seeds, split manifests, artifact paths.
-
----
-
-## Deliverables status and next step
-
-- Cross-dataset comparison: **complete** (after the three report corrections were applied and verified).
-- Final candidate-screening pass: **complete**.
-- Final detailed task-sequence specification: **draft** (this document), now containing the corrected
-  candidate matrix, preserved normal-traffic policy, central research questions, and required sections.
-- **Step 1 declared complete:** pending reviewer approval of this final detailed specification.
-
-**Next:** after approval, begin **Step 2 — heterogeneous graph construction**, using the exact traffic
-observations, attack classes, benign allocations, and experimental conditions defined here.
+From `step-1/`, run `python task_protocol.py --out <new-output-directory> --write-allocations`
+to reproduce the 10 s evidence and export each task's window membership and benign ownership.
+Add `--recompute-ton-relations` for the complete relation-distance table. The primary run
+reads two columns from the UNSW CSV and reuses the canonical ToN window table. The optional
+ToN pass reads only the columns needed for the missing canonical relation blocks. Historical
+outputs stay in place. See the [Step 1 final report](STEP1_FINAL_REPORT.md) for verification
+and remaining limitations.

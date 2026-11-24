@@ -9,10 +9,10 @@ The ten steps below describe the initial proposed approach. They are not all fin
 Particular attention must be given to task construction, the definition of unseen attack classes, transfer evaluation, and the validation of relation-specific transferability estimates.
 
 1. Raw Traffic Preprocessing
-    * Arrange the network traffic into sequential continual learning tasks.
-    * Each task consists of one or more attack classes together with normal traffic (e.g., Task 1: Normal, DoS, Recon; Task 2: Normal, Botnet, Backdoor; Task 3: Normal, Worm, Exploit; ...).
-    * Arrange the traffic chronologically within each task.
-    * Construct multiple graph windows from each task using fixed time windows or a fixed number of flows.
+    * Arrange the network traffic into sequential continual learning tasks. The Step 1 task-sequence specification defines the frozen splits, task orders, and evaluation controls; it was approved for Step 1 research-design closure on 2026-11-24. The ten-step proposal remains under review.
+    * Each task contains one designated attack class and its deterministically allocated benign traffic. The primary evaluation uses a shared binary attack-versus-benign label space.
+    * Preserve chronological order within each task and isolate training, validation, and test windows.
+    * Construct 10-second graph windows for primary experiments, 5-second windows for sensitivity, and 30-second windows for exploration. Use temporal bootstrap blocks for uncertainty estimation.
 2. Heterogeneous Graph Construction
     * Construct a heterogeneous graph for every graph window.
     * Node types: Host, Flow, Port, Protocol and Service.

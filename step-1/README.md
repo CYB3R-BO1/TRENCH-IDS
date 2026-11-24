@@ -271,12 +271,6 @@ normalisation is recomputed per replicate. Per the plan, UNSW's 900 s was not tr
   and subsamples Wasserstein to 2,000 points per class; the point estimates match the full-support
   pipeline, and CIs are computed on this equivalent pooling.
 
-### Still to do for ToN
-
-Per-window relation distributions at 10 s / 5 s, then the final cross-dataset (UNSW vs ToN)
-comparison of Step-1 evidence.
-
-
 ## Step 1.5 - ToN per-window relation statistics
 
 Run: `python ton_temporal_relations.py --dataset ton --manifest .../ton_class_contiguous_benignmatched/split_manifest.json
@@ -304,10 +298,10 @@ separate from genuine 0 entropy. Outputs: `relation_window_statistics_{10,5}s.cs
   expected from window size rather than a change in structure.
 
 ## Design decisions
-- **Evidence only.** No task groupings, no task sequences, no model. (Per the agreed plan.)
-- **One global chronological split** from all-flow `FLOW_START` quantiles
-  (`--split 0.70 0.85`). Every similarity input uses the **training partition only**, so
-  the test period cannot influence task-design evidence.
+- The analysis runs produce the screening evidence for the frozen task design.
+- **Training-only similarity inputs.** The UNSW baseline uses global chronological cuts from
+  all-flow `FLOW_START` quantiles (`--split 0.70 0.85`). The canonical ToN baseline uses
+  per-class contiguous chronological cuts with corrected benign matching.
 - **Feature roles** (`feature_schema.py`): only MAGNITUDE (continuous/count) features feed
   cosine/Wasserstein; identifier-like codes (`ICMP_*`, `DNS_QUERY_*`, `FTP_COMMAND_RET_CODE`)
   are excluded; TCP flags are analysed as bits; ports/protocol/service as categories.
@@ -390,7 +384,7 @@ are listed with reasons in `class_scope.csv` / `undefined_pairs.csv`; they are n
 dropped from the report.
 
 ```bash
-python -m unittest discover -s tests -v     # 74 tests
+python -m unittest discover -s tests -v
 ```
 
 ## Next phase
@@ -405,8 +399,10 @@ python -m unittest discover -s tests -v     # 74 tests
 - Final cross-dataset (UNSW vs ToN) comparison of the Step-1 evidence: recorded in
   `outputs/cross_dataset_analysis/`.
 
-Outstanding: final task-sequence approval (`TRENCH_TASK_SEQUENCE_DESIGN.md`, draft) and the
-downstream model-training / continual-learning evaluation experiments.
+The approved [task-sequence specification](TRENCH_TASK_SEQUENCE_DESIGN.md) and
+[protocol configuration](step1_protocol.json) freeze the 10 s primary allocation, controls,
+and evaluation. The [Step 1 final report](STEP1_FINAL_REPORT.md) records the evidence,
+verification and closure. Step 1 was approved for research-design closure on 2026-11-24.
 
 ## Files
 
@@ -421,7 +417,10 @@ ton_bootstrap.py                temporal block bootstrap
 ton_class_contiguous.py        per-class contiguous chronological splits
 ton_temporal_relations.py      per-window relation statistics
 ton_window_sweep.py            ToN window-size feasibility sweep
-TRENCH_TASK_SEQUENCE_DESIGN.md draft task-sequence specification
+TRENCH_TASK_SEQUENCE_DESIGN.md  approved Step 1 task-sequence specification (frozen)
+step1_protocol.json             frozen task, window, split and evaluation configuration
+task_protocol.py                allocation and 10 s feasibility evidence
+FROZEN_STEP1.sha256             frozen Step 1 artifact hashes
 windows.py                      per-window feasibility
 window_sweep.py                 window-size feasibility sweep (unsw)
 similarity_report.md           generated narrative (after a run)
