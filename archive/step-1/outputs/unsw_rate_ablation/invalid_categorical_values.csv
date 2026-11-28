@@ -1,0 +1,8 @@
+class,field,nan,inf,fractional,out_of_range
+Benign,L7_PROTO,0,0,12800,0
+Backdoor,L7_PROTO,0,0,116,0
+DoS,L7_PROTO,0,0,63,0
+Exploits,L7_PROTO,0,0,250,0
+Fuzzers,L7_PROTO,0,0,2057,0
+Generic,L7_PROTO,0,0,38,0
+Reconnaissance,L7_PROTO,0,0,51,0

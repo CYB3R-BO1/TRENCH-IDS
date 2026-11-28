@@ -1,0 +1,11 @@
+class,family,flows,share_of_file_pct,share_of_attacks_pct,description
+Benign,Benign,2237731,94.6017,0.0,Normal background traffic (shared negative class).
+Exploits,Exploitation,42748,1.8072,33.477,Attacks a known vulnerability in a service or application.
+Fuzzers,Fuzzing,33816,1.4296,26.482,Feeds random/malformed input to crash a service.
+Generic,Generic,19651,0.8308,15.389,"A block-cipher based attack effective against any cipher; an UNSW category, not a catch-all."
+Reconnaissance,Reconnaissance,17074,0.7218,13.371,Scans and probes hosts to map services.
+DoS,Denial of Service,5980,0.2528,4.683,Floods a single target to deny service.
+Backdoor,Backdoor,4659,0.197,3.649,Installs a hidden remote-access channel.
+Shellcode,Shellcode,2381,0.1007,1.865,Injects a small payload that opens a shell.
+Analysis,Analysis,1226,0.0518,0.96,Probes web / HTML / port surfaces for weaknesses.
+Worms,Worm,158,0.0067,0.124,Self-replicating malware that spreads between hosts.

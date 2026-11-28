@@ -1,0 +1,11 @@
+class,family,description
+Benign,Benign,Normal background traffic (shared negative class).
+Exploits,Exploitation,Attacks a known vulnerability in a service or application.
+Fuzzers,Fuzzing,Feeds random/malformed input to crash a service.
+Generic,Generic,"A block-cipher based attack effective against any cipher; an UNSW category, not a catch-all."
+Reconnaissance,Reconnaissance,Scans and probes hosts to map services.
+DoS,Denial of Service,Floods a single target to deny service.
+Backdoor,Backdoor,Installs a hidden remote-access channel.
+Shellcode,Shellcode,Injects a small payload that opens a shell.
+Analysis,Analysis,Probes web / HTML / port surfaces for weaknesses.
+Worms,Worm,Self-replicating malware that spreads between hosts.

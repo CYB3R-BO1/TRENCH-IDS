@@ -1,49 +1,20 @@
 # AGENTS.md
 
-## Repository scope
+## Scope
 
-- Research repository for TRENCH-IDS: transferable representation learning for continual,
-  heterogeneous-graph-based intrusion detection (task-incremental learning across attack classes).
-- This repository is the **current** working research repo for the Step-1 attack-class similarity /
-  task-design line of work. It is a research + analysis repo, not the old V2/V3 implementation
-  repo.
-- It contains:
-  - `INITIAL_METHODOLOGY.md` — primary 10-step proposal (explicitly **under review, not finalized**).
-  - `docs/` — methodology drafts (`.docx` binaries).
-  - `step-1/` — Step-1 implementation: similarity metrics, window feasibility, uncertainty /
-    bootstrap analyses, ToN variants; `tests/`; generated `outputs/`; `README.md`;
-    `TRENCH_TASK_SEQUENCE_DESIGN.md` (draft task-sequence specification).
-  - `analysis/` — dataset analysis notebooks.
-  - `requirements.txt` — Python dependencies for the Step-1 analyses.
-  - `data/` - raw NetFlow-v3 dataset bags (local data drops; gitignored, not committed; inside
-    this repository).
-- There is no build system. Tests are stdlib `unittest` plus numpy/pandas/scipy/matplotlib/seaborn
-  (see `requirements.txt`). Run the synthetic tests from `step-1/`: `python -m unittest discover -s tests`.
+This is the active clean-rebuild research workspace for TRENCH-IDS. Read [METHODOLOGY.md](METHODOLOGY.md) and [FLOW.md](FLOW.md) before making changes. The old research is in archive/; the original frozen Step 1 layout is available at tag step1-frozen.
 
-## Document map
+## Human-guided workflow
 
-- `INITIAL_METHODOLOGY.md` — primary 10-step proposal.
-- `docs/Updated_Proposed_Methodology_Transferable_Representation_Learning.docx` — Word source
-  containing the same 10 steps; keep it in sync with the Markdown.
-- `docs/Proposed methodology for the next work.docx` — earlier, shorter draft; superseded, not current.
-- `step-1/README.md` — Step-1 evidence, per-run status, how to reproduce.
-- `step-1/TRENCH_TASK_SEQUENCE_DESIGN.md` — approved Step 1 task-sequence specification
-  (frozen 2026-11-24; Step 1 is closed from a research-design perspective).
+- The researcher owns methodological choices. Discuss the next operation and present a precise approach before implementation; obtain explicit approval. Do not infer approval to implement an entire phase from approval of the methodology.
+- Implement only the approved operation. Do not advance, add speculative features, run expensive experiments, or create extra scripts/reports/configuration without approval.
+- Explain purpose, inputs, assumptions, mathematics, alternatives, output, a small manual example and verification/failure conditions before coding.
+- Prefer readable, direct functions and minimal dependencies. Create files only when they serve an approved operation. Explain every changed file.
+- After implementation, show code/diff, intermediate outputs and tests. Stop for the researcher's understanding and approval before proceeding. Do not commit or push unless requested.
+- Preserve raw datasets and archived artifacts. Do not edit archive/ or frozen tags without explicit approval. Old relative paths may be invalid after archiving; use the frozen tag for original reproduction.
+- Respect the information-access policy: no future-task or test leakage, labels not model features, no tuning on final test results. Document any change to archived splits, allocation or no-replay protocol before implementation.
+- Distinguish hypotheses, engineering pilots, validation results and confirmatory evidence. Report failures and negative results; do not invent claims.
+- Keep large generated artifacts, datasets, caches and checkpoints out of Git by default. Record compact evidence, configurations and provenance only as needed.
+- Keep METHODOLOGY.md authoritative and FLOW.md the approved operation sequence. Avoid redundant reports.
 
-## Related material outside this repository
-
-- `..\old_TRENCH-IDS_research` - pre-separation research archive (old V2 implementation,
-  V3 rebuild, V2 data drops, audit documents). Treat as read-only/frozen.
-- Inside it: `old/` (frozen V2 archive), `new/` (V3 rebuild), `v2/` (raw V2 bags), `project-docs/`,
-  `PROJECT_AUDIT.md`, `scratchpad/`, `figures/`.
-- `..\old_TRENCH-IDS_research\project-docs\README.md` — entry-point research record for the old work.
-
-## Editing rules
-
-- Decide first whether the request concerns **this proposal** or the **V3 implementation**; they are
-  separate. Do not merge designs or copy V3 claims into the proposal.
-- When changing the methodology, update both `INITIAL_METHODOLOGY.md` and the updated `.docx`,
-  preserving step numbering and terms. If they cannot be kept in sync, flag the divergence instead
-  of silently choosing one.
-- Keep the "under review" framing and open questions. Do not add experiment results or claims that
-  are not backed by a stored artifact.
+Current next step: Phase 0 research protocol discussion; no code implementation has been approved for the rebuild.

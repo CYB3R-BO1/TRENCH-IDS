@@ -1,0 +1,11 @@
+class,family,description
+Benign,Benign,Normal background traffic (shared negative class).
+Analysis,Analysis,
+Backdoor,Backdoor,
+DoS,DoS,
+Exploits,Exploits,
+Fuzzers,Fuzzers,
+Generic,Generic,
+Reconnaissance,Reconnaissance,
+Shellcode,Shellcode,
+Worms,Worms,

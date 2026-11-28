@@ -1,0 +1,91 @@
+{
+  "window": {
+    "primary_seconds": 10,
+    "sensitivity_seconds": 5,
+    "exploratory_seconds": 30,
+    "graph_flow_thresholds": [
+      2,
+      5,
+      10,
+      20
+    ],
+    "note": "identical across datasets; window size chosen by occupancy + task-filtered feasibility"
+  },
+  "bootstrap": {
+    "unsw": {
+      "primary_block_seconds": 900,
+      "sensitivity_block_seconds": 300,
+      "exploratory_block_seconds": 60,
+      "n_replicates": 500,
+      "seed": 0,
+      "fine_block_seconds": 60,
+      "acf_lags": 30,
+      "primary_temporal_blocks": 73,
+      "train_blocks": 1059,
+      "coarse_blocks_per_length_seconds": {
+        "60": 1059,
+        "300": 216,
+        "900": 73
+      },
+      "normalisation": "training-only gmean/gstd recomputed per replicate; categorical universe and host padding fixed to full-train values"
+    },
+    "ton": {
+      "primary_block_minutes": 30,
+      "sensitivity_block_minutes": 60,
+      "n_replicates": 500,
+      "resampling": "within each class's own contiguous training sequence; classes never concatenated or shared",
+      "normalisation": "training-only gmean/gstd recomputed per replicate",
+      "blocks_per_class": {
+        "30": {
+          "Backdoor": 41,
+          "ddos": 20,
+          "dos": 13,
+          "injection": 6,
+          "mitm": 4,
+          "password": 22,
+          "ransomware": 3,
+          "scanning": 31,
+          "xss": 12
+        },
+        "60": {
+          "Backdoor": 21,
+          "ddos": 12,
+          "dos": 7,
+          "injection": 4,
+          "mitm": 2,
+          "password": 12,
+          "ransomware": 2,
+          "scanning": 16,
+          "xss": 7
+        }
+      },
+      "few_blocks_lt5": {
+        "30": [
+          "mitm",
+          "ransomware"
+        ],
+        "60": [
+          "injection",
+          "mitm",
+          "ransomware"
+        ]
+      },
+      "note": "primary block chosen as operational compromise (30 min) keeping >=6 bootstrap blocks for every primary class"
+    }
+  },
+  "splits": {
+    "unsw": {
+      "estimand": "global chronological (all-flow quantiles 0.70/0.85, 60 s aligned)",
+      "train": 1655729,
+      "val": 354848,
+      "test": 354847
+    },
+    "ton": {
+      "estimand": "per-class contiguous chronological (60 s aligned per class, benign window-matched)",
+      "train": 14732002,
+      "val": 920895,
+      "test": 902091
+    }
+  },
+  "rationale": "bootstrap block length follows dataset-specific temporal dependence (ACF); UNSW global split -> coarse blocks from fine ACF; ToN per-class sequences -> within-class bootstrap blocks; hence different block configs"
+}
