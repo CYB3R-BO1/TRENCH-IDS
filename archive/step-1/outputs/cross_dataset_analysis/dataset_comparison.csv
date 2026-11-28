@@ -1,0 +1,19 @@
+dataset,aspect,value,unit,note
+NF-UNSW-NB15-v3,flows_total,2365424.0,flows,"global chronological (all-flow quantiles 0.70/0.85, 60 s aligned)"
+NF-UNSW-NB15-v3,benign_flows,2237731.0,flows,"global chronological (all-flow quantiles 0.70/0.85, 60 s aligned)"
+NF-UNSW-NB15-v3,attack_flows,127693.0,flows,"global chronological (all-flow quantiles 0.70/0.85, 60 s aligned)"
+NF-UNSW-NB15-v3,attack_pct,5.398313,percent,"global chronological (all-flow quantiles 0.70/0.85, 60 s aligned)"
+NF-UNSW-NB15-v3,coverage_hours,648.66,hours,"global chronological (all-flow quantiles 0.70/0.85, 60 s aligned)"
+NF-UNSW-NB15-v3,n_attack_classes,9.0,count,"global chronological (all-flow quantiles 0.70/0.85, 60 s aligned)"
+NF-UNSW-NB15-v3,train_attack_flows,65181.0,flows,"global chronological (all-flow quantiles 0.70/0.85, 60 s aligned)"
+NF-UNSW-NB15-v3,train_benign_attack_ratio,24.402019,ratio,"global chronological (all-flow quantiles 0.70/0.85, 60 s aligned)"
+NF-UNSW-NB15-v3,pct_windows_multi_attack,0.37,percent,"global chronological (all-flow quantiles 0.70/0.85, 60 s aligned)"
+NF-ToN-IoT-v3,flows_total,27520260.0,flows,per-class contiguous chronological (60 s aligned per class)
+NF-ToN-IoT-v3,benign_flows,16792214.0,flows,per-class contiguous chronological (60 s aligned per class)
+NF-ToN-IoT-v3,attack_flows,10728046.0,flows,per-class contiguous chronological (60 s aligned per class)
+NF-ToN-IoT-v3,attack_pct,38.982357,percent,per-class contiguous chronological (60 s aligned per class)
+NF-ToN-IoT-v3,coverage_hours,144.6,hours,per-class contiguous chronological (60 s aligned per class)
+NF-ToN-IoT-v3,n_attack_classes,9.0,count,per-class contiguous chronological (60 s aligned per class)
+NF-ToN-IoT-v3,train_attack_flows,7453293.0,flows,per-class contiguous chronological (60 s aligned per class)
+NF-ToN-IoT-v3,train_benign_attack_ratio,1.976576,ratio,per-class contiguous chronological (60 s aligned per class)
+NF-ToN-IoT-v3,pct_windows_multi_attack,0.0,percent,per-class contiguous chronological (60 s aligned per class)

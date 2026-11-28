@@ -1,0 +1,11 @@
+class,family,flows,share_of_file_pct,description
+Benign,Benign,2237731,94.6017,Normal background traffic (shared negative class).
+Analysis,Analysis,1226,0.0518,
+Backdoor,Backdoor,4659,0.197,
+DoS,DoS,5980,0.2528,
+Exploits,Exploits,42748,1.8072,
+Fuzzers,Fuzzers,33816,1.4296,
+Generic,Generic,19651,0.8308,
+Reconnaissance,Reconnaissance,17074,0.7218,
+Shellcode,Shellcode,2381,0.1007,
+Worms,Worms,158,0.0067,

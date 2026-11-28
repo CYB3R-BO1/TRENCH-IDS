@@ -1,0 +1,11 @@
+class,train_flows,status
+Benign,1590548,train_supported
+Analysis,646,low_train_support
+Backdoor,3253,train_supported
+DoS,3237,train_supported
+Exploits,21414,train_supported
+Fuzzers,17597,train_supported
+Generic,9241,train_supported
+Reconnaissance,8303,train_supported
+Shellcode,1407,train_supported
+Worms,83,low_train_support

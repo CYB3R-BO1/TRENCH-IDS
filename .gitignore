@@ -7,24 +7,24 @@ __pycache__/
 # Raw NetFlow dataset bags (local data drops; not committed).
 data/
 
-# Run outputs: commit the validated baseline and the Step-1.2/1.3 evidence; ignore the rest.
-step-1/outputs/*
-!step-1/outputs/unsw_full/
-!step-1/outputs/unsw_full/**
-!step-1/outputs/ton_full/
-!step-1/outputs/ton_full/**
-!step-1/outputs/ton_global_chrono/
-!step-1/outputs/ton_global_chrono/**
-!step-1/outputs/ton_class_contiguous/
-!step-1/outputs/ton_class_contiguous/**
-!step-1/outputs/ton_class_contiguous_benignmatched/
-!step-1/outputs/ton_class_contiguous_benignmatched/**
-!step-1/outputs/ton_window_sweep/
-!step-1/outputs/ton_window_sweep/**
-!step-1/outputs/ton_uncertainty/
-!step-1/outputs/ton_uncertainty/**
-!step-1/outputs/unsw_window_sweep/
-!step-1/outputs/unsw_window_sweep/**
-!step-1/outputs/unsw_uncertainty/
-!step-1/outputs/unsw_uncertainty/**
-step-1/similarity_report.md
+# Archived run outputs: commit the validated baseline and the Step-1.2/1.3 evidence; ignore the rest.
+archive/step-1/outputs/*
+!archive/step-1/outputs/unsw_full/
+!archive/step-1/outputs/unsw_full/**
+!archive/step-1/outputs/ton_full/
+!archive/step-1/outputs/ton_full/**
+!archive/step-1/outputs/ton_global_chrono/
+!archive/step-1/outputs/ton_global_chrono/**
+!archive/step-1/outputs/ton_class_contiguous/
+!archive/step-1/outputs/ton_class_contiguous/**
+!archive/step-1/outputs/ton_class_contiguous_benignmatched/
+!archive/step-1/outputs/ton_class_contiguous_benignmatched/**
+!archive/step-1/outputs/ton_window_sweep/
+!archive/step-1/outputs/ton_window_sweep/**
+!archive/step-1/outputs/ton_uncertainty/
+!archive/step-1/outputs/ton_uncertainty/**
+!archive/step-1/outputs/unsw_window_sweep/
+!archive/step-1/outputs/unsw_window_sweep/**
+!archive/step-1/outputs/unsw_uncertainty/
+!archive/step-1/outputs/unsw_uncertainty/**
+archive/step-1/similarity_report.md

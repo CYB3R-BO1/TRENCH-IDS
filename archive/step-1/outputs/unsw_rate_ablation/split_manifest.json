@@ -1,0 +1,29 @@
+{
+  "cuts": {
+    "t70": 1424238130000,
+    "t85": 1424250495000
+  },
+  "cuts_aligned_to_window": true,
+  "window_ms": 5000,
+  "rows": {
+    "train": 1655729,
+    "val": 354848,
+    "test": 354847
+  },
+  "percent": {
+    "train": 69.997,
+    "val": 15.001,
+    "test": 15.001
+  },
+  "attack_rows": {
+    "train": 65181,
+    "val": 31403,
+    "test": 31109
+  },
+  "benign_rows": {
+    "train": 1590548,
+    "val": 323445,
+    "test": 323738
+  },
+  "sha256": "4ebb97bd74412d566137d95a6fc3ffd8f374f1cf8cfe204d007848e7a668f9b5"
+}
